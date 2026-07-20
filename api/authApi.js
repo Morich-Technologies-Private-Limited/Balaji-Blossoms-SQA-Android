@@ -1,21 +1,19 @@
-import axios from "axios";
-import API from "../constants/apiConstants";
+import { LOGIN_URL } from "../constants/apiConstants";
+import axiosClient from "./axiosClient";
+import { handleApiError } from "./errorHandler";
 
 export const login = async (userId, password) => {
   try {
-    const response = await axios.get(API.LOGIN, {
+    const response = await axiosClient.get(LOGIN_URL, {
       params: {
         userId,
         password,
       },
+      requiresAuth: false,
     });
 
     return response.data;
   } catch (error) {
-    throw (
-      error.response?.data || {
-        message: "Something went wrong",
-      }
-    );
+    return handleApiError(error);
   }
 };
