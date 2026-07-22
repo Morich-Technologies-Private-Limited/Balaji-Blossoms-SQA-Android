@@ -2,12 +2,12 @@ import { Ionicons } from "@expo/vector-icons";
 import { usePathname, useRouter } from "expo-router";
 import { Fragment, useMemo } from "react";
 import {
-    Image,
-    Pressable,
-    ScrollView,
-    Text,
-    useWindowDimensions,
-    View,
+  Image,
+  Pressable,
+  ScrollView,
+  Text,
+  useWindowDimensions,
+  View,
 } from "react-native";
 import logo from "../../assets/images/balaji_logo.png";
 import makeStyles, { COLORS } from "./SalesSidebar.styles";
@@ -40,6 +40,13 @@ export const SALES_MENU = [
     hint: "Find any invoice",
     icon: "search-outline",
     route: "/sales/invoice",
+  },
+  {
+    key: "createCustomer",
+    label: "New Customer",
+    hint: "Add a buyer once, reuse everywhere",
+    icon: "person-add-outline",
+    route: "/sales/createCustomer",
   },
 ];
 
@@ -111,22 +118,30 @@ export default function SalesSidebar({
       {floating ? (
         <Pressable
           onPress={onClose}
-          style={styles.closeBtn}
-          hitSlop={8}
+          accessibilityRole="button"
           accessibilityLabel="Close menu"
+          hitSlop={10}
+          style={({ pressed, hovered }) => [
+            styles.closeBtn,
+            (pressed || hovered) && styles.closeBtnActive,
+          ]}
         >
-          <Ionicons name="close-outline" size={20} color={COLORS.onNavy} />
+          <Ionicons name="close-outline" size={22} color={COLORS.onNavy} />
         </Pressable>
       ) : (
         <Pressable
           onPress={onToggleCollapse}
-          style={styles.edgeToggle}
-          hitSlop={10}
+          accessibilityRole="button"
           accessibilityLabel={collapsed ? "Expand menu" : "Collapse menu"}
+          hitSlop={10}
+          style={({ pressed, hovered }) => [
+            styles.edgeToggle,
+            (pressed || hovered) && styles.edgeToggleActive,
+          ]}
         >
           <Ionicons
             name={collapsed ? "chevron-forward" : "chevron-back"}
-            size={16}
+            size={18}
             color={COLORS.onNavy}
           />
         </Pressable>
@@ -199,10 +214,10 @@ export default function SalesSidebar({
           onPress={onLogout}
           accessibilityRole="button"
           accessibilityLabel="Log out"
-          style={({ pressed }) => [
+          style={({ pressed, hovered }) => [
             styles.logoutBtn,
             collapsed && styles.logoutBtnCollapsed,
-            pressed && styles.logoutBtnPressed,
+            (pressed || hovered) && styles.logoutBtnPressed,
           ]}
         >
           <Ionicons

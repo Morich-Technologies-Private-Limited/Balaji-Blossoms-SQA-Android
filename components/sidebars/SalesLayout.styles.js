@@ -8,14 +8,13 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
 
   const iconSize = isDesktop ? 22 : 20;
   const headerHeight = isLarge ? 72 : 64;
-  const contentMaxWidth = isDesktop ? 1100 : 760;
   const gutter = isDesktop ? 32 : isTablet ? 24 : 16;
 
   const styles = StyleSheet.create({
     root: {
       flex: 1,
       flexDirection: "row",
-      backgroundColor: isLarge ? COLORS.bgLarge : COLORS.bgPhone,
+      backgroundColor: "transparent",
     },
     main: {
       flex: 1,
@@ -29,7 +28,7 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
       alignItems: "center",
       paddingHorizontal: gutter,
       gap: 12,
-      backgroundColor: isLarge ? COLORS.bgLarge : COLORS.bgPhone,
+      backgroundColor: "transparent",
       borderBottomWidth: isLarge ? 0 : 1,
       borderBottomColor: COLORS.border,
     },
@@ -58,36 +57,23 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
       marginTop: 2,
     },
 
-    /* ---------- body ---------- */
+    /* ---------- body ----------
+       No card, no panel, no accent strip. Transparent all the way down so
+       screens paint straight onto the page background. */
     body: {
       flex: 1,
+      minHeight: 0,
+      width: "100%",
       paddingHorizontal: isLarge ? gutter : 0,
       paddingBottom: isLarge ? gutter : 0,
-      alignItems: isLarge ? "center" : "stretch",
+      backgroundColor: "transparent",
     },
     content: {
       flex: 1,
+      minHeight: 0,
       width: "100%",
-      maxWidth: contentMaxWidth,
-    },
-    card: {
-      flex: 1,
-      backgroundColor: COLORS.surface,
-      borderRadius: 24,
-      overflow: "hidden",
-      shadowColor: "#0F172A",
-      shadowOpacity: 0.08,
-      shadowRadius: 24,
-      shadowOffset: { width: 0, height: 10 },
-      elevation: 6,
-    },
-    cardTopStrip: {
-      height: 4,
-      backgroundColor: COLORS.orange,
-    },
-    flat: {
-      flex: 1,
-      backgroundColor: COLORS.bgPhone,
+      maxWidth: "100%",
+      backgroundColor: "transparent",
     },
 
     /* ---------- drawer ---------- */
@@ -112,7 +98,6 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
   return Object.assign(styles, {
     iconSize,
     headerHeight,
-    contentMaxWidth,
     gutter,
     isLarge,
   });

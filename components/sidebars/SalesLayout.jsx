@@ -2,40 +2,45 @@ import { Ionicons } from "@expo/vector-icons";
 import { usePathname, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    Animated,
-    BackHandler,
-    KeyboardAvoidingView,
-    Platform,
-    Pressable,
-    Text,
-    useWindowDimensions,
-    View,
+  Animated,
+  BackHandler,
+  KeyboardAvoidingView,
+  PanResponder,
+  Platform,
+  Pressable,
+  Text,
+  useWindowDimensions,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import makeStyles, { COLORS } from "./SalesLayout.styles";
-import SalesSidebar from "./SalesSidebar";
-import makeSidebarStyles from "./SalesSidebar.styles";
+import makeStyles, { COLORS } from "./SalesLayout.styles.js";
+import SalesSidebar from "./SalesSidebar.jsx";
+import makeSidebarStyles from "./SalesSidebar.styles.js";
+
+/** How far in from the left screen edge a swipe can start the open gesture. */
+const EDGE_ZONE = 28;
+/** Horizontal travel required before we claim the gesture from a ScrollView. */
+const DRAG_THRESHOLD = 8;
+/** Fling speed (px/ms) that decides direction regardless of distance. */
+const VELOCITY_THRESHOLD = 0.4;
 
 /**
  * SalesLayout — the shell for the whole /sales section.
  * Mounted once from app/sales/_layout.jsx, so sidebar state survives navigation.
  *
- * Phone   (<600)  drawer overlay, opened from the header hamburger
+ * Phone   (<600)  drawer overlay, opened from the header hamburger or an
+ *                 edge swipe; swipe left on the drawer to close
  * Tablet  (600+)  same drawer, wider
- * Desktop (1024+) docked sidebar, collapsible to an icon rail
+ * Desktop (1024+) docked sidebar, collapsible to an icon rail, no gestures
+ *
+ * Screens render straight onto the page background — no card, no panel,
+ * no accent strip. Each screen owns its own surface treatment.
  *
  * @param {string} title     header title, usually derived from SALES_MENU
  * @param {string} subtitle  muted line under the title
  * @param {node}   right     optional header-right actions
- * @param {boolean} card     white card panel on tablet/desktop (default true)
  */
-export default function SalesLayout({
-  title,
-  subtitle,
-  right,
-  card = true,
-  children,
-}) {
+export default function SalesLayout({ title, subtitle, right, children }) {
   const { width } = useWindowDimensions();
   const isTablet = width >= 600 && width < 1024;
   const isDesktop = width >= 1024;
@@ -56,9 +61,43 @@ export default function SalesLayout({
   const [open, setOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
+  const sidebarWidth = sidebarStyles.sidebarWidth;
+
+  // 0 = closed, 1 = open. Driven by both the animation and the drag.
   const anim = useRef(new Animated.Value(0)).current;
 
+  // Mirrors of state the PanResponder needs without re-creating itself.
+  const openRef = useRef(open);
+  const progressRef = useRef(0);
+
   useEffect(() => {
+    const id = anim.addListener(({ value }) => {
+      progressRef.current = value;
+    });
+    return () => anim.removeListener(id);
+  }, [anim]);
+
+  /** Single place that moves the drawer and keeps state in sync. */
+  const animateTo = useCallback(
+    (toOpen, velocity = 0) => {
+      openRef.current = toOpen;
+      Animated.spring(anim, {
+        toValue: toOpen ? 1 : 0,
+        velocity,
+        bounciness: 0,
+        speed: 14,
+        useNativeDriver: true,
+      }).start();
+      setOpen(toOpen);
+    },
+    [anim],
+  );
+
+  // Responds to `open` being changed from outside the gesture (hamburger,
+  // back button, route change). Skipped when the gesture already animated.
+  useEffect(() => {
+    if (open === openRef.current) return;
+    openRef.current = open;
     Animated.timing(anim, {
       toValue: open ? 1 : 0,
       duration: 220,
@@ -90,13 +129,68 @@ export default function SalesLayout({
     router.replace("/login");
   }, [router]);
 
+  /* ---------------- swipe gesture ---------------- */
+
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        // Never claim a plain tap — buttons and list rows must still work.
+        onStartShouldSetPanResponder: () => false,
+
+        onMoveShouldSetPanResponder: (evt, g) => {
+          if (docked) return false;
+
+          const horizontal = Math.abs(g.dx) > Math.abs(g.dy) * 1.5;
+          if (!horizontal || Math.abs(g.dx) < DRAG_THRESHOLD) return false;
+
+          // Open drawer: any leftward drag closes it.
+          if (openRef.current) return g.dx < 0;
+
+          // Closed drawer: rightward drag that began near the screen edge.
+          return g.dx > 0 && evt.nativeEvent.pageX <= EDGE_ZONE;
+        },
+
+        onPanResponderGrant: () => {
+          anim.stopAnimation();
+        },
+
+        onPanResponderMove: (_evt, g) => {
+          const base = openRef.current ? 1 : 0;
+          const next = base + g.dx / sidebarWidth;
+          anim.setValue(Math.max(0, Math.min(1, next)));
+        },
+
+        onPanResponderRelease: (_evt, g) => {
+          let shouldOpen;
+          if (g.vx > VELOCITY_THRESHOLD) shouldOpen = true;
+          else if (g.vx < -VELOCITY_THRESHOLD) shouldOpen = false;
+          else shouldOpen = progressRef.current > 0.5;
+
+          animateTo(shouldOpen, g.vx / sidebarWidth);
+        },
+
+        onPanResponderTerminate: () => animateTo(openRef.current),
+        onPanResponderTerminationRequest: () => false,
+      }),
+    [docked, sidebarWidth, anim, animateTo],
+  );
+
   const translateX = anim.interpolate({
     inputRange: [0, 1],
-    outputRange: [-sidebarStyles.sidebarWidth, 0],
+    outputRange: [-sidebarWidth, 0],
+    extrapolate: "clamp",
   });
 
+  // The drawer must accept touches while it is being dragged open, not only
+  // once `open` has flipped — otherwise a half-open drawer is dead to the touch.
+  const drawerInteractive = open || progressRef.current > 0;
+
   return (
-    <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
+    <SafeAreaView
+      style={styles.root}
+      edges={["top", "left", "right"]}
+      {...(docked ? {} : panResponder.panHandlers)}
+    >
       {docked && (
         <SalesSidebar
           collapsed={collapsed}
@@ -140,17 +234,9 @@ export default function SalesLayout({
           {right}
         </View>
 
+        {/* Children sit directly on the page — no card, no strip. */}
         <View style={styles.body}>
-          <View style={styles.content}>
-            {styles.isLarge && card ? (
-              <View style={styles.card}>
-                <View style={styles.cardTopStrip} />
-                {children}
-              </View>
-            ) : (
-              <View style={styles.flat}>{children}</View>
-            )}
-          </View>
+          <View style={styles.content}>{children}</View>
         </View>
       </KeyboardAvoidingView>
 
@@ -164,20 +250,20 @@ export default function SalesLayout({
           >
             <Pressable
               style={sidebarStyles.scrim}
-              onPress={() => setOpen(false)}
+              onPress={() => animateTo(false)}
               accessibilityRole="button"
               accessibilityLabel="Close menu"
             />
           </Animated.View>
 
           <Animated.View
-            pointerEvents={open ? "auto" : "none"}
+            pointerEvents={drawerInteractive ? "auto" : "none"}
             style={[styles.drawer, { transform: [{ translateX }] }]}
           >
             <SalesSidebar
               floating
-              onClose={() => setOpen(false)}
-              onNavigate={() => setOpen(false)}
+              onClose={() => animateTo(false)}
+              onNavigate={() => animateTo(false)}
               onLogout={handleLogout}
             />
           </Animated.View>

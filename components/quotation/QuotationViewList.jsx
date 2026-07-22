@@ -1,8 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Modal,
   Pressable,
   RefreshControl,
   Text,
@@ -17,6 +18,7 @@ import {
 } from "../../api/fetchQuotation";
 import { getCurrentUser } from "../../utility/secureStorage";
 import CreateQuotationModal from "./CreateQuotationModal";
+import Edit from "./Edit";
 import makeStyles from "./QuotationViewList.styles";
 
 const LEVELS = [
@@ -28,19 +30,43 @@ const LEVELS = [
 
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
-  DELIVERY_SHADE: { label: "Delivery shade", tint: "#0f4776" },
-  INVOICE_GENERATED: { label: "Invoiced", tint: "#7CB342" },
+  DELIVERY_SHADE: { label: "Delivery shade", tint: "#0F4776" },
+  INVOICE_GENERATED: { label: "Invoiced", tint: "#5B8E2E" },
 };
+
+/* Breakpoints are measured on the table container, not the window, so the
+   layout stays correct inside drawers, split panes and modals. */
+const BP_WIDE = 940; // every column
+const BP_MID = 780; // mobile no. moves into the panel
+const BP_COMPACT = 620; // sno moves into the panel
+// below BP_COMPACT the list renders as cards
 
 const formatDate = (value) => {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleDateString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  return `${dd}-${mm}-${date.getFullYear()}`;
+};
+
+const formatTime = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date
+    .toLocaleTimeString("en-IN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    })
+    .toUpperCase();
+};
+
+const dateValue = (item) => {
+  const raw = item?.creationDate || item?.updateDate;
+  const time = raw ? new Date(raw).getTime() : NaN;
+  return Number.isNaN(time) ? 0 : time;
 };
 
 const formatAmount = (value) => {
@@ -48,24 +74,42 @@ const formatAmount = (value) => {
   return `₹${amount.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
 };
 
+const levelOf = (item) =>
+  LEVEL_META[item.level] || { label: item.level || "—", tint: "#94A3B8" };
+
 /**
  * Quotation list.
  *
- * Both userId and unitId are read from the signed-in user in secure storage
- * (user.emailId / user.unitId) — nothing identity-related comes in as a prop.
+ * Layout contract: the table never scrolls sideways. Column widths are derived
+ * from the measured container width and always add up to it, so the Action
+ * column can never be pushed out of frame. As the container narrows, columns
+ * are removed in order of importance and their values move into the expand
+ * panel; under 620px the rows become cards.
  *
- * Props
- *  - mode      "user" (default) | "unit"  — which endpoint to read from
- *  - onSelect  (quotation) => void — fired when a card is tapped
+ * Edit opens the plant editor over the list. The saved quotation comes back
+ * from the server, so the row is refreshed in place instead of refetching.
  */
-export default function QuotationViewList({ mode = "user", onSelect }) {
+export default function QuotationViewList({
+  mode = "user",
+  title,
+  subtitle,
+  onSelect,
+  onUpdate,
+  onSend,
+}) {
   const { width } = useWindowDimensions();
+  const [avail, setAvail] = useState(0);
+
+  const space = avail || width;
+  const isCardMode = space < BP_COMPACT;
   const isTablet = width >= 600 && width < 1024;
   const isDesktop = width >= 1024;
+
   const styles = useMemo(
-    () => makeStyles({ width, isTablet, isDesktop }),
-    [width, isTablet, isDesktop],
+    () => makeStyles({ width, isTablet, isDesktop, isCardMode }),
+    [width, isTablet, isDesktop, isCardMode],
   );
+  const C = styles.colors;
 
   const [currentUser, setCurrentUser] = useState(null);
   const [userReady, setUserReady] = useState(false);
@@ -76,9 +120,15 @@ export default function QuotationViewList({ mode = "user", onSelect }) {
   const [search, setSearch] = useState("");
   const [level, setLevel] = useState("ALL");
   const [createOpen, setCreateOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [expanded, setExpanded] = useState({});
 
   const resolvedUserId = currentUser?.emailId;
   const resolvedUnitId = currentUser?.unitId;
+
+  const toggleRow = useCallback((id) => {
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -144,25 +194,30 @@ export default function QuotationViewList({ mode = "user", onSelect }) {
     load();
   }, [load]);
 
+  const numbered = useMemo(
+    () =>
+      [...quotations]
+        .sort((a, b) => dateValue(a) - dateValue(b))
+        .map((q, index) => ({ ...q, sno: index + 1 })),
+    [quotations],
+  );
+
   const visible = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return quotations
+    return numbered
       .filter((q) => (level === "ALL" ? true : q.level === level))
       .filter((q) => {
         if (!term) return true;
         return (
           String(q.quotationId).includes(term) ||
+          String(q.customerId || "").includes(term) ||
+          String(q.mobileNo || "").includes(term) ||
           (q.customerName || "").toLowerCase().includes(term) ||
           (q.assignedUserName || "").toLowerCase().includes(term) ||
           (q.assignedUserId || "").toLowerCase().includes(term)
         );
-      })
-      .sort(
-        (a, b) =>
-          new Date(b.updateDate || b.creationDate || 0) -
-          new Date(a.updateDate || a.creationDate || 0),
-      );
-  }, [quotations, search, level]);
+      });
+  }, [numbered, search, level]);
 
   const handleCreated = (created) => {
     setCreateOpen(false);
@@ -170,153 +225,380 @@ export default function QuotationViewList({ mode = "user", onSelect }) {
     else load();
   };
 
+  const handleSaved = useCallback(
+    (saved) => {
+      setEditing(null);
+      if (!saved) {
+        load();
+        return;
+      }
+      setQuotations((prev) =>
+        prev.map((q) => (q.quotationId === saved.quotationId ? saved : q)),
+      );
+      onUpdate?.(saved);
+    },
+    [load, onUpdate],
+  );
+
+  /* ── shared bits ─────────────────────────────────────────────────────── */
+
+  const levelPill = useCallback(
+    (item) => {
+      const meta = levelOf(item);
+      return (
+        <View
+          style={[
+            styles.levelPill,
+            {
+              backgroundColor: `${meta.tint}14`,
+              borderColor: `${meta.tint}33`,
+            },
+          ]}
+        >
+          <View style={[styles.levelDot, { backgroundColor: meta.tint }]} />
+          <Text
+            numberOfLines={1}
+            style={[styles.levelPillText, { color: meta.tint }]}
+          >
+            {meta.label}
+          </Text>
+        </View>
+      );
+    },
+    [styles],
+  );
+
+  const actionButtons = useCallback(
+    (item) => (
+      <View style={styles.actionCell}>
+        <Pressable
+          style={styles.actionBtn}
+          hitSlop={6}
+          onPress={() => onSelect?.(item)}
+        >
+          <Ionicons name="eye-outline" size={16} color={C.NAVY} />
+        </Pressable>
+        <Pressable
+          style={styles.actionBtn}
+          hitSlop={6}
+          onPress={() => setEditing(item)}
+        >
+          <Ionicons name="create-outline" size={16} color={C.ORANGE} />
+        </Pressable>
+        <Pressable
+          style={styles.actionBtn}
+          hitSlop={6}
+          onPress={() => onSend?.(item)}
+        >
+          <Ionicons name="send-outline" size={15} color={C.GREEN} />
+        </Pressable>
+      </View>
+    ),
+    [styles, C, onSelect, onSend],
+  );
+
+  /* ── columns: always sum to the measured width ───────────────────────── */
+  const columns = useMemo(() => {
+    if (isCardMode) return [];
+
+    const inner = space - styles.gutter * 2;
+    const showMobile = space >= BP_MID;
+    const showSno = space >= BP_COMPACT + 60;
+    const dense = space < BP_WIDE;
+
+    const defs = [
+      { key: "expand", label: "", w: dense ? 30 : 34, align: "center" },
+      showSno && {
+        key: "sno",
+        label: "Sno",
+        w: dense ? 36 : 42,
+        align: "center",
+      },
+      { key: "date", label: "Date", w: dense ? 92 : 108 },
+      { key: "customer", label: "Customer", flex: true, min: 130 },
+      showMobile && { key: "mobile", label: "Mobile no", w: 120 },
+      { key: "amount", label: "Total", w: dense ? 96 : 112, align: "right" },
+      { key: "level", label: "Level", w: dense ? 108 : 124 },
+      {
+        key: "action",
+        label: "Actions",
+        w: dense ? 112 : 124,
+        align: "center",
+      },
+    ].filter(Boolean);
+
+    const fixed = defs.reduce((sum, c) => sum + (c.w || 0), 0);
+    const flexWidth = Math.max(130, inner - fixed);
+
+    return defs.map((c) => ({ ...c, size: c.flex ? flexWidth : c.w }));
+  }, [space, isCardMode, styles]);
+
+  const cellStyle = (col) => [
+    styles.cellWrap,
+    { width: col.size },
+    col.align === "center"
+      ? styles.alignCenter
+      : col.align === "right"
+        ? styles.alignRight
+        : styles.alignLeft,
+  ];
+
+  const renderCell = (col, item) => {
+    switch (col.key) {
+      case "expand": {
+        const open = !!expanded[item.quotationId];
+        return (
+          <View style={[styles.expandBtn, open && styles.expandBtnOpen]}>
+            <Ionicons
+              name={open ? "chevron-down" : "chevron-forward"}
+              size={15}
+              color={open ? C.NAVY : C.PLACEHOLDER}
+            />
+          </View>
+        );
+      }
+      case "sno":
+        return <Text style={styles.snoText}>{item.sno}</Text>;
+      case "date":
+        return (
+          <View style={styles.stack}>
+            <Text numberOfLines={1} style={styles.cell}>
+              {formatDate(item.creationDate)}
+            </Text>
+            <Text numberOfLines={1} style={styles.cellSub}>
+              {formatTime(item.creationDate)}
+            </Text>
+          </View>
+        );
+      case "customer":
+        return (
+          <View style={styles.stack}>
+            <Text numberOfLines={1} style={styles.cellStrong}>
+              {item.customerName || "Unnamed customer"}
+            </Text>
+            <Text numberOfLines={1} style={styles.cellSub}>
+              QTN-{item.quotationId}
+            </Text>
+          </View>
+        );
+      case "mobile":
+        return (
+          <Text numberOfLines={1} style={styles.cell}>
+            {item.mobileNo || "—"}
+          </Text>
+        );
+      case "amount":
+        return (
+          <Text style={styles.amount}>{formatAmount(item.totalAmount)}</Text>
+        );
+      case "level":
+        return levelPill(item);
+      case "action":
+        return actionButtons(item);
+      default:
+        return null;
+    }
+  };
+
+  const tableHead = (
+    <View style={styles.tableHead}>
+      {columns.map((col) => (
+        <View key={col.key} style={cellStyle(col)}>
+          <Text numberOfLines={1} style={styles.headCell}>
+            {col.label}
+          </Text>
+        </View>
+      ))}
+    </View>
+  );
+
+  /* ── expand panel ────────────────────────────────────────────────────── */
+  const renderPanel = (item) => {
+    const plants = item.plantList?.length || 0;
+    const special = item.specialPlantList?.length || 0;
+    const shownKeys = columns.map((c) => c.key);
+
+    const stats = [
+      { label: "Plant count", value: String(plants) },
+      { label: "Special plants", value: String(special) },
+      { label: "Total items", value: String(plants + special), accent: true },
+      {
+        label: "Sales person",
+        text: item.assignedUserName || item.assignedUserId || "Unassigned",
+        wide: true,
+      },
+      { label: "Customer ID", text: String(item.customerId ?? "—") },
+    ];
+
+    if (!shownKeys.includes("mobile")) {
+      stats.splice(3, 0, { label: "Mobile no", text: item.mobileNo || "—" });
+    }
+    if (!shownKeys.includes("sno")) {
+      stats.unshift({ label: "Sno", value: String(item.sno) });
+    }
+
+    return (
+      <View style={styles.panel}>
+        <View style={styles.panelInner}>
+          {stats.map((stat) => (
+            <View
+              key={stat.label}
+              style={[styles.stat, stat.wide && { minWidth: 150 }]}
+            >
+              <Text style={styles.statLabel}>{stat.label}</Text>
+              {stat.value !== undefined ? (
+                <Text
+                  style={[
+                    styles.statValue,
+                    stat.accent && styles.statValueAccent,
+                  ]}
+                >
+                  {stat.value}
+                </Text>
+              ) : (
+                <Text style={styles.statText}>{stat.text}</Text>
+              )}
+            </View>
+          ))}
+        </View>
+      </View>
+    );
+  };
+
+  /* ── rows ────────────────────────────────────────────────────────────── */
+  const renderRow = ({ item }) => {
+    const open = !!expanded[item.quotationId];
+
+    return (
+      <Fragment>
+        <Pressable
+          onPress={() => toggleRow(item.quotationId)}
+          style={({ pressed }) => [
+            styles.row,
+            open && styles.rowOpen,
+            pressed && styles.rowPressed,
+          ]}
+        >
+          {columns.map((col) => (
+            <View key={col.key} style={cellStyle(col)}>
+              {renderCell(col, item)}
+            </View>
+          ))}
+        </Pressable>
+        {open ? renderPanel(item) : null}
+      </Fragment>
+    );
+  };
+
   const renderCard = ({ item }) => {
-    const meta = LEVEL_META[item.level] || {
-      label: item.level || "—",
-      tint: "#94A3B8",
-    };
+    const open = !!expanded[item.quotationId];
+    const plants =
+      (item.plantList?.length || 0) + (item.specialPlantList?.length || 0);
 
     return (
       <Pressable
+        onPress={() => toggleRow(item.quotationId)}
         style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
-        onPress={() => onSelect?.(item)}
       >
-        <View style={[styles.cardStrip, { backgroundColor: meta.tint }]} />
-
-        <View style={styles.cardHeader}>
-          <View style={styles.cardHeaderText}>
-            <Text style={styles.customerName} numberOfLines={1}>
+        <View style={styles.cardTop}>
+          <View style={{ flex: 1, gap: 2 }}>
+            <Text numberOfLines={1} style={styles.cardName}>
               {item.customerName || "Unnamed customer"}
             </Text>
-            <Text style={styles.quotationId}>QTN-{item.quotationId}</Text>
+            <Text style={styles.cellSub}>
+              QTN-{item.quotationId} · {formatDate(item.creationDate)}
+            </Text>
           </View>
+          {levelPill(item)}
+        </View>
 
-          <View
-            style={[styles.levelPill, { backgroundColor: `${meta.tint}1A` }]}
+        <View style={styles.cardMetaRow}>
+          <View style={styles.cardMeta}>
+            <Text style={styles.statLabel}>Total</Text>
+            <Text style={styles.cardAmount}>
+              {formatAmount(item.totalAmount)}
+            </Text>
+          </View>
+          <View style={styles.cardMeta}>
+            <Text style={styles.statLabel}>Mobile no</Text>
+            <Text style={styles.statText}>{item.mobileNo || "—"}</Text>
+          </View>
+          <View style={styles.cardMeta}>
+            <Text style={styles.statLabel}>Items</Text>
+            <Text style={styles.statText}>{plants}</Text>
+          </View>
+          {open ? (
+            <>
+              <View style={styles.cardMeta}>
+                <Text style={styles.statLabel}>Sales person</Text>
+                <Text style={styles.statText}>
+                  {item.assignedUserName || item.assignedUserId || "Unassigned"}
+                </Text>
+              </View>
+              <View style={styles.cardMeta}>
+                <Text style={styles.statLabel}>Customer ID</Text>
+                <Text style={styles.statText}>{item.customerId ?? "—"}</Text>
+              </View>
+            </>
+          ) : null}
+        </View>
+
+        <View style={styles.cardActions}>
+          <Pressable
+            style={styles.cardActionBtn}
+            onPress={() => onSelect?.(item)}
           >
-            <Text style={[styles.levelPillText, { color: meta.tint }]}>
-              {meta.label}
+            <Ionicons name="eye-outline" size={16} color={C.NAVY} />
+            <Text style={styles.cardActionText}>View</Text>
+          </Pressable>
+          <Pressable
+            style={styles.cardActionBtn}
+            onPress={() => setEditing(item)}
+          >
+            <Ionicons name="create-outline" size={16} color={C.ORANGE} />
+            <Text style={[styles.cardActionText, { color: C.ORANGE }]}>
+              Edit
             </Text>
-          </View>
-        </View>
-
-        <View style={styles.metaRow}>
-          <Ionicons
-            name="person-outline"
-            size={styles.iconSizeSmall}
-            color="#94A3B8"
-          />
-          <Text style={styles.metaText} numberOfLines={1}>
-            {item.assignedUserName || item.assignedUserId || "Unassigned"}
-          </Text>
-        </View>
-
-        <View style={styles.metaRow}>
-          <Ionicons
-            name="calendar-outline"
-            size={styles.iconSizeSmall}
-            color="#94A3B8"
-          />
-          <Text style={styles.metaText}>
-            Created {formatDate(item.creationDate)}
-          </Text>
-        </View>
-
-        <View style={styles.cardFooter}>
-          <View>
-            <Text style={styles.sectionLabel}>Total</Text>
-            <Text style={styles.amount}>{formatAmount(item.totalAmount)}</Text>
-          </View>
-          <View style={styles.countsRow}>
-            <Text style={styles.countText}>
-              {(item.plantList?.length || 0) +
-                (item.specialPlantList?.length || 0)}{" "}
-              items
+          </Pressable>
+          <Pressable
+            style={styles.cardActionBtn}
+            onPress={() => onSend?.(item)}
+          >
+            <Ionicons name="send-outline" size={15} color={C.GREEN} />
+            <Text style={[styles.cardActionText, { color: C.GREEN }]}>
+              Send
             </Text>
-            <Ionicons
-              name="chevron-forward"
-              size={styles.iconSize}
-              color="#94A3B8"
-            />
-          </View>
+          </Pressable>
         </View>
       </Pressable>
     );
   };
 
-  const listHeader = (
-    <View style={styles.header}>
-      <View style={styles.searchWrap}>
-        <Ionicons
-          name="search-outline"
-          size={styles.iconSize}
-          color="#94A3B8"
-        />
-        <TextInput
-          style={styles.searchInput}
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search customer, ID or sales person"
-          placeholderTextColor="#94A3B8"
-          returnKeyType="search"
-        />
-        {search.length > 0 ? (
-          <Pressable onPress={() => setSearch("")} hitSlop={8}>
-            <Ionicons
-              name="close-circle"
-              size={styles.iconSize}
-              color="#94A3B8"
-            />
-          </Pressable>
-        ) : null}
-      </View>
-
-      <View style={styles.filterRow}>
-        {LEVELS.map((option) => {
-          const active = option.key === level;
-          return (
-            <Pressable
-              key={option.key}
-              onPress={() => setLevel(option.key)}
-              style={[styles.filterPill, active && styles.filterPillActive]}
-            >
-              <Text
-                style={[
-                  styles.filterPillText,
-                  active && styles.filterPillTextActive,
-                ]}
-              >
-                {option.label}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      <Text style={styles.resultCount}>
-        {visible.length} of {quotations.length} shown
-      </Text>
-    </View>
-  );
-
   const listEmpty = () => {
     if (loading) return null;
+    const filtered = quotations.length > 0;
 
     return (
       <View style={styles.emptyWrap}>
-        <Ionicons
-          name={error ? "cloud-offline-outline" : "document-text-outline"}
-          size={40}
-          color="#94A3B8"
-        />
+        <View style={styles.emptyIcon}>
+          <Ionicons
+            name={error ? "cloud-offline-outline" : "document-text-outline"}
+            size={28}
+            color={C.PLACEHOLDER}
+          />
+        </View>
         <Text style={styles.emptyTitle}>
-          {error ? "Couldn't load quotations" : "No quotations yet"}
+          {error
+            ? "Quotations didn't load"
+            : filtered
+              ? "Nothing matches this view"
+              : "No quotations yet"}
         </Text>
         <Text style={styles.emptyText}>
           {error ||
-            (quotations.length
-              ? "Nothing matches this search or filter."
-              : "Create the first quotation to get started.")}
+            (filtered
+              ? "Clear the search box or pick another status to see more."
+              : "Create your first quotation and it will appear here.")}
         </Text>
         <Pressable
           style={styles.emptyAction}
@@ -330,42 +612,108 @@ export default function QuotationViewList({ mode = "user", onSelect }) {
     );
   };
 
+  const heading =
+    title || (mode === "unit" ? "Unit quotations" : "My quotations");
+  const sub =
+    subtitle ||
+    (mode === "unit"
+      ? "Every quotation raised by your unit"
+      : "Quotations you created");
+
   return (
     <View style={styles.screen}>
-      <View style={styles.container}>
-        {loading ? (
-          <View style={styles.loadingWrap}>
-            <ActivityIndicator size="large" color="#0f4776" />
-            <Text style={styles.loadingText}>Loading quotations…</Text>
+      <View style={styles.shell}>
+        {/* toolbar */}
+        <View style={styles.toolbar}>
+          <View style={styles.searchWrap}>
+            <Ionicons
+              name="search-outline"
+              size={styles.iconSize}
+              color={C.PLACEHOLDER}
+            />
+            <TextInput
+              style={styles.searchInput}
+              value={search}
+              onChangeText={setSearch}
+              placeholder="Search customer, quotation ID, mobile or sales person"
+              placeholderTextColor={C.PLACEHOLDER}
+              returnKeyType="search"
+            />
+            {search.length > 0 ? (
+              <Pressable onPress={() => setSearch("")} hitSlop={8}>
+                <Ionicons
+                  name="close-circle"
+                  size={styles.iconSize}
+                  color={C.PLACEHOLDER}
+                />
+              </Pressable>
+            ) : null}
           </View>
-        ) : (
-          <FlatList
-            key={styles.numColumns}
-            data={visible}
-            keyExtractor={(item) => String(item.quotationId)}
-            renderItem={renderCard}
-            numColumns={styles.numColumns}
-            columnWrapperStyle={styles.numColumns > 1 ? styles.column : null}
-            ListHeaderComponent={listHeader}
-            ListEmptyComponent={listEmpty}
-            contentContainerStyle={styles.listContent}
-            showsVerticalScrollIndicator={false}
-            refreshControl={
-              <RefreshControl
-                refreshing={refreshing}
-                onRefresh={onRefresh}
-                tintColor="#0f4776"
-                colors={["#0f4776"]}
-              />
-            }
-          />
-        )}
 
-        {!isDesktop ? (
-          <Pressable style={styles.fab} onPress={() => setCreateOpen(true)}>
-            <Ionicons name="add" size={26} color="#FFFFFF" />
-          </Pressable>
-        ) : null}
+          <View style={styles.filterRow}>
+            {LEVELS.map((option) => {
+              const active = option.key === level;
+              return (
+                <Pressable
+                  key={option.key}
+                  onPress={() => setLevel(option.key)}
+                  style={[styles.filterPill, active && styles.filterPillActive]}
+                >
+                  <Text
+                    style={[
+                      styles.filterPillText,
+                      active && styles.filterPillTextActive,
+                    ]}
+                  >
+                    {option.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+            <Text style={styles.resultCount}>
+              {visible.length} of {quotations.length} shown
+            </Text>
+          </View>
+        </View>
+
+        {/* body */}
+        <View
+          style={styles.tableWrap}
+          onLayout={(e) => {
+            const w = Math.round(e.nativeEvent.layout.width);
+            setAvail((prev) => (Math.abs(prev - w) > 2 ? w : prev));
+          }}
+        >
+          {loading ? (
+            <View style={styles.loadingWrap}>
+              <ActivityIndicator size="large" color={C.NAVY} />
+              <Text style={styles.loadingText}>Loading quotations…</Text>
+            </View>
+          ) : (
+            <>
+              {!isCardMode && visible.length > 0 ? tableHead : null}
+              <FlatList
+                data={visible}
+                keyExtractor={(item) => String(item.quotationId)}
+                renderItem={isCardMode ? renderCard : renderRow}
+                extraData={{ expanded, columns }}
+                ListEmptyComponent={listEmpty}
+                contentContainerStyle={
+                  isCardMode ? styles.cardList : styles.listContent
+                }
+                showsVerticalScrollIndicator={false}
+                refreshControl={
+                  <RefreshControl
+                    refreshing={refreshing}
+                    onRefresh={onRefresh}
+                    tintColor={C.NAVY}
+                    colors={[C.NAVY]}
+                  />
+                }
+              />
+            </>
+          )}
+        </View>
       </View>
 
       <CreateQuotationModal
@@ -376,6 +724,20 @@ export default function QuotationViewList({ mode = "user", onSelect }) {
         onClose={() => setCreateOpen(false)}
         onCreated={handleCreated}
       />
+
+      <Modal
+        visible={!!editing}
+        animationType="slide"
+        onRequestClose={() => setEditing(null)}
+      >
+        {editing ? (
+          <Edit
+            quotation={editing}
+            onClose={() => setEditing(null)}
+            onSaved={handleSaved}
+          />
+        ) : null}
+      </Modal>
     </View>
   );
 }

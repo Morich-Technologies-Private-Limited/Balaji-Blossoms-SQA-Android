@@ -12,6 +12,7 @@ export const COLORS = {
   itemActive: "rgba(255,255,255,0.16)",
   itemHover: "rgba(255,255,255,0.08)",
   divider: "rgba(255,255,255,0.10)",
+  toggleHover: "#0A3253",
 
   /* sidebar text */
   onNavy: "#FFFFFF",
@@ -50,6 +51,11 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
       height: "100%",
       backgroundColor: COLORS.navyBody,
       paddingBottom: 12,
+      // Own stacking context so the absolutely-positioned toggles are
+      // painted above the main content area instead of under it.
+      position: "relative",
+      zIndex: 20,
+      overflow: "visible",
     },
     sidebarCollapsed: {
       width: railWidth,
@@ -115,31 +121,41 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
     },
 
     /* ---------- toggles ---------- */
+    // Sits flush against the inner right edge, so the whole box is
+    // inside the sidebar and every pixel of it is clickable.
     edgeToggle: {
       position: "absolute",
       top: "50%",
-      right: -18,
-      marginTop: -28,
-      width: 22,
-      height: 56,
-      borderTopRightRadius: 10,
-      borderBottomRightRadius: 10,
+      right: 0,
+      marginTop: -32,
+      width: 32,
+      height: 64,
+      borderTopLeftRadius: 12,
+      borderBottomLeftRadius: 12,
       backgroundColor: COLORS.navyDeep,
       alignItems: "center",
       justifyContent: "center",
       zIndex: 50,
+      cursor: "pointer", // web only, ignored on native
+    },
+    edgeToggleActive: {
+      backgroundColor: COLORS.toggleHover,
     },
     closeBtn: {
       position: "absolute",
-      top: 12,
-      right: 12,
-      width: 32,
-      height: 32,
+      top: 10,
+      right: 10,
+      width: 40,
+      height: 40,
       borderRadius: 999,
       alignItems: "center",
       justifyContent: "center",
       backgroundColor: "rgba(255,255,255,0.14)",
-      zIndex: 50,
+      zIndex: 60,
+      cursor: "pointer",
+    },
+    closeBtnActive: {
+      backgroundColor: "rgba(255,255,255,0.26)",
     },
 
     /* ---------- sections ---------- */
@@ -156,6 +172,8 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
     menu: {
       paddingHorizontal: 10,
       paddingTop: 8,
+      // keeps the last row clear of the edge tab
+      paddingRight: 12,
     },
 
     /* ---------- nav item ---------- */
@@ -167,6 +185,7 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
       borderRadius: 10,
       backgroundColor: "transparent",
       overflow: "hidden",
+      cursor: "pointer",
     },
     itemCollapsed: {
       justifyContent: "center",
@@ -229,6 +248,7 @@ export default function makeStyles({ width, isTablet, isDesktop }) {
       paddingHorizontal: 14,
       borderRadius: 10,
       backgroundColor: COLORS.orange,
+      cursor: "pointer",
     },
     logoutBtnCollapsed: {
       paddingHorizontal: 0,

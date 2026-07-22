@@ -1,5 +1,6 @@
 import { CREATE_QUOTATION_URL } from "../constants/apiConstants";
 import axiosClient from "./axiosClient";
+import { handleApiError } from "./errorHandler";
 
 export const createQuotation = async (customerId, userId) => {
   try {
@@ -12,6 +13,6 @@ export const createQuotation = async (customerId, userId) => {
 
     return response.data;
   } catch (error) {
-    return toErrorResponse(error);
+    return handleApiError(error);
   }
 };
