@@ -1,23 +1,29 @@
 import { Ionicons } from "@expo/vector-icons";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-    ActivityIndicator,
-    FlatList,
-    KeyboardAvoidingView,
-    Modal,
-    Platform,
-    Pressable,
-    ScrollView,
-    Text,
-    TextInput,
-    useWindowDimensions,
-    View,
+  ActivityIndicator,
+  FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
 } from "react-native";
 
+import { downloadQuotationPdf } from "../../api/downloadQuotationPdf";
 import { fetchPackingList } from "../../api/fetchPacking";
 import { searchPlants } from "../../api/plantApi";
+import {
+  generateInvoice,
+  moveToLoadingShade,
+} from "../../api/quotationActions.js";
 import { updateQuotationPlants } from "../../api/updateQuotation";
 
+import PdfShareSheet from "../../utility/PdfShareSheet";
 import { getCurrentUser } from "../../utility/secureStorage";
 import makeStyles from "./Edit.styles";
 
@@ -33,9 +39,10 @@ const NO_PACKING = { packingId: null, packingName: "No packing", price: 0 };
 /* Breakpoints measured on the table container.
    Columns are dropped in reverse order of importance as space runs out, and
    their values move into the plant cell or the quantity hint. */
-const BP_CALC = 1120; // dedicated seedling maths column
-const BP_PRICE = 900; // unit price column
-const BP_SNO = 820; // serial number column
+const BP_CALC = 1180; // dedicated seedling maths column
+const BP_CHOICE = 1040; // "selected by" column
+const BP_PRICE = 940; // unit price column
+const BP_SNO = 860; // serial number column
 const BP_CARD = 760; // below this the grid becomes editable cards
 
 const norm = (value) =>
@@ -84,8 +91,19 @@ const packingForSize = (size, packings) =>
 const packingLabel = (packing) =>
   packing?.packingName || packing?.size || NO_PACKING.packingName;
 
-const priceOf = (source) =>
+/** What the customer is actually billed: the discount wins when there is one. */
+const priceOf = (source) => {
+  const discounted = toMoney(source?.discountedPrice);
+  if (discounted > 0) return discounted;
+  return toMoney(source?.price ?? source?.plantPrice ?? source?.unitPrice ?? 0);
+};
+
+const listPriceOf = (source) =>
   toMoney(source?.price ?? source?.plantPrice ?? source?.unitPrice ?? 0);
+
+/** Jackson serialises `isSelectedByCustomer` both ways depending on config. */
+const chosenByCustomer = (source) =>
+  source?.selectedByCustomer ?? source?.isSelectedByCustomer ?? true;
 
 const subtitleOf = (source, seedling) =>
   source?.botanicalName ||
@@ -103,6 +121,23 @@ const lineAmount = (line) => derivedQuantity(line) * toMoney(line.price);
 
 const linePacking = (line) =>
   toCount(line.quantity) * toMoney(line.packingCharge);
+
+/** True when this row's quantity no longer matches what the server holds. */
+const quantityChanged = (line) =>
+  line.isNew || toCount(line.quantity) !== toCount(line.baseQuantity);
+
+/** Everything the save call cares about, flattened so it can be compared. */
+const signatureOf = (lines) =>
+  JSON.stringify(
+    lines.map((line) => [
+      line.plantId,
+      line.unitId ?? 0,
+      toCount(line.quantity),
+      line.packingName,
+      toMoney(line.packingCharge),
+      line.selectedByCustomer ? 1 : 0,
+    ]),
+  );
 
 const lineFromReservation = (reservation, isDraft) => {
   const seedling = isSeedling(reservation.plantType);
@@ -124,12 +159,14 @@ const lineFromReservation = (reservation, isDraft) => {
     plantType: reservation.plantType,
     seedling,
     price: priceOf(reservation),
+    listPrice: listPriceOf(reservation),
     traySize: reservation.traySize ?? null,
     unitId: reservation.unitId ?? null,
     unitName: reservation.unitName ?? null,
     available: null,
     inventoryList: null,
     quantity: String(quantity ?? 0),
+    baseQuantity: String(quantity ?? 0),
     reserved: seedling
       ? reservation.trayReserved
       : reservation.quantityReserved,
@@ -137,38 +174,58 @@ const lineFromReservation = (reservation, isDraft) => {
     packingName: reservation.packingName || NO_PACKING.packingName,
     packingCharge: String(reservation.packingCharge ?? 0),
     packingManual: false,
-    selectedByCustomer: reservation.selectedByCustomer ?? true,
+    selectedByCustomer: chosenByCustomer(reservation),
+    reason: "",
+    checked: false,
     isNew: false,
   };
 };
 
 /* ── row ───────────────────────────────────────────────────────────── */
 
-const TableRow = memo(function TableRow({ item, index, columns, styles }) {
+const TableRow = memo(function TableRow({
+  item,
+  index,
+  columns,
+  styles,
+  renderExtra,
+}) {
+  const extra = renderExtra ? renderExtra(item) : null;
+
   return (
-    <View style={[styles.row, index % 2 === 1 && styles.rowAlt]}>
-      {columns.map((col) => (
-        <View
-          key={col.key}
-          style={[
-            styles.cellWrap,
-            { width: col.size },
-            col.align === "right"
-              ? styles.alignRight
-              : col.align === "center"
-                ? styles.alignCenter
-                : styles.alignLeft,
-          ]}
-        >
-          {col.render(item, index)}
-        </View>
-      ))}
+    <View style={styles.rowGroup}>
+      <View style={[styles.row, index % 2 === 1 && styles.rowAlt]}>
+        {columns.map((col) => (
+          <View
+            key={col.key}
+            style={[
+              styles.cellWrap,
+              { width: col.size },
+              col.align === "right"
+                ? styles.alignRight
+                : col.align === "center"
+                  ? styles.alignCenter
+                  : styles.alignLeft,
+            ]}
+          >
+            {col.render(item, index)}
+          </View>
+        ))}
+      </View>
+      {extra}
     </View>
   );
 });
 
 /**
  * Edit the plants on a quotation.
+ *
+ * Level drives the whole screen. In Draft the grid is editable, every quantity
+ * change asks for its own reason, and the closing action moves the quotation to
+ * the loading shade. In Delivery shade the quantities are frozen at what was
+ * reserved, each row gets a tick box so the packer can check items off, and the
+ * invoice can only be generated once every row is ticked. Once invoiced the
+ * screen is read-only.
  *
  * Layout contract: the grid never scrolls sideways. Column widths come from the
  * measured container and the plant column absorbs the remainder, so Amount and
@@ -180,7 +237,12 @@ const TableRow = memo(function TableRow({ item, index, columns, styles }) {
  * The screen holds the complete final state of the quotation and sends it in one
  * call: rows removed here are removed on the server. The request shape is
  * unchanged - for seedlings the tray count is still what goes over the wire, and
- * the derived plant count stays on the client for display and totals only.
+ * the derived plant count stays on the client for display and totals only. The
+ * only addition is a per-row `reason`.
+ *
+ * Paperwork lives here too. The action endpoints only report success, so the
+ * file is fetched by this screen through `downloadQuotationPdf` and handed to
+ * the shared sheet, which is the only thing that knows how to save or send it.
  */
 export default function Edit({ quotation, onClose, onSaved }) {
   const { width } = useWindowDimensions();
@@ -199,26 +261,37 @@ export default function Edit({ quotation, onClose, onSaved }) {
   const C = styles.colors;
 
   const isDraft = quotation?.level === "DRAFT";
+  const isDelivery = quotation?.level === "DELIVERY_SHADE";
+  const canEditLines = isDraft; // quantities, units, packing, add and remove
+  const showChecks = isDelivery; // tick boxes live in the action column
   const levelMeta = LEVEL_META[quotation?.level] || {
     label: quotation?.level || "—",
     tint: "#94A3B8",
   };
 
-  const [lines, setLines] = useState(() =>
-    (quotation?.plantList || []).map((row) =>
-      lineFromReservation(row, isDraft),
-    ),
+  const initialLines = useMemo(
+    () =>
+      (quotation?.plantList || []).map((row) =>
+        lineFromReservation(row, isDraft),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
   );
+
+  const [lines, setLines] = useState(initialLines);
+  const baselineRef = useRef(signatureOf(initialLines));
+
   const [packings, setPackings] = useState([]);
   const [term, setTerm] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [picker, setPicker] = useState(null);
-  const [reason, setReason] = useState("");
   const [reasonTouched, setReasonTouched] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(null); // "shade" | "invoice" | "pdf" | null
   const [error, setError] = useState(null);
   const [userId, setUserId] = useState(null);
+  const [pdf, setPdf] = useState(null);
 
   const searchTimer = useRef(null);
   const searchRef = useRef(null);
@@ -275,6 +348,21 @@ export default function Edit({ quotation, onClose, onSaved }) {
     setLines((prev) => prev.filter((line) => line.key !== key));
   }, []);
 
+  const toggleCheck = useCallback((key) => {
+    setLines((prev) =>
+      prev.map((line) =>
+        line.key === key ? { ...line, checked: !line.checked } : line,
+      ),
+    );
+  }, []);
+
+  const toggleCheckAll = useCallback(() => {
+    setLines((prev) => {
+      const next = !prev.every((line) => line.checked);
+      return prev.map((line) => ({ ...line, checked: next }));
+    });
+  }, []);
+
   const addPlant = useCallback(
     (plant) => {
       const inventory = plant.inventoryList || [];
@@ -313,18 +401,22 @@ export default function Edit({ quotation, onClose, onSaved }) {
             plantType: plant.plantType,
             seedling,
             price: priceOf(plant),
+            listPrice: listPriceOf(plant),
             traySize: preferred?.traySize ?? null,
             unitId: preferred?.unitId ?? null,
             unitName: preferred?.unitName ?? null,
             available: preferred?.quantity ?? null,
             inventoryList: inventory,
             quantity: "1",
+            baseQuantity: "0",
             reserved: null,
             packingId: packing?.packingId ?? null,
             packingName: packingLabel(packing),
             packingCharge: String(packing?.price ?? 0),
             packingManual: false,
             selectedByCustomer: true,
+            reason: "",
+            checked: false,
             isNew: true,
           },
         ];
@@ -419,30 +511,42 @@ export default function Edit({ quotation, onClose, onSaved }) {
     };
   }, [lines]);
 
-  /* ── save ────────────────────────────────────────────────────────── */
-  const reasonMissing = !isDraft && !reason.trim();
+  /* ── change tracking ─────────────────────────────────────────────── */
+  const dirty = useMemo(
+    () => signatureOf(lines) !== baselineRef.current,
+    [lines],
+  );
+
+  const changedLines = useMemo(() => lines.filter(quantityChanged), [lines]);
+
+  const reasonMissing = changedLines.some(
+    (line) => !String(line.reason || "").trim(),
+  );
   const incomplete = lines.some(
     (line) => !line.unitId || toCount(line.quantity) <= 0,
   );
-  const canSave = !saving && !!userId && !reasonMissing && !incomplete;
 
-  const saveHint = incomplete
-    ? "Every row needs a unit and a quantity above zero"
-    : reasonMissing
-      ? "Add a reason for this change"
-      : null;
+  const checkedCount = lines.filter((line) => line.checked).length;
+  const allChecked = lines.length > 0 && checkedCount === lines.length;
 
-  const handleSave = useCallback(async () => {
+  const working = saving || busy !== null;
+  const canSave =
+    dirty && !working && !!userId && !reasonMissing && !incomplete;
+
+  const blockingReason = !userId
+    ? "Signed-in user not found. Sign in again to save."
+    : incomplete
+      ? "Every row needs a unit and a quantity above zero."
+      : reasonMissing
+        ? "Add a reason for every quantity you changed."
+        : null;
+
+  /* ── save ────────────────────────────────────────────────────────── */
+  const persist = useCallback(async () => {
     setReasonTouched(true);
-    if (!canSave) {
-      setError(
-        incomplete
-          ? "Every row needs a unit and a quantity above zero."
-          : reasonMissing
-            ? "Add a reason for this change."
-            : "Signed-in user not found. Sign in again to save.",
-      );
-      return;
+    if (blockingReason) {
+      setError(blockingReason);
+      return null;
     }
 
     setError(null);
@@ -459,7 +563,8 @@ export default function Edit({ quotation, onClose, onSaved }) {
         packingName: line.packingName,
         packingCharge: toMoney(line.packingCharge),
         selectedByCustomer: line.selectedByCustomer,
-        reason: reason.trim() || null,
+        // Per-row reason. Only rows whose quantity moved carry one.
+        reason: quantityChanged(line) ? line.reason.trim() : null,
       })),
       specialPlantList: (quotation?.specialPlantList || []).map((special) => ({
         barcodeId: special.barcodeId,
@@ -475,45 +580,188 @@ export default function Edit({ quotation, onClose, onSaved }) {
     setSaving(false);
 
     if (response?.status === "SUCCESS") {
+      // The saved state becomes the new baseline, and the reasons are spent.
+      setLines((prev) =>
+        prev.map((line) => ({
+          ...line,
+          baseQuantity: String(toCount(line.quantity)),
+          reason: "",
+          isNew: false,
+        })),
+      );
+      baselineRef.current = signatureOf(lines);
+      setReasonTouched(false);
       onSaved?.(response.payload);
-      return;
+      return response.payload ?? true;
     }
 
     setError(response?.message || "Could not save the quotation.");
-  }, [
-    canSave,
-    incomplete,
-    reasonMissing,
-    lines,
-    reason,
-    quotation,
-    userId,
-    onSaved,
-  ]);
+    return null;
+  }, [blockingReason, lines, quotation, userId, onSaved]);
+
+  const handleSave = useCallback(() => {
+    persist();
+  }, [persist]);
+
+  /* ── paperwork ───────────────────────────────────────────────────── */
+  /* The action endpoints only report success, so the file is fetched here.
+     Every route to a PDF on this screen goes through this one call. */
+  const openPdf = useCallback(
+    async (kind, title) => {
+      const response = await downloadQuotationPdf(quotation?.quotationId);
+
+      if (response?.status !== "SUCCESS") {
+        setError(response?.message || "The PDF could not be downloaded.");
+        return false;
+      }
+
+      setPdf({ kind, title, file: response.payload });
+      return true;
+    },
+    [quotation?.quotationId],
+  );
+
+  /* Fetch the paperwork again once the quotation has left Draft. */
+  const reopenPdf = useCallback(async () => {
+    if (working) return;
+    setError(null);
+    setBusy("pdf");
+    await openPdf(
+      isDelivery ? "shade" : "invoice",
+      isDelivery ? "Loading slip" : "Invoice",
+    );
+    setBusy(null);
+  }, [working, isDelivery, openPdf]);
+
+  /* Both closing actions save first when the grid is dirty, then hand back a
+     PDF that can be downloaded or sent to the customer. */
+  const runAction = useCallback(
+    async (kind) => {
+      if (working) return;
+      setReasonTouched(true);
+
+      if (dirty) {
+        if (blockingReason) {
+          setError(blockingReason);
+          return;
+        }
+        const saved = await persist();
+        if (!saved) return;
+      }
+
+      setError(null);
+      setBusy(kind);
+
+      const response =
+        kind === "invoice"
+          ? await generateInvoice(quotation.quotationId, userId, {
+              plantList: lines.map((line) => ({
+                plantId: line.plantId,
+                unitId: line.unitId,
+                quantityDelivered: toCount(line.quantity),
+                selectedByCustomer: line.selectedByCustomer,
+              })),
+            })
+          : await moveToLoadingShade(quotation.quotationId, userId);
+
+      if (response?.status !== "SUCCESS") {
+        setBusy(null);
+        setError(
+          response?.message ||
+            (kind === "invoice"
+              ? "Could not generate the invoice."
+              : "Could not move this quotation to the loading shade."),
+        );
+        return;
+      }
+
+      // The quotation has moved on either way, so the parent is told before the
+      // download runs. A PDF that fails to arrive is a banner, not a rollback.
+      onSaved?.(response.payload || {});
+
+      await openPdf(
+        kind,
+        kind === "invoice" ? "Invoice generated" : "Moved to loading shade",
+      );
+      setBusy(null);
+    },
+    [
+      working,
+      dirty,
+      blockingReason,
+      persist,
+      openPdf,
+      quotation,
+      userId,
+      lines,
+      onSaved,
+    ],
+  );
+
+  const saveHint = blockingReason
+    ? blockingReason
+    : dirty
+      ? "Unsaved changes. They are saved automatically when you continue."
+      : showChecks && !allChecked
+        ? `Tick every row to generate the invoice. ${checkedCount} of ${lines.length} checked.`
+        : null;
 
   /* ── shared field renderers ──────────────────────────────────────── */
 
-  const unitSelect = useCallback(
-    (line) => (
+  const checkBox = useCallback(
+    (checked, onPress, label) => (
       <Pressable
         style={({ hovered, pressed }) => [
-          styles.select,
-          !line.unitId && styles.selectInvalid,
-          hovered && styles.selectHover,
-          pressed && styles.selectPressed,
+          styles.check,
+          checked && styles.checkOn,
+          hovered && styles.checkHover,
+          pressed && styles.checkPressed,
         ]}
-        onPress={() => openUnitPicker(line)}
+        hitSlop={8}
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked }}
+        accessibilityLabel={label}
+        onPress={onPress}
       >
-        <Text
-          style={line.unitName ? styles.selectText : styles.selectPlaceholder}
-          numberOfLines={1}
-        >
-          {line.unitName || "Select unit"}
-        </Text>
-        <Ionicons name="chevron-down" size={14} color={C.MUTED} />
+        {checked ? (
+          <Ionicons name="checkmark" size={14} color="#FFFFFF" />
+        ) : null}
       </Pressable>
     ),
-    [styles, C, openUnitPicker],
+    [styles],
+  );
+
+  const unitSelect = useCallback(
+    (line) => {
+      if (!canEditLines) {
+        return (
+          <Text style={styles.readValue} numberOfLines={1}>
+            {line.unitName || "—"}
+          </Text>
+        );
+      }
+
+      return (
+        <Pressable
+          style={({ hovered, pressed }) => [
+            styles.select,
+            !line.unitId && styles.selectInvalid,
+            hovered && styles.selectHover,
+            pressed && styles.selectPressed,
+          ]}
+          onPress={() => openUnitPicker(line)}
+        >
+          <Text
+            style={line.unitName ? styles.selectText : styles.selectPlaceholder}
+            numberOfLines={1}
+          >
+            {line.unitName || "Select unit"}
+          </Text>
+          <Ionicons name="chevron-down" size={14} color={C.MUTED} />
+        </Pressable>
+      );
+    },
+    [styles, C, canEditLines, openUnitPicker],
   );
 
   const qtyField = useCallback(
@@ -522,6 +770,33 @@ export default function Edit({ quotation, onClose, onSaved }) {
       const traySize = toCount(line.traySize);
       const over =
         line.available != null && !line.seedling && entered > line.available;
+
+      const derived =
+        showDerived && line.seedling && traySize > 0 ? (
+          <Text style={styles.derivedHint} numberOfLines={1}>
+            = {formatNumber(derivedQuantity(line))} plants ({traySize}/tray)
+          </Text>
+        ) : null;
+
+      /* Outside Draft the reserved figure is what happened, not a decision. */
+      if (!canEditLines) {
+        return (
+          <View style={styles.cellFill}>
+            <View style={styles.readQty}>
+              <Text style={styles.readQtyValue}>{formatNumber(entered)}</Text>
+              <Text style={styles.readQtyUnit}>
+                {line.seedling ? "trays" : "plants"}
+              </Text>
+            </View>
+            {derived}
+            {line.reserved != null ? (
+              <Text style={styles.qtyHint} numberOfLines={1}>
+                Reserved {formatNumber(line.reserved)}
+              </Text>
+            ) : null}
+          </View>
+        );
+      }
 
       return (
         <View style={styles.cellFill}>
@@ -542,17 +817,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
             </Text>
           </View>
 
-          {showDerived && line.seedling && traySize > 0 ? (
-            <Text style={styles.derivedHint} numberOfLines={1}>
-              = {formatNumber(derivedQuantity(line))} plants ({traySize}/tray)
-            </Text>
-          ) : null}
+          {derived}
 
           {over ? (
             <Text style={styles.qtyHintWarn} numberOfLines={1}>
               Only {formatNumber(line.available)} in stock
             </Text>
-          ) : !isDraft && line.reserved != null ? (
+          ) : line.reserved != null && !isDraft ? (
             <Text style={styles.qtyHint} numberOfLines={1}>
               Reserved {formatNumber(line.reserved)}
             </Text>
@@ -564,65 +835,143 @@ export default function Edit({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [styles, C, isDraft, updateLine],
+    [styles, C, isDraft, canEditLines, updateLine],
   );
 
   /* Packing type and its charge are one decision, so they share one cell. */
   const packingField = useCallback(
-    (line) => (
-      <View style={styles.packStack}>
-        <Pressable
-          style={({ hovered, pressed }) => [
-            styles.select,
-            hovered && styles.selectHover,
-            pressed && styles.selectPressed,
-          ]}
-          onPress={() => openPackingPicker(line.key)}
-        >
-          <Text style={styles.selectText} numberOfLines={1}>
-            {line.packingName}
-          </Text>
-          <Ionicons name="chevron-down" size={14} color={C.MUTED} />
-        </Pressable>
+    (line) => {
+      if (!canEditLines) {
+        return (
+          <View style={styles.packStack}>
+            <Text style={styles.readValue} numberOfLines={1}>
+              {line.packingName}
+            </Text>
+            <Text style={styles.readSub} numberOfLines={1}>
+              {formatAmount(line.packingCharge)}{" "}
+              {line.seedling ? "/ tray" : "/ plant"}
+            </Text>
+          </View>
+        );
+      }
 
-        <View
-          style={[
-            styles.chargeBox,
-            line.packingManual && styles.chargeBoxManual,
-          ]}
-        >
-          <Text
+      return (
+        <View style={styles.packStack}>
+          <Pressable
+            style={({ hovered, pressed }) => [
+              styles.select,
+              hovered && styles.selectHover,
+              pressed && styles.selectPressed,
+            ]}
+            onPress={() => openPackingPicker(line.key)}
+          >
+            <Text style={styles.selectText} numberOfLines={1}>
+              {line.packingName}
+            </Text>
+            <Ionicons name="chevron-down" size={14} color={C.MUTED} />
+          </Pressable>
+
+          <View
             style={[
-              styles.chargePrefix,
-              line.packingManual && styles.chargeManualText,
+              styles.chargeBox,
+              line.packingManual && styles.chargeBoxManual,
             ]}
           >
-            ₹
-          </Text>
-          <TextInput
-            style={[
-              styles.chargeInput,
-              line.packingManual && styles.chargeManualText,
-            ]}
-            value={line.packingCharge}
-            onChangeText={(value) =>
-              updateLine(line.key, {
-                packingCharge: value.replace(/[^0-9.]/g, ""),
-                packingManual: true,
-              })
-            }
-            keyboardType="decimal-pad"
-            selectTextOnFocus
-            placeholder="0"
-            placeholderTextColor={C.FAINT}
-          />
-          <Text style={styles.chargeSuffix}>
-            {line.seedling ? "/ tray" : "/ plant"}
-          </Text>
+            <Text
+              style={[
+                styles.chargePrefix,
+                line.packingManual && styles.chargeManualText,
+              ]}
+            >
+              ₹
+            </Text>
+            <TextInput
+              style={[
+                styles.chargeInput,
+                line.packingManual && styles.chargeManualText,
+              ]}
+              value={line.packingCharge}
+              onChangeText={(value) =>
+                updateLine(line.key, {
+                  packingCharge: value.replace(/[^0-9.]/g, ""),
+                  packingManual: true,
+                })
+              }
+              keyboardType="decimal-pad"
+              selectTextOnFocus
+              placeholder="0"
+              placeholderTextColor={C.FAINT}
+            />
+            <Text style={styles.chargeSuffix}>
+              {line.seedling ? "/ tray" : "/ plant"}
+            </Text>
+          </View>
         </View>
-      </View>
-    ),
-    [styles, C, openPackingPicker, updateLine],
+      );
+    },
+    [styles, C, canEditLines, openPackingPicker, updateLine],
+  );
+
+  /* Who put this row on the quotation: the customer asked for it, or the
+     nursery added it. Editable while the quotation is still a draft. */
+  const choiceField = useCallback(
+    (line) => {
+      const on = !!line.selectedByCustomer;
+
+      if (!canEditLines) {
+        return (
+          <View
+            style={[styles.choicePill, on ? styles.choiceOn : styles.choiceOff]}
+          >
+            <Ionicons
+              name={on ? "person" : "business"}
+              size={11}
+              color={on ? C.NAVY : C.MUTED}
+            />
+            <Text
+              style={[
+                styles.choiceText,
+                on ? styles.choiceTextOn : styles.choiceTextOff,
+              ]}
+              numberOfLines={1}
+            >
+              {on ? "Customer" : "Nursery"}
+            </Text>
+          </View>
+        );
+      }
+
+      return (
+        <Pressable
+          style={({ hovered, pressed }) => [
+            styles.choiceToggle,
+            on && styles.choiceToggleOn,
+            hovered && styles.choiceToggleHover,
+            pressed && styles.selectPressed,
+          ]}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: on }}
+          accessibilityLabel={`${line.plantName} selected by customer`}
+          onPress={() => updateLine(line.key, { selectedByCustomer: !on })}
+        >
+          <Ionicons
+            name={on ? "person" : "business"}
+            size={13}
+            color={on ? C.NAVY : C.MUTED}
+          />
+          <Text
+            style={[
+              styles.choiceText,
+              on ? styles.choiceTextOn : styles.choiceTextOff,
+            ]}
+            numberOfLines={1}
+          >
+            {on ? "Customer" : "Nursery"}
+          </Text>
+        </Pressable>
+      );
+    },
+    [styles, C, canEditLines, updateLine],
   );
 
   const deleteButton = useCallback(
@@ -644,6 +993,54 @@ export default function Edit({ quotation, onClose, onSaved }) {
     [styles, C, removeLine],
   );
 
+  const actionField = useCallback(
+    (line) => {
+      if (showChecks) {
+        return checkBox(
+          line.checked,
+          () => toggleCheck(line.key),
+          `Check ${line.plantName}`,
+        );
+      }
+      if (canEditLines) return deleteButton(line);
+      return <Text style={styles.dashText}>—</Text>;
+    },
+    [showChecks, canEditLines, checkBox, toggleCheck, deleteButton, styles],
+  );
+
+  /* A quantity that moved has to say why, right under the row it belongs to. */
+  const reasonStrip = useCallback(
+    (line) => {
+      if (!quantityChanged(line)) return null;
+      const missing = reasonTouched && !String(line.reason || "").trim();
+
+      return (
+        <View style={[styles.reasonStrip, missing && styles.reasonStripError]}>
+          <View style={styles.reasonTag}>
+            <Ionicons name="swap-horizontal" size={12} color={C.ALERT} />
+            <Text style={styles.reasonTagText} numberOfLines={1}>
+              {line.isNew
+                ? "New row"
+                : `${formatNumber(toCount(line.baseQuantity))} → ${formatNumber(
+                    toCount(line.quantity),
+                  )} ${line.seedling ? "trays" : "plants"}`}
+            </Text>
+          </View>
+
+          <TextInput
+            style={[styles.reasonInput, missing && styles.reasonInputError]}
+            value={line.reason}
+            onChangeText={(value) => updateLine(line.key, { reason: value })}
+            onBlur={() => setReasonTouched(true)}
+            placeholder={`Why did ${line.plantName} change?`}
+            placeholderTextColor={C.FAINT}
+          />
+        </View>
+      );
+    },
+    [styles, C, reasonTouched, updateLine],
+  );
+
   /* ── columns ─────────────────────────────────────────────────────── */
   const columns = useMemo(() => {
     if (isCardMode) return [];
@@ -651,6 +1048,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
     const inner = space - styles.gutter * 2 - 2; // shell border
     const dense = space < 1000;
     const showCalc = space >= BP_CALC;
+    const showChoice = space >= BP_CHOICE;
     const showPrice = space >= BP_PRICE;
     const showSno = space >= BP_SNO;
 
@@ -661,8 +1059,9 @@ export default function Edit({ quotation, onClose, onSaved }) {
       qty: dense ? 138 : 156,
       calc: 172,
       packing: dense ? 150 : 168,
+      choice: 116,
       amount: dense ? 104 : 118,
-      action: 52,
+      action: 56,
     };
 
     const defs = [
@@ -701,6 +1100,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   </Text>
                 </View>
               ) : null}
+              {!showChoice ? (
+                <View style={styles.metaTag}>
+                  <Text style={styles.metaTagText}>
+                    {line.selectedByCustomer ? "Customer" : "Nursery"}
+                  </Text>
+                </View>
+              ) : null}
             </View>
           </View>
         ),
@@ -712,7 +1118,14 @@ export default function Edit({ quotation, onClose, onSaved }) {
         size: w.price,
         align: "right",
         render: (line) => (
-          <Text style={styles.priceText}>{formatAmount(line.price)}</Text>
+          <View style={styles.alignRight}>
+            <Text style={styles.priceText}>{formatAmount(line.price)}</Text>
+            {line.listPrice > line.price ? (
+              <Text style={styles.priceStrike}>
+                {formatAmount(line.listPrice)}
+              </Text>
+            ) : null}
+          </View>
         ),
       },
       {
@@ -774,6 +1187,14 @@ export default function Edit({ quotation, onClose, onSaved }) {
         align: "center",
         render: packingField,
       },
+      showChoice && {
+        key: "choice",
+        label: "Selected by",
+        sublabel: "customer or us",
+        size: w.choice,
+        align: "center",
+        render: choiceField,
+      },
       {
         key: "amount",
         label: "Amount",
@@ -787,10 +1208,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
       },
       {
         key: "action",
-        label: "",
+        label: showChecks ? "Check" : "",
         size: w.action,
         align: "center",
-        render: deleteButton,
+        renderHead: showChecks
+          ? () => checkBox(allChecked, toggleCheckAll, "Check every row")
+          : null,
+        render: actionField,
       },
     ].filter(Boolean);
 
@@ -806,23 +1230,34 @@ export default function Edit({ quotation, onClose, onSaved }) {
     isCardMode,
     styles,
     isDraft,
+    showChecks,
+    allChecked,
+    toggleCheckAll,
+    checkBox,
     unitSelect,
     qtyField,
     packingField,
-    deleteButton,
+    choiceField,
+    actionField,
   ]);
 
   const renderRow = useCallback(
     ({ item, index }) => (
-      <TableRow item={item} index={index} columns={columns} styles={styles} />
+      <TableRow
+        item={item}
+        index={index}
+        columns={columns}
+        styles={styles}
+        renderExtra={reasonStrip}
+      />
     ),
-    [columns, styles],
+    [columns, styles, reasonStrip],
   );
 
   /* ── card row (narrow screens) ───────────────────────────────────── */
   const renderCard = useCallback(
     ({ item, index }) => (
-      <View style={styles.lineCard}>
+      <View style={[styles.lineCard, item.checked && styles.lineCardChecked]}>
         <View style={styles.lineCardTop}>
           <View style={styles.lineIndex}>
             <Text style={styles.lineIndexText}>{index + 1}</Text>
@@ -849,7 +1284,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
             </View>
           </View>
 
-          {deleteButton(item)}
+          {actionField(item)}
         </View>
 
         <View style={styles.fieldGrid}>
@@ -867,7 +1302,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
             <Text style={styles.fieldLabel}>Packing</Text>
             {packingField(item)}
           </View>
+          <View style={styles.field}>
+            <Text style={styles.fieldLabel}>Selected by</Text>
+            {choiceField(item)}
+          </View>
         </View>
+
+        {reasonStrip(item)}
 
         <View style={styles.lineFooter}>
           <Text style={styles.lineTotalLabel}>Line amount</Text>
@@ -875,7 +1316,16 @@ export default function Edit({ quotation, onClose, onSaved }) {
         </View>
       </View>
     ),
-    [styles, isDraft, unitSelect, qtyField, packingField, deleteButton],
+    [
+      styles,
+      isDraft,
+      unitSelect,
+      qtyField,
+      packingField,
+      choiceField,
+      actionField,
+      reasonStrip,
+    ],
   );
 
   const keyExtractor = useCallback((item) => item.key, []);
@@ -997,6 +1447,10 @@ export default function Edit({ quotation, onClose, onSaved }) {
       quotation?.createdDate,
   );
 
+  const quotationLine = `QTN-${quotation?.quotationId}${
+    quotation?.customerName ? ` · ${quotation.customerName}` : ""
+  }`;
+
   const tableHead = (
     <View style={styles.tableHead}>
       {columns.map((col) => (
@@ -1012,14 +1466,20 @@ export default function Edit({ quotation, onClose, onSaved }) {
                 : styles.alignLeft,
           ]}
         >
-          <Text style={styles.headCell} numberOfLines={1}>
-            {col.label}
-          </Text>
-          {col.sublabel ? (
-            <Text style={styles.headCellSub} numberOfLines={1}>
-              {col.sublabel}
-            </Text>
-          ) : null}
+          {col.renderHead ? (
+            col.renderHead()
+          ) : (
+            <>
+              <Text style={styles.headCell} numberOfLines={1}>
+                {col.label}
+              </Text>
+              {col.sublabel ? (
+                <Text style={styles.headCellSub} numberOfLines={1}>
+                  {col.sublabel}
+                </Text>
+              ) : null}
+            </>
+          )}
         </View>
       ))}
     </View>
@@ -1049,15 +1509,21 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
           <View style={styles.headerTitles}>
             <Text style={styles.title} numberOfLines={1}>
-              Edit quotation
+              {canEditLines ? "Edit quotation" : "Check quotation"}
             </Text>
             <Text style={styles.subtitle} numberOfLines={1}>
-              QTN-{quotation?.quotationId} ·{" "}
-              {quotation?.customerName || "Unnamed customer"}
+              {quotationLine}
             </Text>
           </View>
 
           <View style={styles.headerMeta}>
+            {dirty ? (
+              <View style={styles.dirtyPill}>
+                <View style={styles.dirtyDot} />
+                <Text style={styles.dirtyText}>UNSAVED</Text>
+              </View>
+            ) : null}
+
             <View
               style={[
                 styles.levelPill,
@@ -1085,6 +1551,33 @@ export default function Edit({ quotation, onClose, onSaved }) {
               </>
             ) : null}
 
+            {/* The paperwork already exists once the quotation leaves Draft,
+                so it can be fetched again at any time. */}
+            {!isDraft ? (
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.iconBtn,
+                  hovered && styles.iconBtnHover,
+                  pressed && styles.iconBtnPressed,
+                ]}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Open the quotation PDF"
+                disabled={working}
+                onPress={reopenPdf}
+              >
+                {busy === "pdf" ? (
+                  <ActivityIndicator color={C.NAVY} />
+                ) : (
+                  <Ionicons
+                    name="document-text-outline"
+                    size={19}
+                    color={C.NAVY}
+                  />
+                )}
+              </Pressable>
+            ) : null}
+
             <Pressable
               style={({ hovered, pressed }) => [
                 styles.iconBtn,
@@ -1101,130 +1594,159 @@ export default function Edit({ quotation, onClose, onSaved }) {
           </View>
         </View>
 
-        {/* ── search + add ── */}
-        <View style={styles.toolbar}>
-          <View style={styles.searchAnchor}>
-            <View style={styles.searchWrap}>
-              <Ionicons name="search" size={17} color={C.FAINT} />
-              <TextInput
-                ref={searchRef}
-                style={styles.searchInput}
-                value={term}
-                onChangeText={setTerm}
-                placeholder="Search a plant by name, size or variety"
-                placeholderTextColor={C.FAINT}
-                autoCorrect={false}
-                returnKeyType="search"
-              />
-              {searching ? <ActivityIndicator color={C.NAVY} /> : null}
-              {term.length > 0 && !searching ? (
-                <Pressable onPress={() => setTerm("")} hitSlop={8}>
-                  <Ionicons name="close-circle" size={17} color={C.FAINT} />
-                </Pressable>
+        {/* ── search + add (draft only) ── */}
+        {canEditLines ? (
+          <View style={styles.toolbar}>
+            <View style={styles.searchAnchor}>
+              <View style={styles.searchWrap}>
+                <Ionicons name="search" size={17} color={C.FAINT} />
+                <TextInput
+                  ref={searchRef}
+                  style={styles.searchInput}
+                  value={term}
+                  onChangeText={setTerm}
+                  placeholder="Search a plant by name, size or variety"
+                  placeholderTextColor={C.FAINT}
+                  autoCorrect={false}
+                  returnKeyType="search"
+                />
+                {searching ? <ActivityIndicator color={C.NAVY} /> : null}
+                {term.length > 0 && !searching ? (
+                  <Pressable onPress={() => setTerm("")} hitSlop={8}>
+                    <Ionicons name="close-circle" size={17} color={C.FAINT} />
+                  </Pressable>
+                ) : null}
+              </View>
+
+              {showResults ? (
+                <View style={styles.results}>
+                  <ScrollView keyboardShouldPersistTaps="handled">
+                    {searching && results.length === 0 ? (
+                      <View style={styles.resultLoading}>
+                        <ActivityIndicator color={C.NAVY} />
+                        <Text style={styles.resultLoadingText}>
+                          Searching the catalogue…
+                        </Text>
+                      </View>
+                    ) : null}
+
+                    {!searching && results.length === 0 ? (
+                      <Text style={styles.resultEmpty}>
+                        No plants match “{term.trim()}”. Try a shorter name.
+                      </Text>
+                    ) : null}
+
+                    {results.map((plant) => {
+                      const inventory = plant.inventoryList || [];
+                      const stock = inventory.reduce(
+                        (sum, row) => sum + (row.quantity || 0),
+                        0,
+                      );
+                      const availableUnits = inventory.filter(
+                        (row) => (row.quantity || 0) > 0,
+                      ).length;
+
+                      return (
+                        <Pressable
+                          key={plant.plantId}
+                          style={({ pressed, hovered }) => [
+                            styles.resultCard,
+                            hovered && styles.resultCardHover,
+                            pressed && styles.resultCardPressed,
+                          ]}
+                          onPress={() => addPlant(plant)}
+                        >
+                          <View style={styles.resultIcon}>
+                            <Ionicons
+                              name="leaf-outline"
+                              size={17}
+                              color={C.NAVY}
+                            />
+                          </View>
+
+                          <View style={styles.fill}>
+                            <Text style={styles.resultName} numberOfLines={1}>
+                              {plant.plantName}
+                            </Text>
+
+                            <View style={styles.chipRow}>
+                              <View style={styles.chip}>
+                                <Text style={styles.chipText}>
+                                  {plant.size || "No size"}
+                                </Text>
+                              </View>
+                              <View style={styles.chip}>
+                                <Text style={styles.chipText}>
+                                  {formatNumber(stock)} in stock
+                                </Text>
+                              </View>
+                              <View style={styles.chip}>
+                                <Text style={styles.chipText}>
+                                  {availableUnits} unit
+                                  {availableUnits === 1 ? "" : "s"}
+                                </Text>
+                              </View>
+                            </View>
+                          </View>
+
+                          <View style={styles.resultPriceWrap}>
+                            <Text style={styles.resultPrice}>
+                              {formatAmount(priceOf(plant))}
+                            </Text>
+                            <Text style={styles.resultPriceLabel}>
+                              per plant
+                            </Text>
+                          </View>
+
+                          <Ionicons
+                            name="add-circle"
+                            size={22}
+                            color={C.GREEN}
+                          />
+                        </Pressable>
+                      );
+                    })}
+                  </ScrollView>
+                </View>
               ) : null}
             </View>
 
-            {showResults ? (
-              <View style={styles.results}>
-                <ScrollView keyboardShouldPersistTaps="handled">
-                  {searching && results.length === 0 ? (
-                    <View style={styles.resultLoading}>
-                      <ActivityIndicator color={C.NAVY} />
-                      <Text style={styles.resultLoadingText}>
-                        Searching the catalogue…
-                      </Text>
-                    </View>
-                  ) : null}
-
-                  {!searching && results.length === 0 ? (
-                    <Text style={styles.resultEmpty}>
-                      No plants match “{term.trim()}”. Try a shorter name.
-                    </Text>
-                  ) : null}
-
-                  {results.map((plant) => {
-                    const inventory = plant.inventoryList || [];
-                    const stock = inventory.reduce(
-                      (sum, row) => sum + (row.quantity || 0),
-                      0,
-                    );
-                    const availableUnits = inventory.filter(
-                      (row) => (row.quantity || 0) > 0,
-                    ).length;
-
-                    return (
-                      <Pressable
-                        key={plant.plantId}
-                        style={({ pressed, hovered }) => [
-                          styles.resultCard,
-                          hovered && styles.resultCardHover,
-                          pressed && styles.resultCardPressed,
-                        ]}
-                        onPress={() => addPlant(plant)}
-                      >
-                        <View style={styles.resultIcon}>
-                          <Ionicons
-                            name="leaf-outline"
-                            size={17}
-                            color={C.NAVY}
-                          />
-                        </View>
-
-                        <View style={styles.fill}>
-                          <Text style={styles.resultName} numberOfLines={1}>
-                            {plant.plantName}
-                          </Text>
-
-                          <View style={styles.chipRow}>
-                            <View style={styles.chip}>
-                              <Text style={styles.chipText}>
-                                {plant.size || "No size"}
-                              </Text>
-                            </View>
-                            <View style={styles.chip}>
-                              <Text style={styles.chipText}>
-                                {formatNumber(stock)} in stock
-                              </Text>
-                            </View>
-                            <View style={styles.chip}>
-                              <Text style={styles.chipText}>
-                                {availableUnits} unit
-                                {availableUnits === 1 ? "" : "s"}
-                              </Text>
-                            </View>
-                          </View>
-                        </View>
-
-                        <View style={styles.resultPriceWrap}>
-                          <Text style={styles.resultPrice}>
-                            {formatAmount(priceOf(plant))}
-                          </Text>
-                          <Text style={styles.resultPriceLabel}>per plant</Text>
-                        </View>
-
-                        <Ionicons name="add-circle" size={22} color={C.GREEN} />
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              </View>
-            ) : null}
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.addButton,
+                hovered && styles.addButtonHover,
+                pressed && styles.addButtonPressed,
+              ]}
+              onPress={focusSearch}
+            >
+              <Ionicons name="add" size={19} color="#FFFFFF" />
+              {space >= 460 ? (
+                <Text style={styles.addButtonText}>ADD PLANT</Text>
+              ) : null}
+            </Pressable>
           </View>
+        ) : null}
 
-          <Pressable
-            style={({ hovered, pressed }) => [
-              styles.addButton,
-              hovered && styles.addButtonHover,
-              pressed && styles.addButtonPressed,
-            ]}
-            onPress={focusSearch}
-          >
-            <Ionicons name="add" size={19} color="#FFFFFF" />
-            {space >= 460 ? (
-              <Text style={styles.addButtonText}>ADD PLANT</Text>
-            ) : null}
-          </Pressable>
-        </View>
+        {/* ── check progress (delivery shade) ── */}
+        {showChecks && lines.length > 0 ? (
+          <View style={styles.checkStrip}>
+            <Ionicons
+              name={allChecked ? "checkmark-circle" : "ellipse-outline"}
+              size={18}
+              color={allChecked ? C.GREEN : C.MUTED}
+            />
+            <Text style={styles.checkStripText}>
+              {allChecked
+                ? "Every row checked. The invoice is ready."
+                : `${checkedCount} of ${lines.length} rows checked`}
+            </Text>
+            <Pressable onPress={toggleCheckAll} hitSlop={8}>
+              <Text style={styles.checkStripLink}>
+                {allChecked ? "Clear all" : "Check all"}
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
 
         {/* ── grid ── */}
         <View style={styles.tableWrap} onLayout={onTableLayout}>
@@ -1254,32 +1776,15 @@ export default function Edit({ quotation, onClose, onSaved }) {
                     No plants on this quotation
                   </Text>
                   <Text style={styles.emptyText}>
-                    Search above to add the first one.
+                    {canEditLines
+                      ? "Search above to add the first one."
+                      : "Nothing was reserved against this quotation."}
                   </Text>
                 </View>
               }
             />
           </View>
         </View>
-
-        {/* ── reason ── */}
-        {!isDraft ? (
-          <View style={styles.reasonWrap}>
-            <Text style={styles.sectionLabel}>Reason for change</Text>
-            <TextInput
-              style={[
-                styles.reasonInput,
-                reasonTouched && reasonMissing && styles.reasonInputError,
-              ]}
-              value={reason}
-              onChangeText={setReason}
-              onBlur={() => setReasonTouched(true)}
-              placeholder="Customer increased order"
-              placeholderTextColor={C.FAINT}
-              multiline
-            />
-          </View>
-        ) : null}
 
         {error ? (
           <View style={styles.banner}>
@@ -1288,7 +1793,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
           </View>
         ) : null}
 
-        {/* ── totals + save ── */}
+        {/* ── totals + actions ── */}
         <View style={styles.footerDock}>
           <View style={styles.footerRow}>
             <View style={styles.metricStrip}>
@@ -1326,25 +1831,88 @@ export default function Edit({ quotation, onClose, onSaved }) {
               </View>
             </View>
 
-            <Pressable
-              style={({ hovered, pressed }) => [
-                styles.saveButton,
-                hovered && canSave && styles.saveButtonHover,
-                pressed && canSave && styles.saveButtonPressed,
-                !canSave && styles.saveButtonDisabled,
-              ]}
-              onPress={handleSave}
-              disabled={saving}
-            >
-              {saving ? (
-                <ActivityIndicator color="#FFFFFF" />
-              ) : (
-                <Ionicons name="save-outline" size={19} color="#FFFFFF" />
+            <View style={styles.actionRow}>
+              {/* Save stays available wherever the grid can change. */}
+              {(canEditLines || dirty) && (
+                <Pressable
+                  style={({ hovered, pressed }) => [
+                    styles.ghostButton,
+                    hovered && canSave && styles.ghostButtonHover,
+                    pressed && canSave && styles.ghostButtonHover,
+                    !canSave && styles.ghostButtonDisabled,
+                  ]}
+                  onPress={handleSave}
+                  disabled={!canSave}
+                >
+                  {saving ? (
+                    <ActivityIndicator color={C.NAVY} />
+                  ) : (
+                    <Ionicons
+                      name="save-outline"
+                      size={18}
+                      color={canSave ? C.NAVY : "#9CA9B8"}
+                    />
+                  )}
+                  <Text
+                    style={[
+                      styles.ghostTitle,
+                      !canSave && styles.ghostTitleDisabled,
+                    ]}
+                  >
+                    {saving ? "SAVING…" : "SAVE CHANGES"}
+                  </Text>
+                </Pressable>
               )}
-              <Text style={styles.saveTitle}>
-                {saving ? "SAVING…" : "SAVE CHANGES"}
-              </Text>
-            </Pressable>
+
+              {isDraft ? (
+                <Pressable
+                  style={({ hovered, pressed }) => [
+                    styles.primaryButton,
+                    (hovered || pressed) && styles.primaryButtonHover,
+                    working && styles.primaryButtonDisabled,
+                  ]}
+                  onPress={() => runAction("shade")}
+                  disabled={working}
+                >
+                  {busy === "shade" ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Ionicons name="arrow-forward" size={19} color="#FFFFFF" />
+                  )}
+                  <Text style={styles.primaryTitle}>
+                    {busy === "shade" ? "MOVING…" : "MOVE TO LOADING SHADE"}
+                  </Text>
+                </Pressable>
+              ) : null}
+
+              {showChecks ? (
+                <Pressable
+                  style={({ hovered, pressed }) => [
+                    styles.primaryButton,
+                    styles.invoiceButton,
+                    (hovered || pressed) &&
+                      allChecked &&
+                      styles.invoiceButtonHover,
+                    (!allChecked || working) && styles.primaryButtonDisabled,
+                  ]}
+                  onPress={() => runAction("invoice")}
+                  disabled={!allChecked || working}
+                >
+                  {busy === "invoice" ? (
+                    <ActivityIndicator color="#FFFFFF" />
+                  ) : (
+                    <Ionicons
+                      name="receipt-outline"
+                      size={19}
+                      color="#FFFFFF"
+                    />
+                  )}
+                  <Text style={styles.primaryTitle}>
+                    {busy === "invoice" ? "GENERATING…" : "GENERATE INVOICE"}
+                  </Text>
+                </Pressable>
+              ) : null}
+            </View>
           </View>
 
           {saveHint ? <Text style={styles.saveHint}>{saveHint}</Text> : null}
@@ -1352,6 +1920,17 @@ export default function Edit({ quotation, onClose, onSaved }) {
       </View>
 
       {renderPicker()}
+
+      <PdfShareSheet
+        file={pdf?.file}
+        title={pdf?.title}
+        subtitle={quotationLine}
+        message={`${
+          pdf?.kind === "invoice" ? "Invoice" : "Loading slip"
+        } for ${quotationLine}`}
+        onClose={() => setPdf(null)}
+        onError={setError}
+      />
     </KeyboardAvoidingView>
   );
 }
