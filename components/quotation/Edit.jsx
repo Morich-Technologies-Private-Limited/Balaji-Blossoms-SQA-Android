@@ -2,7 +2,6 @@ import { Ionicons } from "@expo/vector-icons";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  FlatList,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -214,13 +213,21 @@ const signatureOf = (lines) =>
     ]),
   );
 
-/** The whole saveable document: the lines, the special plants, plus the two
+/** The whole saveable document: the lines, the special plants, plus the
     quotation-level money fields. Used for change tracking so a discount, a
-    transport edit, or a scanned special plant alone still counts as dirty. */
-const stateSignatureOf = (lines, discount, remark, transport, specials) =>
+    transport edit, an advance payment, or a scanned special plant alone still
+    counts as dirty. */
+const stateSignatureOf = (
+  lines,
+  discount,
+  remark,
+  transport,
+  advance,
+  specials,
+) =>
   `${signatureOf(lines)}|${toMoney(discount)}|${String(
     remark ?? "",
-  ).trim()}|${toMoney(transport)}|${(specials || [])
+  ).trim()}|${toMoney(transport)}|${toMoney(advance)}|${(specials || [])
     .map((special) => special.barcodeId)
     .sort()
     .join(",")}`;
@@ -298,7 +305,7 @@ const auditFromRecord = (record, index) => ({
 /* ── row ───────────────────────────────────────────────────────────── */
 
 const TableRow = memo(function TableRow({ item, index, columns, styles }) {
-  const dirty = lineChanged(item);
+  const dirty = !item.isSpecial && lineChanged(item);
 
   return (
     <View style={styles.rowGroup}>
@@ -389,6 +396,96 @@ function TransportModal({ styles, initialTransport, onApply, onClose }) {
                 (hovered || pressed) && styles.primaryButtonHover,
               ]}
               onPress={() => onApply(value > 0 ? String(value) : "")}
+            >
+              <Text style={styles.modalApplyText}>APPLY</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+/* ── advance payment modal ───────────────────────────────────────────
+   One field: an advance already collected from the customer. It reduces the
+   remaining payable, but never the grand total itself. */
+function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
+  const C = styles.colors;
+  const [advance, setAdvance] = useState(initialAdvance);
+
+  const value = toMoney(advance);
+  const overTotal = value > grand;
+  const remaining = Math.max(0, grand - value);
+
+  return (
+    <Modal transparent animationType="fade" visible onRequestClose={onClose}>
+      <Pressable style={styles.sheetBackdrop} onPress={onClose}>
+        <Pressable style={styles.sheet} onPress={() => {}}>
+          <View style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle}>Advance payment</Text>
+            <Text style={styles.sheetSubtitle}>
+              Amount already collected from the customer
+            </Text>
+          </View>
+
+          <View style={styles.adjustBody}>
+            <View style={styles.adjustField}>
+              <View style={styles.moneyHead}>
+                <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
+                <Text style={styles.moneyLabel}>Advance amount</Text>
+              </View>
+              <View
+                style={[styles.chargeBoxLg, overTotal && styles.qtyBoxWarn]}
+              >
+                <Text style={styles.chargePrefixLg}>₹</Text>
+                <TextInput
+                  style={styles.chargeInputLg}
+                  value={advance}
+                  onChangeText={(v) => setAdvance(v.replace(/[^0-9.]/g, ""))}
+                  keyboardType="decimal-pad"
+                  selectTextOnFocus
+                  autoFocus
+                  placeholder="0"
+                  placeholderTextColor={C.FAINT}
+                />
+                <Text style={styles.chargeSuffixLg}>received</Text>
+              </View>
+
+              {overTotal ? (
+                <Text style={styles.adjustError}>
+                  The advance is more than the grand total (
+                  {formatAmount(grand)}).
+                </Text>
+              ) : (
+                <View style={styles.moneyReadItem}>
+                  <Ionicons name="cash-outline" size={15} color={C.GREEN} />
+                  <Text style={styles.moneyReadText}>
+                    Remaining {formatAmount(remaining)}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </View>
+
+          <View style={styles.modalActions}>
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.modalCancel,
+                (hovered || pressed) && styles.ghostButtonHover,
+              ]}
+              onPress={onClose}
+            >
+              <Text style={styles.modalCancelText}>CANCEL</Text>
+            </Pressable>
+
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.modalApply,
+                (hovered || pressed) && !overTotal && styles.primaryButtonHover,
+                overTotal && styles.primaryButtonDisabled,
+              ]}
+              onPress={() => onApply(value > 0 ? String(value) : "")}
+              disabled={overTotal}
             >
               <Text style={styles.modalApplyText}>APPLY</Text>
             </Pressable>
@@ -638,30 +735,119 @@ function SpecialPlantModal({ styles, onAdd, onClose }) {
 
 /* ── reason modal ────────────────────────────────────────────────────
    The single place a reason is ever collected. It is a gate in front of an
-   action, not a field on a row: it summarises what is about to be recorded,
-   takes one reason, and hands it back so the caller can run the action.
+   action, not a field on a row: it summarises what is about to be recorded
+   and hands the reasons back so the caller can run the action.
 
-   `request` is { title, summary, changes[], confirmLabel, confirmTone }.
+   Each changed plant gets its *own* reason field — a shared box would force
+   one explanation onto every plant, which is rarely true. Quotation-level
+   adjustments (transport, discount, advance) are not tied to a plant, so
+   they share a single "other changes" field.
+
+   `request` is { summary, lineGroups[], otherChanges[], confirmLabel,
+   confirmTone }. Each lineGroup is { key, title, subtitle?, changes[] }.
    Each change is { icon, tone, title, detail?, from?, to? }. */
-function ReasonModal({ styles, request, busy, onSubmit, onClose }) {
+function ReasonModal({ styles, request, busy, error, onSubmit, onClose }) {
   const C = styles.colors;
-  const [reason, setReason] = useState("");
+  const [reasons, setReasons] = useState({});
   const [touched, setTouched] = useState(false);
-  const [focused, setFocused] = useState(false);
 
-  const trimmed = reason.trim();
-  const missing = trimmed.length === 0;
-  const tooShort = !missing && trimmed.length < 3;
-  const invalid = missing || tooShort;
+  const lineGroups = request?.lineGroups || [];
+  const otherChanges = request?.otherChanges || [];
+  const hasOther = otherChanges.length > 0;
+  const groups = [
+    ...lineGroups.map((group) => ({ ...group, isOther: false })),
+    ...(hasOther
+      ? [
+          {
+            key: "other",
+            title: "Other adjustments",
+            changes: otherChanges,
+            isOther: true,
+          },
+        ]
+      : []),
+  ];
+
+  const reasonOf = (key) => String(reasons[key] || "");
+  const groupInvalid = (key) => {
+    const trimmed = reasonOf(key).trim();
+    return trimmed.length === 0 || trimmed.length < 3;
+  };
+  const invalid =
+    groups.length === 0 || groups.some((g) => groupInvalid(g.key));
+
+  const setReasonFor = (key, value) =>
+    setReasons((prev) => ({ ...prev, [key]: value }));
+
+  const applyPresetEverywhere = (preset) => {
+    setReasons((prev) => {
+      const next = { ...prev };
+      groups.forEach((g) => {
+        if (!String(next[g.key] || "").trim()) next[g.key] = preset;
+      });
+      return next;
+    });
+    setTouched(true);
+  };
 
   const submit = () => {
     setTouched(true);
     if (invalid || busy) return;
-    onSubmit(trimmed);
+    const trimmedReasons = {};
+    groups.forEach((g) => {
+      trimmedReasons[g.key] = reasonOf(g.key).trim();
+    });
+    onSubmit(trimmedReasons);
   };
 
-  const changes = request?.changes || [];
   const destructive = request?.confirmTone === "danger";
+  const totalGroups = groups.length;
+
+  const renderChangeRows = (changes) =>
+    changes.map((change, index) => (
+      <View
+        key={`${change.title}-${index}`}
+        style={[
+          styles.changeRow,
+          index === changes.length - 1 && styles.changeRowLast,
+        ]}
+      >
+        <View
+          style={[
+            styles.changeIcon,
+            change.tone === "add" && styles.changeIconAdd,
+            change.tone === "remove" && styles.changeIconRemove,
+            change.tone === "edit" && styles.changeIconEdit,
+          ]}
+        >
+          <Ionicons
+            name={change.icon || "ellipse-outline"}
+            size={13}
+            color={
+              change.tone === "add"
+                ? C.GREEN_DEEP
+                : change.tone === "remove"
+                  ? C.RED
+                  : C.ALERT
+            }
+          />
+        </View>
+
+        <View style={styles.changeBody}>
+          <Text style={styles.changeTitle}>{change.title}</Text>
+          {change.detail ? (
+            <Text style={styles.changeDetail}>{change.detail}</Text>
+          ) : null}
+          {change.from != null && change.to != null ? (
+            <View style={styles.changeFromTo}>
+              <Text style={styles.changeFrom}>{change.from}</Text>
+              <Ionicons name="arrow-forward" size={12} color={C.MUTED} />
+              <Text style={styles.changeTo}>{change.to}</Text>
+            </View>
+          ) : null}
+        </View>
+      </View>
+    ));
 
   return (
     <Modal
@@ -691,6 +877,11 @@ function ReasonModal({ styles, request, busy, onSubmit, onClose }) {
                   "This quotation has left draft, so the change has to be recorded."}
               </Text>
             </View>
+            {totalGroups > 1 ? (
+              <View style={styles.reasonCountTag}>
+                <Text style={styles.reasonCountText}>{totalGroups}</Text>
+              </View>
+            ) : null}
           </View>
 
           <ScrollView
@@ -698,141 +889,93 @@ function ReasonModal({ styles, request, busy, onSubmit, onClose }) {
             showsVerticalScrollIndicator={false}
           >
             <View style={styles.reasonBody}>
-              {/* values updated */}
-              <View style={styles.reasonBlock}>
-                <View style={styles.reasonBlockHead}>
-                  <Ionicons name="list-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.reasonBlockLabel}>Values updated</Text>
-                  {changes.length > 1 ? (
-                    <View style={styles.reasonCountTag}>
-                      <Text style={styles.reasonCountText}>
-                        {changes.length}
+              {groups.length === 0 ? (
+                <View style={styles.changeList}>
+                  <View style={[styles.changeRow, styles.changeRowLast]}>
+                    <View style={styles.changeBody}>
+                      <Text style={styles.changeDetail}>
+                        No field-level detail for this action.
                       </Text>
                     </View>
-                  ) : null}
+                  </View>
                 </View>
+              ) : (
+                groups.map((group) => {
+                  const trimmed = reasonOf(group.key).trim();
+                  const missing = trimmed.length === 0;
+                  const tooShort = !missing && trimmed.length < 3;
 
-                <View style={styles.changeList}>
-                  <ScrollView
-                    keyboardShouldPersistTaps="handled"
-                    showsVerticalScrollIndicator={false}
-                    nestedScrollEnabled
-                  >
-                    {changes.map((change, index) => (
-                      <View
-                        key={`${change.title}-${index}`}
-                        style={[
-                          styles.changeRow,
-                          index === changes.length - 1 && styles.changeRowLast,
-                        ]}
-                      >
-                        <View
-                          style={[
-                            styles.changeIcon,
-                            change.tone === "add" && styles.changeIconAdd,
-                            change.tone === "remove" && styles.changeIconRemove,
-                            change.tone === "edit" && styles.changeIconEdit,
-                          ]}
-                        >
-                          <Ionicons
-                            name={change.icon || "ellipse-outline"}
-                            size={13}
-                            color={
-                              change.tone === "add"
-                                ? C.GREEN_DEEP
-                                : change.tone === "remove"
-                                  ? C.RED
-                                  : C.ALERT
-                            }
-                          />
-                        </View>
-
-                        <View style={styles.changeBody}>
-                          <Text style={styles.changeTitle}>{change.title}</Text>
-                          {change.detail ? (
-                            <Text style={styles.changeDetail}>
-                              {change.detail}
+                  return (
+                    <View key={group.key} style={styles.reasonBlock}>
+                      <View style={styles.reasonBlockHead}>
+                        <Ionicons
+                          name={
+                            group.isOther ? "options-outline" : "leaf-outline"
+                          }
+                          size={15}
+                          color={C.NAVY}
+                        />
+                        <Text style={styles.reasonBlockLabel}>
+                          {group.title}
+                        </Text>
+                        {group.changes.length > 1 ? (
+                          <View style={styles.reasonCountTag}>
+                            <Text style={styles.reasonCountText}>
+                              {group.changes.length}
                             </Text>
-                          ) : null}
-                          {change.from != null && change.to != null ? (
-                            <View style={styles.changeFromTo}>
-                              <Text style={styles.changeFrom}>
-                                {change.from}
-                              </Text>
-                              <Ionicons
-                                name="arrow-forward"
-                                size={12}
-                                color={C.MUTED}
-                              />
-                              <Text style={styles.changeTo}>{change.to}</Text>
-                            </View>
-                          ) : null}
-                        </View>
+                          </View>
+                        ) : null}
                       </View>
-                    ))}
 
-                    {changes.length === 0 ? (
-                      <View style={[styles.changeRow, styles.changeRowLast]}>
-                        <View style={styles.changeBody}>
-                          <Text style={styles.changeDetail}>
-                            No field-level detail for this action.
+                      <View style={styles.changeList}>
+                        {renderChangeRows(group.changes)}
+                      </View>
+
+                      <TextInput
+                        style={[
+                          styles.reasonInputCompact,
+                          touched &&
+                            groupInvalid(group.key) &&
+                            styles.reasonInputLgError,
+                        ]}
+                        value={reasons[group.key] || ""}
+                        onChangeText={(value) => setReasonFor(group.key, value)}
+                        onBlur={() => setTouched(true)}
+                        placeholder={
+                          group.isOther
+                            ? "Why are these adjustments being made?"
+                            : `Why did ${group.title} change?`
+                        }
+                        placeholderTextColor={C.FAINT}
+                        multiline
+                        editable={!busy}
+                        maxLength={300}
+                      />
+
+                      <View style={styles.reasonFootRow}>
+                        {touched && missing ? (
+                          <Text style={styles.reasonHelpError}>
+                            A reason is required.
                           </Text>
-                        </View>
+                        ) : touched && tooShort ? (
+                          <Text style={styles.reasonHelpError}>
+                            Add a little more detail.
+                          </Text>
+                        ) : (
+                          <Text style={styles.reasonHelp}>
+                            Saved against this quotation&apos;s audit history.
+                          </Text>
+                        )}
+                        <Text style={styles.reasonCounter}>
+                          {trimmed.length}/300
+                        </Text>
                       </View>
-                    ) : null}
-                  </ScrollView>
-                </View>
-              </View>
+                    </View>
+                  );
+                })
+              )}
 
-              {/* the reason itself */}
-              <View style={styles.reasonBlock}>
-                <View style={styles.reasonBlockHead}>
-                  <Ionicons
-                    name="chatbox-ellipses-outline"
-                    size={15}
-                    color={C.NAVY}
-                  />
-                  <Text style={styles.reasonBlockLabel}>Reason</Text>
-                </View>
-
-                <TextInput
-                  style={[
-                    styles.reasonInputLg,
-                    focused && styles.reasonInputLgFocus,
-                    touched && invalid && styles.reasonInputLgError,
-                  ]}
-                  value={reason}
-                  onChangeText={setReason}
-                  onFocus={() => setFocused(true)}
-                  onBlur={() => {
-                    setFocused(false);
-                    setTouched(true);
-                  }}
-                  placeholder="Explain why this change is being made. This is stored on the quotation history."
-                  placeholderTextColor={C.FAINT}
-                  multiline
-                  autoFocus
-                  editable={!busy}
-                  maxLength={300}
-                />
-
-                <View style={styles.reasonFootRow}>
-                  {touched && missing ? (
-                    <Text style={styles.reasonHelpError}>
-                      A reason is required.
-                    </Text>
-                  ) : touched && tooShort ? (
-                    <Text style={styles.reasonHelpError}>
-                      Add a little more detail.
-                    </Text>
-                  ) : (
-                    <Text style={styles.reasonHelp}>
-                      Saved against this quotation&apos;s audit history.
-                    </Text>
-                  )}
-                  <Text style={styles.reasonCounter}>{trimmed.length}/300</Text>
-                </View>
-
+              {groups.length > 0 ? (
                 <View style={styles.reasonChipRow}>
                   {REASON_PRESETS.map((preset) => (
                     <Pressable
@@ -841,21 +984,25 @@ function ReasonModal({ styles, request, busy, onSubmit, onClose }) {
                         styles.reasonChip,
                         (hovered || pressed) && styles.reasonChipHover,
                       ]}
-                      onPress={() => {
-                        setReason(preset);
-                        setTouched(true);
-                      }}
+                      onPress={() => applyPresetEverywhere(preset)}
                       disabled={busy}
                     >
                       <Text style={styles.reasonChipText}>{preset}</Text>
                     </Pressable>
                   ))}
                 </View>
-              </View>
+              ) : null}
             </View>
           </ScrollView>
 
           {/* actions */}
+          {error ? (
+            <View style={styles.banner}>
+              <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
+              <Text style={styles.bannerText}>{error}</Text>
+            </View>
+          ) : null}
+
           <View style={styles.reasonActions}>
             <Pressable
               style={({ hovered, pressed }) => [
@@ -994,8 +1141,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
     const value = toMoney(quotation?.transportationCost);
     return value > 0 ? String(value) : "";
   });
+  const [advance, setAdvance] = useState(() => {
+    const value = toMoney(quotation?.advancePayment);
+    return value > 0 ? String(value) : "";
+  });
   const [transportOpen, setTransportOpen] = useState(false);
   const [discountOpen, setDiscountOpen] = useState(false);
+  const [advanceOpen, setAdvanceOpen] = useState(false);
 
   /* Audit history, refreshed from every save response. */
   const [auditTrail, setAuditTrail] = useState(() =>
@@ -1009,6 +1161,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
       quotation?.additionalDiscount,
       quotation?.additionalDiscountRemark,
       quotation?.transportationCost,
+      quotation?.advancePayment,
       initialSpecials,
     ),
   );
@@ -1351,6 +1504,8 @@ export default function Edit({ quotation, onClose, onSaved }) {
     const transportValue = toMoney(transport);
     const beforeDiscount = subtotal + transportValue;
     const discountValue = Math.min(toMoney(discount), beforeDiscount);
+    const grand = beforeDiscount - discountValue;
+    const advanceValue = Math.min(toMoney(advance), grand);
 
     return {
       rows: lines.length,
@@ -1363,16 +1518,24 @@ export default function Edit({ quotation, onClose, onSaved }) {
       transport: transportValue,
       beforeDiscount,
       discount: discountValue,
-      grand: beforeDiscount - discountValue,
+      grand,
+      advance: advanceValue,
+      remaining: Math.max(0, grand - advanceValue),
     };
-  }, [lines, specials, discount, transport]);
+  }, [lines, specials, discount, transport, advance]);
 
   /* ── change tracking ─────────────────────────────────────────────── */
   const dirty = useMemo(
     () =>
-      stateSignatureOf(lines, discount, discountRemark, transport, specials) !==
-      baselineRef.current,
-    [lines, discount, discountRemark, transport, specials],
+      stateSignatureOf(
+        lines,
+        discount,
+        discountRemark,
+        transport,
+        advance,
+        specials,
+      ) !== baselineRef.current,
+    [lines, discount, discountRemark, transport, advance, specials],
   );
 
   const changedLines = useMemo(() => lines.filter(lineChanged), [lines]);
@@ -1383,6 +1546,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   const discountEntered = toMoney(discount);
   const transportEntered = toMoney(transport);
+  const advanceEntered = toMoney(advance);
   const discountRemarkMissing = discountEntered > 0 && !discountRemark.trim();
   const discountOverTotal = discountEntered > totals.beforeDiscount;
 
@@ -1414,6 +1578,11 @@ export default function Edit({ quotation, onClose, onSaved }) {
     setDiscount(next.discount);
     setDiscountRemark(next.remark);
     setDiscountOpen(false);
+  }, []);
+
+  const applyAdvance = useCallback((value) => {
+    setAdvance(value);
+    setAdvanceOpen(false);
   }, []);
 
   /* ── rehydrate from a save response ──────────────────────────────────
@@ -1467,10 +1636,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
       const nextRemark = payload.additionalDiscountRemark || "";
       const nextTransport = toMoney(payload.transportationCost);
       const nextTransportText = nextTransport > 0 ? String(nextTransport) : "";
+      const nextAdvance = toMoney(payload.advancePayment);
+      const nextAdvanceText = nextAdvance > 0 ? String(nextAdvance) : "";
 
       setDiscount(nextDiscountText);
       setDiscountRemark(nextRemark);
       setTransport(nextTransportText);
+      setAdvance(nextAdvanceText);
 
       setAuditTrail(
         (payload.invoiceUpdateDetailList || []).map(auditFromRecord),
@@ -1484,6 +1656,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
         nextDiscountText,
         nextRemark,
         nextTransportText,
+        nextAdvanceText,
         nextSpecials,
       );
     },
@@ -1492,9 +1665,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   /* ── save ────────────────────────────────────────────────────────────
      The only write this screen performs. It never chains into another call:
-     whatever asked for the save gets told whether it worked, and stops. */
+     whatever asked for the save gets told whether it worked, and stops.
+
+     `reasons` is a map keyed by line key (plus "other" for quotation-level
+     adjustments), one entry per changed plant — the reason modal collects a
+     separate explanation for each row rather than one shared string. */
   const persist = useCallback(
-    async (reason) => {
+    async (reasons) => {
       if (blockingReason) {
         setError(blockingReason);
         return null;
@@ -1506,24 +1683,27 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
       const discountAmount = toMoney(discount);
       const transportAmount = toMoney(transport);
-      const trimmedReason = String(reason || "").trim();
+      const advanceAmount = toMoney(advance);
 
       const body = {
-        plantList: lines.map((line) => ({
-          plantId: line.plantId,
-          // Unchanged contract: seedlings still send the tray count.
-          quantityReserved: toCount(line.quantity),
-          unitId: line.unitId,
-          unitName: line.unitName,
-          packingName: line.packingName,
-          packingCharge: toMoney(line.packingCharge),
-          selectedByCustomer: line.selectedByCustomer,
-          // Draft is never audited, so no reason is ever attached there.
-          reason:
-            auditActive && trimmedReason && lineChanged(line)
-              ? trimmedReason
-              : null,
-        })),
+        plantList: lines.map((line) => {
+          const reasonForLine = String(reasons?.[line.key] || "").trim();
+          return {
+            plantId: line.plantId,
+            // Unchanged contract: seedlings still send the tray count.
+            quantityReserved: toCount(line.quantity),
+            unitId: line.unitId,
+            unitName: line.unitName,
+            packingName: line.packingName,
+            packingCharge: toMoney(line.packingCharge),
+            selectedByCustomer: line.selectedByCustomer,
+            // Draft is never audited, so no reason is ever attached there.
+            reason:
+              auditActive && reasonForLine && lineChanged(line)
+                ? reasonForLine
+                : null,
+          };
+        }),
         specialPlantList: specials.map((special) => ({
           barcodeId: special.barcodeId,
         })),
@@ -1531,6 +1711,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
         additionalDiscountRemark:
           discountAmount > 0 ? discountRemark.trim() : null,
         transportationCost: transportAmount,
+        advanceAmount,
       };
 
       const response = await updateQuotationPlants(
@@ -1554,6 +1735,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
             discount,
             discountRemark,
             transport,
+            advance,
             specials,
           );
         }
@@ -1577,6 +1759,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
       discount,
       discountRemark,
       transport,
+      advance,
       auditActive,
       rehydrate,
     ],
@@ -1584,68 +1767,79 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   /* ── reason gate ─────────────────────────────────────────────────────
      Builds the "values updated" summary for the modal from whatever is
-     actually dirty, so the operator sees precisely what will be recorded. */
+     actually dirty, so the operator sees precisely what will be recorded.
+     Grouped by plant — each changed plant gets its own reason field in the
+     modal, since one shared explanation rarely fits every row. Quotation-
+     level adjustments (transport, discount, advance) aren't tied to a
+     plant, so they come back separately as `otherChanges`. */
   const describeChanges = useCallback(() => {
-    const out = [];
+    const lineGroups = [];
 
     changedLines.forEach((line) => {
+      const changes = [];
+
       if (line.isNew) {
-        out.push({
+        changes.push({
           icon: "add-circle-outline",
           tone: "add",
-          title: `${line.plantName} added`,
+          title: "Added to quotation",
           detail: `${formatNumber(toCount(line.quantity))} ${unitWord(line)} · ${
             line.unitName || "no unit"
           }`,
         });
-        return;
+      } else {
+        if (quantityChanged(line)) {
+          changes.push({
+            icon: "swap-horizontal",
+            tone: "edit",
+            title: "Quantity changed",
+            from: `${formatNumber(toCount(line.baseQuantity))} ${unitWord(line)}`,
+            to: `${formatNumber(toCount(line.quantity))} ${unitWord(line)}`,
+          });
+        }
+
+        if (unitChanged(line)) {
+          changes.push({
+            icon: "business-outline",
+            tone: "edit",
+            title: "Unit changed",
+            to: line.unitName || "—",
+            from: "previous unit",
+          });
+        }
+
+        if (packingChanged(line)) {
+          changes.push({
+            icon: "cube-outline",
+            tone: "edit",
+            title: "Packing changed",
+            from: `${line.basePackingName} (${formatAmount(
+              line.basePackingCharge,
+            )})`,
+            to: `${line.packingName} (${formatAmount(line.packingCharge)})`,
+          });
+        }
+
+        if (choiceChanged(line)) {
+          changes.push({
+            icon: "person-outline",
+            tone: "edit",
+            title: "Selected by customer changed",
+            from: line.baseSelectedByCustomer ? "Yes" : "No",
+            to: line.selectedByCustomer ? "Yes" : "No",
+          });
+        }
       }
 
-      if (quantityChanged(line)) {
-        out.push({
-          icon: "swap-horizontal",
-          tone: "edit",
-          title: `${line.plantName} quantity changed`,
-          from: `${formatNumber(toCount(line.baseQuantity))} ${unitWord(line)}`,
-          to: `${formatNumber(toCount(line.quantity))} ${unitWord(line)}`,
-        });
-      }
-
-      if (unitChanged(line)) {
-        out.push({
-          icon: "business-outline",
-          tone: "edit",
-          title: `${line.plantName} unit changed`,
-          to: line.unitName || "—",
-          from: "previous unit",
-        });
-      }
-
-      if (packingChanged(line)) {
-        out.push({
-          icon: "cube-outline",
-          tone: "edit",
-          title: `${line.plantName} packing changed`,
-          from: `${line.basePackingName} (${formatAmount(
-            line.basePackingCharge,
-          )})`,
-          to: `${line.packingName} (${formatAmount(line.packingCharge)})`,
-        });
-      }
-
-      if (choiceChanged(line)) {
-        out.push({
-          icon: "person-outline",
-          tone: "edit",
-          title: `${line.plantName} selected by customer changed`,
-          from: line.baseSelectedByCustomer ? "Yes" : "No",
-          to: line.selectedByCustomer ? "Yes" : "No",
-        });
+      if (changes.length > 0) {
+        lineGroups.push({ key: line.key, title: line.plantName, changes });
       }
     });
 
+    const otherChanges = [];
+
     if (transportEntered !== toMoney(quotation?.transportationCost)) {
-      out.push({
+      otherChanges.push({
         icon: "car-outline",
         tone: "edit",
         title: "Transport cost changed",
@@ -1655,7 +1849,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
     }
 
     if (discountEntered !== toMoney(quotation?.additionalDiscount)) {
-      out.push({
+      otherChanges.push({
         icon: "pricetag-outline",
         tone: "edit",
         title: "Additional discount changed",
@@ -1664,8 +1858,24 @@ export default function Edit({ quotation, onClose, onSaved }) {
       });
     }
 
-    return out;
-  }, [changedLines, transportEntered, discountEntered, quotation]);
+    if (advanceEntered !== toMoney(quotation?.advancePayment)) {
+      otherChanges.push({
+        icon: "wallet-outline",
+        tone: "edit",
+        title: "Advance payment changed",
+        from: formatAmount(quotation?.advancePayment),
+        to: formatAmount(advanceEntered),
+      });
+    }
+
+    return { lineGroups, otherChanges };
+  }, [
+    changedLines,
+    transportEntered,
+    discountEntered,
+    advanceEntered,
+    quotation,
+  ]);
 
   /* Save Changes. Past Draft it opens the reason modal first; in Draft it
      saves straight away. Either way it stops at the save. */
@@ -1687,12 +1897,15 @@ export default function Edit({ quotation, onClose, onSaved }) {
       return;
     }
 
+    const { lineGroups, otherChanges } = describeChanges();
+
     setPendingAction({
       type: "save",
       request: {
         summary:
           "This quotation has left draft, so the changes below are recorded against its history.",
-        changes: describeChanges(),
+        lineGroups,
+        otherChanges,
         confirmLabel: "SAVE CHANGES",
       },
     });
@@ -1720,18 +1933,25 @@ export default function Edit({ quotation, onClose, onSaved }) {
         lineKey: line.key,
         request: {
           summary: `${line.plantName} will be removed from this quotation and the removal recorded.`,
-          changes: [
+          lineGroups: [
             {
-              icon: "trash-outline",
-              tone: "remove",
-              title: `${line.plantName} deleted`,
-              detail: `${formatNumber(toCount(line.quantity))} ${unitWord(
-                line,
-              )} · ${line.unitName || "no unit"} · ${formatAmount(
-                lineAmount(line),
-              )}`,
+              key: line.key,
+              title: line.plantName,
+              changes: [
+                {
+                  icon: "trash-outline",
+                  tone: "remove",
+                  title: "Deleted",
+                  detail: `${formatNumber(toCount(line.quantity))} ${unitWord(
+                    line,
+                  )} · ${line.unitName || "no unit"} · ${formatAmount(
+                    lineAmount(line),
+                  )}`,
+                },
+              ],
             },
           ],
+          otherChanges: [],
           confirmLabel: "DELETE & SAVE",
           confirmTone: "danger",
         },
@@ -1741,9 +1961,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
   );
 
   /* The reason modal hands the reason back here. A delete is applied to the
-     rows first, then the whole document is saved in one call. */
+     rows first, then the whole document is saved in one call. The modal
+     itself is not closed until the save actually resolves — closing it the
+     instant Save is pressed would hide the "SAVING…" state and, if the save
+     failed, drop the operator straight back to the screen with no obvious
+     way to see why or retry. */
   const submitPendingAction = useCallback(
-    async (reason) => {
+    async (reasons) => {
       const action = pendingAction;
       if (!action) return;
 
@@ -1753,30 +1977,34 @@ export default function Edit({ quotation, onClose, onSaved }) {
            already removed rather than waiting for a re-render. */
         const nextLines = lines.filter((line) => line.key !== action.lineKey);
         setLines(nextLines);
-        setPendingAction(null);
 
         // Give React a tick to commit before the save reads state.
         setTimeout(() => {
-          setPendingActionReason({ reason, lines: nextLines });
+          setPendingActionReason({ reasons, lines: nextLines });
         }, 0);
         return;
       }
 
-      setPendingAction(null);
-      await persist(reason);
+      const result = await persist(reasons);
+      if (result) setPendingAction(null);
     },
     [pendingAction, lines, persist],
   );
 
   /* A delete needs the save to run against the *new* line list, so it is
-     staged here and picked up once the state has committed. */
+     staged here and picked up once the state has committed. The pending
+     action (and its modal) only closes once that save has actually gone
+     through. */
   const [pendingActionReason, setPendingActionReason] = useState(null);
 
   useEffect(() => {
     if (!pendingActionReason) return;
-    const { reason } = pendingActionReason;
+    const { reasons } = pendingActionReason;
     setPendingActionReason(null);
-    persist(reason);
+    (async () => {
+      const result = await persist(reasons);
+      if (result) setPendingAction(null);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingActionReason]);
 
@@ -1941,6 +2169,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   const priceBlock = useCallback(
     (line) => {
+      if (line.isSpecial) {
+        return (
+          <View style={styles.alignRight}>
+            <Text style={styles.priceText}>{formatAmount(line.price)}</Text>
+          </View>
+        );
+      }
       const offer = offerDiscountOf(line);
       if (offer > 0) {
         return (
@@ -1968,7 +2203,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   const unitSelect = useCallback(
     (line) => {
-      if (!lineEditable(line)) {
+      if (line.isSpecial || !lineEditable(line)) {
         return (
           <Text style={styles.readValue} numberOfLines={1}>
             {line.unitName || "—"}
@@ -2001,6 +2236,16 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   const qtyField = useCallback(
     (line, { showDerived }) => {
+      if (line.isSpecial) {
+        return (
+          <View style={styles.cellFill}>
+            <View style={styles.readQty}>
+              <Text style={styles.readQtyValue}>1</Text>
+              <Text style={styles.readQtyUnit}>plant</Text>
+            </View>
+          </View>
+        );
+      }
       const entered = toCount(line.quantity);
       const traySize = toCount(line.traySize);
       const over =
@@ -2083,6 +2328,18 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   const packingField = useCallback(
     (line) => {
+      if (line.isSpecial) {
+        return (
+          <View style={styles.packStack}>
+            <Text style={styles.readValue} numberOfLines={1}>
+              Not applicable
+            </Text>
+            <Text style={styles.readSub} numberOfLines={1}>
+              Special plant
+            </Text>
+          </View>
+        );
+      }
       if (!lineEditable(line)) {
         return (
           <View style={styles.packStack}>
@@ -2157,6 +2414,10 @@ export default function Edit({ quotation, onClose, onSaved }) {
   /* Selected by customer: a Yes / No dropdown, disabled when read-only. */
   const choiceField = useCallback(
     (line) => {
+      if (line.isSpecial) {
+        return <Text style={styles.dashText}>—</Text>;
+      }
+
       const on = !!line.selectedByCustomer;
 
       if (!lineEditable(line)) {
@@ -2241,6 +2502,24 @@ export default function Edit({ quotation, onClose, onSaved }) {
      longer draft-only. */
   const actionField = useCallback(
     (line) => {
+      if (line.isSpecial) {
+        if (!canEditTotals) return <Text style={styles.dashText}>—</Text>;
+        return (
+          <Pressable
+            style={({ hovered, pressed }) => [
+              styles.deleteBtn,
+              hovered && styles.deleteBtnHover,
+              pressed && styles.deleteBtnPressed,
+            ]}
+            hitSlop={6}
+            accessibilityRole="button"
+            accessibilityLabel={`Remove special plant ${line.barcodeId}`}
+            onPress={() => removeSpecial(line.key)}
+          >
+            <Ionicons name="trash-outline" size={16} color={C.RED} />
+          </Pressable>
+        );
+      }
       if (showChecks) {
         return (
           <View style={styles.actionStack}>
@@ -2256,7 +2535,17 @@ export default function Edit({ quotation, onClose, onSaved }) {
       if (canEditLines) return deleteButton(line);
       return <Text style={styles.dashText}>—</Text>;
     },
-    [showChecks, canEditLines, checkBox, toggleCheck, deleteButton, styles],
+    [
+      showChecks,
+      canEditLines,
+      canEditTotals,
+      checkBox,
+      toggleCheck,
+      deleteButton,
+      removeSpecial,
+      styles,
+      C,
+    ],
   );
 
   /* ── columns ─────────────────────────────────────────────────────── */
@@ -2303,29 +2592,37 @@ export default function Edit({ quotation, onClose, onSaved }) {
               {line.plantName}
             </Text>
             <Text style={styles.plantSub} numberOfLines={1}>
-              {line.plantSubtitle}
+              {line.isSpecial
+                ? line.barcodeId || "Special plant"
+                : line.plantSubtitle}
             </Text>
             <View style={styles.metaRow}>
+              {line.isSpecial ? (
+                <View style={styles.specialTag}>
+                  <Ionicons name="pricetag" size={9} color={C.NAVY} />
+                  <Text style={styles.specialTagText}>SPECIAL</Text>
+                </View>
+              ) : null}
               {line.size ? (
                 <View style={styles.metaTag}>
                   <Text style={styles.metaTagText}>{line.size}</Text>
                 </View>
               ) : null}
-              {!showPrice ? (
+              {!line.isSpecial && !showPrice ? (
                 <View style={styles.metaTag}>
                   <Text style={styles.metaTagText}>
                     {formatAmount(effectivePriceOf(line))} / plant
                   </Text>
                 </View>
               ) : null}
-              {!showChoice ? (
+              {!line.isSpecial && !showChoice ? (
                 <View style={styles.metaTag}>
                   <Text style={styles.metaTagText}>
                     Customer: {line.selectedByCustomer ? "Yes" : "No"}
                   </Text>
                 </View>
               ) : null}
-              {lineChanged(line) ? (
+              {!line.isSpecial && lineChanged(line) ? (
                 <View style={styles.changeTag}>
                   <Ionicons
                     name={line.isNew ? "add" : "swap-horizontal"}
@@ -2423,7 +2720,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
         align: "right",
         render: (line) => (
           <Text style={styles.amountText} numberOfLines={1}>
-            {formatAmount(lineAmount(line))}
+            {formatAmount(line.isSpecial ? line.price : lineAmount(line))}
           </Text>
         ),
       },
@@ -2466,25 +2763,49 @@ export default function Edit({ quotation, onClose, onSaved }) {
   ]);
 
   const renderRow = useCallback(
-    ({ item, index }) => (
-      <TableRow item={item} index={index} columns={columns} styles={styles} />
+    (item, index) => (
+      <TableRow
+        key={item.key}
+        item={item}
+        index={index}
+        columns={columns}
+        styles={styles}
+      />
     ),
     [columns, styles],
   );
 
+  /* Special plants live in the same table as ordinary plants, flagged with a
+     SPECIAL tag. They render read-only cells (fixed qty of 1, no packing). */
+  const tableRows = useMemo(
+    () => [...lines, ...specials.map((sp) => ({ ...sp, isSpecial: true }))],
+    [lines, specials],
+  );
+
   /* ── card row (narrow screens) ───────────────────────────────────── */
   const renderCard = useCallback(
-    ({ item, index }) => (
+    (item, index) => (
       <View
+        key={item.key}
         style={[
           styles.lineCard,
-          item.checked && styles.lineCardChecked,
-          lineChanged(item) && styles.lineCardDirty,
+          item.isSpecial && styles.lineCardSpecial,
+          !item.isSpecial && item.checked && styles.lineCardChecked,
+          !item.isSpecial && lineChanged(item) && styles.lineCardDirty,
         ]}
       >
         <View style={styles.lineCardTop}>
-          <View style={styles.lineIndex}>
-            <Text style={styles.lineIndexText}>{index + 1}</Text>
+          <View
+            style={[
+              styles.lineIndex,
+              item.isSpecial && styles.lineIndexSpecial,
+            ]}
+          >
+            {item.isSpecial ? (
+              <Ionicons name="pricetag" size={13} color={C.NAVY} />
+            ) : (
+              <Text style={styles.lineIndexText}>{index + 1}</Text>
+            )}
           </View>
 
           <View style={styles.fill}>
@@ -2492,9 +2813,17 @@ export default function Edit({ quotation, onClose, onSaved }) {
               {item.plantName}
             </Text>
             <Text style={styles.plantSub} numberOfLines={1}>
-              {item.plantSubtitle}
+              {item.isSpecial
+                ? item.barcodeId || "Special plant"
+                : item.plantSubtitle}
             </Text>
             <View style={styles.metaRow}>
+              {item.isSpecial ? (
+                <View style={styles.specialTag}>
+                  <Ionicons name="pricetag" size={9} color={C.NAVY} />
+                  <Text style={styles.specialTagText}>SPECIAL</Text>
+                </View>
+              ) : null}
               {item.size ? (
                 <View style={styles.metaTag}>
                   <Text style={styles.metaTagText}>{item.size}</Text>
@@ -2502,10 +2831,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
               ) : null}
               <View style={styles.metaTag}>
                 <Text style={styles.metaTagText}>
-                  {formatAmount(effectivePriceOf(item))} / plant
+                  {formatAmount(
+                    item.isSpecial ? item.price : effectivePriceOf(item),
+                  )}{" "}
+                  / plant
                 </Text>
               </View>
-              {lineChanged(item) ? (
+              {!item.isSpecial && lineChanged(item) ? (
                 <View style={styles.changeTag}>
                   <Ionicons
                     name={item.isNew ? "add" : "swap-horizontal"}
@@ -2523,30 +2855,45 @@ export default function Edit({ quotation, onClose, onSaved }) {
           {actionField(item)}
         </View>
 
-        <View style={styles.fieldGrid}>
-          <View style={styles.field}>
-            <Text style={styles.fieldLabel}>Unit</Text>
-            {unitSelect(item)}
+        {item.isSpecial ? (
+          <View style={styles.fieldGrid}>
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>Unit</Text>
+              {unitSelect(item)}
+            </View>
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>Quantity</Text>
+              {qtyField(item, { showDerived: false })}
+            </View>
           </View>
-          <View style={styles.field}>
-            <Text style={styles.fieldLabel}>
-              {isDraft ? "Reserved qty" : "Delivered qty"}
-            </Text>
-            {qtyField(item, { showDerived: true })}
+        ) : (
+          <View style={styles.fieldGrid}>
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>Unit</Text>
+              {unitSelect(item)}
+            </View>
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>
+                {isDraft ? "Reserved qty" : "Delivered qty"}
+              </Text>
+              {qtyField(item, { showDerived: true })}
+            </View>
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>Packing</Text>
+              {packingField(item)}
+            </View>
+            <View style={styles.field}>
+              <Text style={styles.fieldLabel}>Selected by customer</Text>
+              {choiceField(item)}
+            </View>
           </View>
-          <View style={styles.field}>
-            <Text style={styles.fieldLabel}>Packing</Text>
-            {packingField(item)}
-          </View>
-          <View style={styles.field}>
-            <Text style={styles.fieldLabel}>Selected by customer</Text>
-            {choiceField(item)}
-          </View>
-        </View>
+        )}
 
         <View style={styles.lineFooter}>
           <Text style={styles.lineTotalLabel}>Line amount</Text>
-          <Text style={styles.lineTotal}>{formatAmount(lineAmount(item))}</Text>
+          <Text style={styles.lineTotal}>
+            {formatAmount(item.isSpecial ? item.price : lineAmount(item))}
+          </Text>
         </View>
       </View>
     ),
@@ -2561,8 +2908,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
       actionField,
     ],
   );
-
-  const keyExtractor = useCallback((item) => item.key, []);
 
   const onTableLayout = useCallback((event) => {
     const measured = Math.round(event.nativeEvent.layout.width);
@@ -2938,30 +3283,28 @@ export default function Edit({ quotation, onClose, onSaved }) {
               </Pressable>
             ) : null}
 
-            {!isDraft ? (
-              <Pressable
-                style={({ hovered, pressed }) => [
-                  styles.iconBtn,
-                  hovered && styles.iconBtnHover,
-                  pressed && styles.iconBtnPressed,
-                ]}
-                hitSlop={8}
-                accessibilityRole="button"
-                accessibilityLabel="Open the quotation PDF"
-                disabled={working}
-                onPress={reopenPdf}
-              >
-                {busy === "pdf" ? (
-                  <ActivityIndicator color={C.NAVY} />
-                ) : (
-                  <Ionicons
-                    name="document-text-outline"
-                    size={19}
-                    color={C.NAVY}
-                  />
-                )}
-              </Pressable>
-            ) : null}
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.iconBtn,
+                hovered && styles.iconBtnHover,
+                pressed && styles.iconBtnPressed,
+              ]}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Open the quotation PDF"
+              disabled={working}
+              onPress={reopenPdf}
+            >
+              {busy === "pdf" ? (
+                <ActivityIndicator color={C.NAVY} />
+              ) : (
+                <Ionicons
+                  name="document-text-outline"
+                  size={19}
+                  color={C.NAVY}
+                />
+              )}
+            </Pressable>
 
             <Pressable
               style={({ hovered, pressed }) => [
@@ -3112,47 +3455,42 @@ export default function Edit({ quotation, onClose, onSaved }) {
           </View>
         ) : null}
 
-        {/* ── check progress (delivery shade) ── */}
-        {showChecks && lines.length > 0 ? (
-          <View style={styles.checkStrip}>
-            <Ionicons
-              name={allChecked ? "checkmark-circle" : "ellipse-outline"}
-              size={18}
-              color={allChecked ? C.GREEN : C.MUTED}
-            />
-            <Text style={styles.checkStripText}>
-              {allChecked
-                ? "Every row checked. The invoice is ready."
-                : `${checkedCount} of ${checkableLines.length} rows checked`}
-            </Text>
-            <Pressable onPress={toggleCheckAll} hitSlop={8}>
-              <Text style={styles.checkStripLink}>
-                {allChecked ? "Clear all" : "Check all"}
+        {/* ── scrollable body: table (plants + special) + audit ──
+             Everything between the fixed toolbar and the fixed footer scrolls
+             as one block. Rows are laid out at their natural height rather than
+             inside a flex-crushed list, so at least four plants stay visible in
+             both portrait and landscape. */}
+        <ScrollView
+          style={styles.bodyScroll}
+          contentContainerStyle={styles.bodyContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {/* ── check progress (delivery shade) ── */}
+          {showChecks && lines.length > 0 ? (
+            <View style={styles.checkStrip}>
+              <Ionicons
+                name={allChecked ? "checkmark-circle" : "ellipse-outline"}
+                size={18}
+                color={allChecked ? C.GREEN : C.MUTED}
+              />
+              <Text style={styles.checkStripText}>
+                {allChecked
+                  ? "Every row checked. The invoice is ready."
+                  : `${checkedCount} of ${checkableLines.length} rows checked`}
               </Text>
-            </Pressable>
-          </View>
-        ) : null}
+              <Pressable onPress={toggleCheckAll} hitSlop={8}>
+                <Text style={styles.checkStripLink}>
+                  {allChecked ? "Clear all" : "Check all"}
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
 
-        {/* ── grid ── */}
-        <View style={styles.tableWrap} onLayout={onTableLayout}>
-          <View style={isCardMode ? styles.fill : styles.tableShell}>
-            {!isCardMode && lines.length > 0 ? tableHead : null}
-
-            <FlatList
-              data={lines}
-              keyExtractor={keyExtractor}
-              renderItem={isCardMode ? renderCard : renderRow}
-              extraData={columns}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
-              initialNumToRender={12}
-              maxToRenderPerBatch={10}
-              windowSize={7}
-              removeClippedSubviews={Platform.OS === "android"}
-              contentContainerStyle={
-                isCardMode ? styles.cardList : styles.tableBody
-              }
-              ListEmptyComponent={
+          {/* ── grid (plants + special plants in one table) ── */}
+          <View style={styles.tableWrap} onLayout={onTableLayout}>
+            {tableRows.length === 0 ? (
+              <View style={styles.tableShell}>
                 <View style={styles.emptyWrap}>
                   <View style={styles.emptyIcon}>
                     <Ionicons name="leaf-outline" size={28} color={C.NAVY} />
@@ -3166,83 +3504,40 @@ export default function Edit({ quotation, onClose, onSaved }) {
                       : "Nothing was reserved against this quotation."}
                   </Text>
                 </View>
-              }
-            />
-          </View>
-        </View>
-
-        {/* ── special plants (barcode) ── */}
-        {specials.length > 0 ? (
-          <View style={styles.specialSection}>
-            <View style={styles.specialHead}>
-              <Ionicons name="barcode-outline" size={16} color={C.NAVY} />
-              <Text style={styles.specialTitle}>Special plants</Text>
-              <View style={styles.metaTag}>
-                <Text style={styles.metaTagText}>{specials.length}</Text>
               </View>
+            ) : isCardMode ? (
+              <View style={styles.cardList}>
+                {tableRows.map((item, index) => renderCard(item, index))}
+              </View>
+            ) : (
+              <View style={styles.tableShell}>
+                {tableHead}
+                <View style={styles.tableBody}>
+                  {tableRows.map((item, index) => renderRow(item, index))}
+                </View>
+              </View>
+            )}
+          </View>
+
+          {/* ── audit history ── */}
+          {renderAudit()}
+
+          {error ? (
+            <View style={styles.banner}>
+              <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
+              <Text style={styles.bannerText}>{error}</Text>
             </View>
-
-            {specials.map((sp) => (
-              <View key={sp.key} style={styles.specialCard}>
-                <View style={styles.specialIcon}>
-                  <Ionicons name="pricetag" size={16} color={C.NAVY} />
-                </View>
-
-                <View style={styles.fill}>
-                  <Text style={styles.plantName} numberOfLines={1}>
-                    {sp.plantName}
-                  </Text>
-                  <View style={styles.metaRow}>
-                    <View style={styles.metaTag}>
-                      <Text style={styles.metaTagText}>{sp.barcodeId}</Text>
-                    </View>
-                    <View style={styles.metaTag}>
-                      <Text style={styles.metaTagText}>Qty 1</Text>
-                    </View>
-                    {sp.unitName ? (
-                      <View style={styles.metaTag}>
-                        <Text style={styles.metaTagText}>{sp.unitName}</Text>
-                      </View>
-                    ) : null}
-                  </View>
-                </View>
-
-                <Text style={styles.priceText}>{formatAmount(sp.price)}</Text>
-
-                {canEditTotals ? (
-                  <Pressable
-                    style={({ hovered, pressed }) => [
-                      styles.deleteBtn,
-                      hovered && styles.deleteBtnHover,
-                      pressed && styles.deleteBtnPressed,
-                    ]}
-                    hitSlop={6}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Remove special plant ${sp.barcodeId}`}
-                    onPress={() => removeSpecial(sp.key)}
-                  >
-                    <Ionicons name="trash-outline" size={16} color={C.RED} />
-                  </Pressable>
-                ) : null}
-              </View>
-            ))}
-          </View>
-        ) : null}
-
-        {/* ── audit history ── */}
-        {renderAudit()}
-
-        {error ? (
-          <View style={styles.banner}>
-            <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
-            <Text style={styles.bannerText}>{error}</Text>
-          </View>
-        ) : notice ? (
-          <View style={[styles.banner, styles.bannerOk]}>
-            <Ionicons name="checkmark-circle" size={17} color={C.GREEN_DEEP} />
-            <Text style={styles.bannerOkText}>{notice}</Text>
-          </View>
-        ) : null}
+          ) : notice ? (
+            <View style={[styles.banner, styles.bannerOk]}>
+              <Ionicons
+                name="checkmark-circle"
+                size={17}
+                color={C.GREEN_DEEP}
+              />
+              <Text style={styles.bannerOkText}>{notice}</Text>
+            </View>
+          ) : null}
+        </ScrollView>
 
         {/* ── totals + actions ── */}
         <View style={styles.footerDock}>
@@ -3343,8 +3638,42 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   <Ionicons name="add" size={16} color={C.NAVY} />
                 </Pressable>
               )}
+
+              {advanceEntered > 0 ? (
+                <Pressable
+                  style={({ hovered, pressed }) => [
+                    styles.adjustChip,
+                    (hovered || pressed) && styles.adjustChipHover,
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Edit advance payment"
+                  onPress={() => setAdvanceOpen(true)}
+                >
+                  <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
+                  <Text style={styles.adjustChipText}>
+                    Advance {formatAmount(advanceEntered)}
+                  </Text>
+                  <Ionicons name="create-outline" size={14} color={C.MUTED} />
+                </Pressable>
+              ) : (
+                <Pressable
+                  style={({ hovered, pressed }) => [
+                    styles.adjustAddBtn,
+                    (hovered || pressed) && styles.adjustAddBtnHover,
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel="Add advance payment"
+                  onPress={() => setAdvanceOpen(true)}
+                >
+                  <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
+                  <Text style={styles.adjustAddText}>Advance payment</Text>
+                  <Ionicons name="add" size={16} color={C.NAVY} />
+                </Pressable>
+              )}
             </View>
-          ) : transportEntered > 0 || discountEntered > 0 ? (
+          ) : transportEntered > 0 ||
+            discountEntered > 0 ||
+            advanceEntered > 0 ? (
             <View style={styles.moneyReadBar}>
               {transportEntered > 0 ? (
                 <View style={styles.moneyReadItem}>
@@ -3360,6 +3689,14 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   <Text style={styles.moneyReadText}>
                     Discount {formatAmount(discountEntered)}
                     {discountRemark ? ` — ${discountRemark}` : ""}
+                  </Text>
+                </View>
+              ) : null}
+              {advanceEntered > 0 ? (
+                <View style={styles.moneyReadItem}>
+                  <Ionicons name="wallet-outline" size={14} color={C.NAVY} />
+                  <Text style={styles.moneyReadText}>
+                    Advance {formatAmount(advanceEntered)}
                   </Text>
                 </View>
               ) : null}
@@ -3421,6 +3758,16 @@ export default function Edit({ quotation, onClose, onSaved }) {
                     </Text>
                   </View>
                 ) : null}
+
+                {totals.advance > 0 ? (
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Advance</Text>
+                    <Text style={[styles.metricValue, styles.metricDiscount]}>
+                      {formatAmount(totals.advance)}
+                    </Text>
+                    <Text style={styles.metricUnit}>received</Text>
+                  </View>
+                ) : null}
               </View>
 
               <View style={styles.metricGrand}>
@@ -3429,6 +3776,15 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   {formatAmount(totals.grand)}
                 </Text>
               </View>
+
+              {totals.advance > 0 ? (
+                <View style={styles.metricRemaining}>
+                  <Text style={styles.metricRemainingLabel}>Remaining</Text>
+                  <Text style={styles.metricRemainingValue}>
+                    {formatAmount(totals.remaining)}
+                  </Text>
+                </View>
+              ) : null}
             </View>
 
             <View style={styles.actionRow}>
@@ -3553,11 +3909,22 @@ export default function Edit({ quotation, onClose, onSaved }) {
         />
       ) : null}
 
+      {advanceOpen ? (
+        <AdvanceModal
+          styles={styles}
+          grand={totals.grand}
+          initialAdvance={advance}
+          onApply={applyAdvance}
+          onClose={() => setAdvanceOpen(false)}
+        />
+      ) : null}
+
       {pendingAction ? (
         <ReasonModal
           styles={styles}
           request={pendingAction.request}
           busy={saving}
+          error={error}
           onSubmit={submitPendingAction}
           onClose={() => setPendingAction(null)}
         />

@@ -306,15 +306,17 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     resultLoading: { padding: 22, alignItems: "center", gap: 10 },
     resultLoadingText: { fontSize: 13, color: FAINT },
 
+    /* ── scrollable body ───────────────────────────────────────────── */
+    bodyScroll: { flex: 1 },
+    bodyContent: { flexGrow: 1, paddingBottom: 4 },
+
     /* ── table ─────────────────────────────────────────────────────── */
     tableWrap: {
-      flex: 1,
       paddingHorizontal: gutter,
       paddingTop: 12,
       paddingBottom: 2,
     },
     tableShell: {
-      flex: 1,
       borderRadius: 14,
       overflow: "hidden",
       borderWidth: 1,
@@ -384,6 +386,24 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       backgroundColor: FILL_DEEP,
     },
     metaTagText: { fontSize: 10.5, fontWeight: "700", color: "#5A6B80" },
+    /* the SPECIAL flag on barcode-scanned rows, shown inline in the table */
+    specialTag: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      paddingHorizontal: 7,
+      paddingVertical: 2.5,
+      borderRadius: 5,
+      backgroundColor: NAVY_TINT,
+      borderWidth: 1,
+      borderColor: "#B7D3EE",
+    },
+    specialTagText: {
+      fontSize: 10,
+      fontWeight: "800",
+      letterSpacing: 0.6,
+      color: NAVY,
+    },
     /* an inline "changed" marker on a row, replacing the old reason strip */
     changeTag: {
       flexDirection: "row",
@@ -620,6 +640,8 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
     lineCardChecked: { borderColor: GREEN_LINE, backgroundColor: "#FBFEFC" },
     lineCardDirty: { borderColor: ALERT_LINE, backgroundColor: "#FFFBF7" },
+    lineCardSpecial: { borderColor: "#B7D3EE", backgroundColor: "#F6FAFF" },
+    lineIndexSpecial: { backgroundColor: NAVY_TINT },
     lineCardTop: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
     lineIndex: {
       width: 26,
@@ -945,6 +967,31 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       fontWeight: "800",
       letterSpacing: -0.5,
       color: GREEN,
+    },
+    /* remaining-to-collect, shown under the grand total once an advance is set */
+    metricRemaining: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+      paddingTop: 9,
+      marginTop: 9,
+      borderTopWidth: 1,
+      borderTopColor: BORDER,
+      borderStyle: "dashed",
+    },
+    metricRemainingLabel: {
+      fontSize: 11,
+      fontWeight: "800",
+      letterSpacing: 0.5,
+      color: MUTED,
+      textTransform: "uppercase",
+    },
+    metricRemainingValue: {
+      fontSize: 17,
+      fontWeight: "800",
+      letterSpacing: -0.3,
+      color: ORANGE,
     },
 
     /* ── buttons ───────────────────────────────────────────────────── */
@@ -1290,6 +1337,22 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
     reasonInputLgFocus: { borderColor: NAVY },
     reasonInputLgError: { borderColor: ALERT, backgroundColor: "#FFF8F4" },
+    /* one of these sits under every per-plant / per-adjustment change group,
+       so it stays compact even when several are stacked in the same modal */
+    reasonInputCompact: {
+      minHeight: 64,
+      borderRadius: 12,
+      backgroundColor: SURFACE,
+      borderWidth: 1.5,
+      borderColor: BORDER_STRONG,
+      paddingHorizontal: 13,
+      paddingVertical: 11,
+      fontSize: 13.5,
+      lineHeight: 19,
+      color: TEXT,
+      textAlignVertical: "top",
+      ...noOutline,
+    },
     reasonFootRow: {
       flexDirection: "row",
       alignItems: "center",
