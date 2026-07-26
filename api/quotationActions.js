@@ -1,11 +1,11 @@
 import {
-    CONVERT_TO_INVOICE_URL,
-    MOVE_TO_DELIVERY_SHADE_URL,
+  CONVERT_TO_INVOICE_URL,
+  MOVE_TO_DELIVERY_SHADE_URL,
 } from "../constants/apiConstants";
 import axiosClient from "./axiosClient";
 import { handleApiError } from "./errorHandler";
 
-export const moveToDeliveryShade = async (quotationId) => {
+export const moveToLoadingShade = async (quotationId) => {
   try {
     const response = await axiosClient.post(MOVE_TO_DELIVERY_SHADE_URL, null, {
       params: {

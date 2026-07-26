@@ -15,7 +15,9 @@ import {
 
 import { downloadQuotationPdf } from "../../api/downloadPdfApis.js";
 import { fetchPackingList } from "../../api/fetchPacking";
+import { getQuotation } from "../../api/fetchQuotation";
 import { getApplicableOffer } from "../../api/getOffer";
+import { getQuotationAccess } from "../../api/getQuotationAccess";
 import { getSpecialPlantByBarcodeId } from "../../api/getSpecialPlant";
 import { searchPlants } from "../../api/plantApi";
 import {
@@ -49,7 +51,7 @@ const CHOICE_OPTIONS = [
   { value: true, label: "Yes", hint: "The customer asked for it" },
 ];
 
-/* Offered in the reason modal as one-tap fills. */
+/* Offered in the reason popups as one-tap fills. */
 const REASON_PRESETS = [
   "Customer changed the order",
   "Stock not available",
@@ -103,6 +105,23 @@ const formatDate = (value) => {
     year: "numeric",
   });
 };
+
+/** True when two values fall on the same calendar day (local time). A missing
+    value is never the same day as anything. */
+const isSameDay = (a, b) => {
+  if (a == null || b == null) return false;
+  const da = new Date(a);
+  const db = new Date(b);
+  if (Number.isNaN(da.getTime()) || Number.isNaN(db.getTime())) return false;
+  return (
+    da.getFullYear() === db.getFullYear() &&
+    da.getMonth() === db.getMonth() &&
+    da.getDate() === db.getDate()
+  );
+};
+
+/** True when the value is today (local time). */
+const isToday = (value) => isSameDay(value, new Date());
 
 let lineSeq = 0;
 const nextKey = () => `line-${(lineSeq += 1)}`;
@@ -188,7 +207,17 @@ const unitWord = (line) => (line.seedling ? "trays" : "plants");
 
 /* ── per-row change detection ────────────────────────────────────────
    Each row remembers the values it was last saved with (the `base*` fields).
-   These helpers say what moved, and are also what the reason modal lists. */
+   These helpers say what moved, and are also what the reason popups list.
+
+   Each field also carries its own reason (line.fieldReasons[field]), gathered
+   inline the moment that field is edited and blurred — no longer at save. */
+
+const FIELD_META = {
+  quantity: { label: "Quantity", icon: "swap-horizontal" },
+  unit: { label: "Unit", icon: "business-outline" },
+  packing: { label: "Packing", icon: "cube-outline" },
+  choice: { label: "Selected by customer", icon: "person-outline" },
+};
 
 const quantityChanged = (line) =>
   line.isNew || toCount(line.quantity) !== toCount(line.baseQuantity);
@@ -209,6 +238,56 @@ const lineChanged = (line) =>
   packingChanged(line) ||
   choiceChanged(line) ||
   unitChanged(line);
+
+/** Whether a specific field on a line differs from its saved baseline.
+    New rows have no baseline for a field-level compare (the whole row is new),
+    so per-field reasoning never fires for them. */
+const fieldChanged = (line, field) => {
+  if (line.isNew) return false;
+  switch (field) {
+    case "quantity":
+      return toCount(line.quantity) !== toCount(line.baseQuantity);
+    case "unit":
+      return (line.unitId ?? null) !== (line.baseUnitId ?? null);
+    case "packing":
+      return (
+        line.packingName !== line.basePackingName ||
+        toMoney(line.packingCharge) !== toMoney(line.basePackingCharge)
+      );
+    case "choice":
+      return !!line.selectedByCustomer !== !!line.baseSelectedByCustomer;
+    default:
+      return false;
+  }
+};
+
+/** Human before/after for a field, used by the per-field reason popup. */
+const fieldDelta = (line, field) => {
+  switch (field) {
+    case "quantity":
+      return {
+        from: `${formatNumber(toCount(line.baseQuantity))} ${unitWord(line)}`,
+        to: `${formatNumber(toCount(line.quantity))} ${unitWord(line)}`,
+      };
+    case "unit":
+      return {
+        from: line.baseUnitName || "previous unit",
+        to: line.unitName || "—",
+      };
+    case "packing":
+      return {
+        from: `${line.basePackingName} (${formatAmount(line.basePackingCharge)})`,
+        to: `${line.packingName} (${formatAmount(line.packingCharge)})`,
+      };
+    case "choice":
+      return {
+        from: line.baseSelectedByCustomer ? "Yes" : "No",
+        to: line.selectedByCustomer ? "Yes" : "No",
+      };
+    default:
+      return { from: "", to: "" };
+  }
+};
 
 /** Everything the save call cares about, flattened so it can be compared. */
 const signatureOf = (lines) =>
@@ -288,12 +367,16 @@ const lineFromReservation = (reservation, isDraft) => {
     basePackingCharge: packingCharge,
     baseSelectedByCustomer: chosen,
     baseUnitId: reservation.unitId ?? null,
+    baseUnitName: reservation.unitName ?? null,
+    /* per-field reasons, gathered inline as each field is edited */
+    fieldReasons: {},
     checked: false,
     isNew: false,
   };
 };
 
-/** Fold a freshly saved row back into its baseline: same values, nothing dirty. */
+/** Fold a freshly saved row back into its baseline: same values, nothing dirty,
+    and the collected per-field reasons cleared. */
 const settleLine = (line) => ({
   ...line,
   baseQuantity: String(toCount(line.quantity)),
@@ -301,6 +384,8 @@ const settleLine = (line) => ({
   basePackingCharge: line.packingCharge,
   baseSelectedByCustomer: !!line.selectedByCustomer,
   baseUnitId: line.unitId ?? null,
+  baseUnitName: line.unitName ?? null,
+  fieldReasons: {},
   isNew: false,
 });
 
@@ -744,121 +829,193 @@ function SpecialPlantModal({ styles, onAdd, onClose }) {
   );
 }
 
-/* ── reason modal ────────────────────────────────────────────────────
-   The single place a reason is ever collected. It is a gate in front of an
-   action, not a field on a row: it summarises what is about to be recorded
-   and hands the reasons back so the caller can run the action.
+/* ── per-field reason modal ──────────────────────────────────────────
+   Opens the instant a single field is edited and the user clicks away. It
+   shows exactly one change (the field that just moved), takes one reason, and
+   hands it back so it can be stored on the line. Cancel reverts the field.
 
-   Each changed plant gets its *own* reason field — a shared box would force
-   one explanation onto every plant, which is rarely true. Quotation-level
-   adjustments (transport, discount, advance) are not tied to a plant, so
-   they share a single "other changes" field.
-
-   `request` is { summary, lineGroups[], otherChanges[], confirmLabel,
-   confirmTone }. Each lineGroup is { key, title, subtitle?, changes[] }.
-   Each change is { icon, tone, title, detail?, from?, to? }. */
-function ReasonModal({ styles, request, busy, error, onSubmit, onClose }) {
+   `request` is { plantName, field, from, to, existing }. */
+function FieldReasonModal({ styles, request, onSubmit, onCancel }) {
   const C = styles.colors;
-  const [reasons, setReasons] = useState({});
+  const meta = FIELD_META[request?.field] || {
+    label: "Field",
+    icon: "create-outline",
+  };
+  const [reason, setReason] = useState(request?.existing || "");
   const [touched, setTouched] = useState(false);
 
-  const lineGroups = request?.lineGroups || [];
-  const otherChanges = request?.otherChanges || [];
-  const hasOther = otherChanges.length > 0;
-  const groups = [
-    ...lineGroups.map((group) => ({ ...group, isOther: false })),
-    ...(hasOther
-      ? [
-          {
-            key: "other",
-            title: "Other adjustments",
-            changes: otherChanges,
-            isOther: true,
-          },
-        ]
-      : []),
-  ];
+  const trimmed = reason.trim();
+  const missing = trimmed.length === 0;
+  const tooShort = !missing && trimmed.length < 3;
+  const invalid = missing || tooShort;
 
-  const reasonOf = (key) => String(reasons[key] || "");
-  const groupInvalid = (key) => {
-    const trimmed = reasonOf(key).trim();
-    return trimmed.length === 0 || trimmed.length < 3;
-  };
-  const invalid =
-    groups.length === 0 || groups.some((g) => groupInvalid(g.key));
-
-  const setReasonFor = (key, value) =>
-    setReasons((prev) => ({ ...prev, [key]: value }));
-
-  const applyPresetEverywhere = (preset) => {
-    setReasons((prev) => {
-      const next = { ...prev };
-      groups.forEach((g) => {
-        if (!String(next[g.key] || "").trim()) next[g.key] = preset;
-      });
-      return next;
-    });
+  const submit = () => {
     setTouched(true);
+    if (invalid) return;
+    onSubmit(trimmed);
   };
+
+  return (
+    <Modal transparent animationType="fade" visible onRequestClose={onCancel}>
+      <Pressable style={styles.sheetBackdrop} onPress={onCancel}>
+        <Pressable style={styles.reasonSheet} onPress={() => {}}>
+          <View style={styles.reasonHeader}>
+            <View style={styles.reasonHeaderIcon}>
+              <Ionicons name="create-outline" size={20} color={C.ALERT} />
+            </View>
+            <View style={styles.reasonHeaderText}>
+              <Text style={styles.reasonTitle}>Reason Required</Text>
+              <Text style={styles.reasonSubtitle}>
+                {request?.plantName} · {meta.label} changed. Past draft, every
+                change is recorded.
+              </Text>
+            </View>
+          </View>
+
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.reasonBody}>
+              <View style={styles.reasonBlock}>
+                <View style={styles.reasonBlockHead}>
+                  <Ionicons name="leaf-outline" size={15} color={C.NAVY} />
+                  <Text style={styles.reasonBlockLabel}>
+                    {request?.plantName}
+                  </Text>
+                </View>
+
+                <View style={styles.changeList}>
+                  <View style={[styles.changeRow, styles.changeRowLast]}>
+                    <View style={[styles.changeIcon, styles.changeIconEdit]}>
+                      <Ionicons name={meta.icon} size={13} color={C.ALERT} />
+                    </View>
+                    <View style={styles.changeBody}>
+                      <Text style={styles.changeTitle}>
+                        {meta.label} changed
+                      </Text>
+                      {request?.from != null && request?.to != null ? (
+                        <View style={styles.changeFromTo}>
+                          <Text style={styles.changeFrom}>{request.from}</Text>
+                          <Ionicons
+                            name="arrow-forward"
+                            size={12}
+                            color={C.MUTED}
+                          />
+                          <Text style={styles.changeTo}>{request.to}</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  </View>
+                </View>
+
+                <TextInput
+                  style={[
+                    styles.reasonInputCompact,
+                    touched && invalid && styles.reasonInputLgError,
+                  ]}
+                  value={reason}
+                  onChangeText={setReason}
+                  onBlur={() => setTouched(true)}
+                  placeholder={`Why did ${meta.label.toLowerCase()} change?`}
+                  placeholderTextColor={C.FAINT}
+                  multiline
+                  autoFocus
+                  maxLength={300}
+                />
+
+                <View style={styles.reasonFootRow}>
+                  {touched && missing ? (
+                    <Text style={styles.reasonHelpError}>
+                      A reason is required.
+                    </Text>
+                  ) : touched && tooShort ? (
+                    <Text style={styles.reasonHelpError}>
+                      Add a little more detail.
+                    </Text>
+                  ) : (
+                    <Text style={styles.reasonHelp}>
+                      Saved against this quotation&apos;s audit history.
+                    </Text>
+                  )}
+                  <Text style={styles.reasonCounter}>{trimmed.length}/300</Text>
+                </View>
+              </View>
+
+              <View style={styles.reasonChipRow}>
+                {REASON_PRESETS.map((preset) => (
+                  <Pressable
+                    key={preset}
+                    style={({ hovered, pressed }) => [
+                      styles.reasonChip,
+                      (hovered || pressed) && styles.reasonChipHover,
+                    ]}
+                    onPress={() => setReason(preset)}
+                  >
+                    <Text style={styles.reasonChipText}>{preset}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          </ScrollView>
+
+          <View style={styles.reasonActions}>
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.modalCancel,
+                (hovered || pressed) && styles.ghostButtonHover,
+              ]}
+              onPress={onCancel}
+            >
+              <Text style={styles.modalCancelText}>CANCEL</Text>
+            </Pressable>
+
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.modalApply,
+                (hovered || pressed) && !invalid && styles.primaryButtonHover,
+                invalid && styles.primaryButtonDisabled,
+              ]}
+              onPress={submit}
+              disabled={invalid}
+            >
+              <Ionicons name="checkmark" size={17} color="#FFFFFF" />
+              <Text style={styles.modalApplyText}>SAVE REASON</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+/* ── delete reason modal ─────────────────────────────────────────────
+   A gate in front of a delete past Draft: it summarises the row being removed,
+   takes a single reason, and hands it back so the caller can run the delete +
+   save. Quantity/unit/packing/choice edits no longer come through here — those
+   are reasoned inline per field. */
+function DeleteReasonModal({
+  styles,
+  request,
+  busy,
+  error,
+  onSubmit,
+  onClose,
+}) {
+  const C = styles.colors;
+  const [reason, setReason] = useState("");
+  const [touched, setTouched] = useState(false);
+
+  const trimmed = reason.trim();
+  const missing = trimmed.length === 0;
+  const tooShort = !missing && trimmed.length < 3;
+  const invalid = missing || tooShort;
 
   const submit = () => {
     setTouched(true);
     if (invalid || busy) return;
-    const trimmedReasons = {};
-    groups.forEach((g) => {
-      trimmedReasons[g.key] = reasonOf(g.key).trim();
-    });
-    onSubmit(trimmedReasons);
+    onSubmit(trimmed);
   };
-
-  const destructive = request?.confirmTone === "danger";
-  const totalGroups = groups.length;
-
-  const renderChangeRows = (changes) =>
-    changes.map((change, index) => (
-      <View
-        key={`${change.title}-${index}`}
-        style={[
-          styles.changeRow,
-          index === changes.length - 1 && styles.changeRowLast,
-        ]}
-      >
-        <View
-          style={[
-            styles.changeIcon,
-            change.tone === "add" && styles.changeIconAdd,
-            change.tone === "remove" && styles.changeIconRemove,
-            change.tone === "edit" && styles.changeIconEdit,
-          ]}
-        >
-          <Ionicons
-            name={change.icon || "ellipse-outline"}
-            size={13}
-            color={
-              change.tone === "add"
-                ? C.GREEN_DEEP
-                : change.tone === "remove"
-                  ? C.RED
-                  : C.ALERT
-            }
-          />
-        </View>
-
-        <View style={styles.changeBody}>
-          <Text style={styles.changeTitle}>{change.title}</Text>
-          {change.detail ? (
-            <Text style={styles.changeDetail}>{change.detail}</Text>
-          ) : null}
-          {change.from != null && change.to != null ? (
-            <View style={styles.changeFromTo}>
-              <Text style={styles.changeFrom}>{change.from}</Text>
-              <Ionicons name="arrow-forward" size={12} color={C.MUTED} />
-              <Text style={styles.changeTo}>{change.to}</Text>
-            </View>
-          ) : null}
-        </View>
-      </View>
-    ));
 
   return (
     <Modal
@@ -872,27 +1029,14 @@ function ReasonModal({ styles, request, busy, error, onSubmit, onClose }) {
         onPress={busy ? undefined : onClose}
       >
         <Pressable style={styles.reasonSheet} onPress={() => {}}>
-          {/* header */}
           <View style={styles.reasonHeader}>
             <View style={styles.reasonHeaderIcon}>
-              <Ionicons
-                name={destructive ? "trash-outline" : "create-outline"}
-                size={20}
-                color={C.ALERT}
-              />
+              <Ionicons name="trash-outline" size={20} color={C.ALERT} />
             </View>
             <View style={styles.reasonHeaderText}>
               <Text style={styles.reasonTitle}>Reason Required</Text>
-              <Text style={styles.reasonSubtitle}>
-                {request?.summary ||
-                  "This quotation has left draft, so the change has to be recorded."}
-              </Text>
+              <Text style={styles.reasonSubtitle}>{request?.summary}</Text>
             </View>
-            {totalGroups > 1 ? (
-              <View style={styles.reasonCountTag}>
-                <Text style={styles.reasonCountText}>{totalGroups}</Text>
-              </View>
-            ) : null}
           </View>
 
           <ScrollView
@@ -900,113 +1044,80 @@ function ReasonModal({ styles, request, busy, error, onSubmit, onClose }) {
             showsVerticalScrollIndicator={false}
           >
             <View style={styles.reasonBody}>
-              {groups.length === 0 ? (
+              <View style={styles.reasonBlock}>
+                <View style={styles.reasonBlockHead}>
+                  <Ionicons name="leaf-outline" size={15} color={C.NAVY} />
+                  <Text style={styles.reasonBlockLabel}>{request?.title}</Text>
+                </View>
+
                 <View style={styles.changeList}>
                   <View style={[styles.changeRow, styles.changeRowLast]}>
+                    <View style={[styles.changeIcon, styles.changeIconRemove]}>
+                      <Ionicons name="trash-outline" size={13} color={C.RED} />
+                    </View>
                     <View style={styles.changeBody}>
-                      <Text style={styles.changeDetail}>
-                        No field-level detail for this action.
-                      </Text>
+                      <Text style={styles.changeTitle}>Deleted</Text>
+                      {request?.detail ? (
+                        <Text style={styles.changeDetail}>
+                          {request.detail}
+                        </Text>
+                      ) : null}
                     </View>
                   </View>
                 </View>
-              ) : (
-                groups.map((group) => {
-                  const trimmed = reasonOf(group.key).trim();
-                  const missing = trimmed.length === 0;
-                  const tooShort = !missing && trimmed.length < 3;
 
-                  return (
-                    <View key={group.key} style={styles.reasonBlock}>
-                      <View style={styles.reasonBlockHead}>
-                        <Ionicons
-                          name={
-                            group.isOther ? "options-outline" : "leaf-outline"
-                          }
-                          size={15}
-                          color={C.NAVY}
-                        />
-                        <Text style={styles.reasonBlockLabel}>
-                          {group.title}
-                        </Text>
-                        {group.changes.length > 1 ? (
-                          <View style={styles.reasonCountTag}>
-                            <Text style={styles.reasonCountText}>
-                              {group.changes.length}
-                            </Text>
-                          </View>
-                        ) : null}
-                      </View>
+                <TextInput
+                  style={[
+                    styles.reasonInputCompact,
+                    touched && invalid && styles.reasonInputLgError,
+                  ]}
+                  value={reason}
+                  onChangeText={setReason}
+                  onBlur={() => setTouched(true)}
+                  placeholder="Why is this plant being removed?"
+                  placeholderTextColor={C.FAINT}
+                  multiline
+                  autoFocus
+                  editable={!busy}
+                  maxLength={300}
+                />
 
-                      <View style={styles.changeList}>
-                        {renderChangeRows(group.changes)}
-                      </View>
-
-                      <TextInput
-                        style={[
-                          styles.reasonInputCompact,
-                          touched &&
-                            groupInvalid(group.key) &&
-                            styles.reasonInputLgError,
-                        ]}
-                        value={reasons[group.key] || ""}
-                        onChangeText={(value) => setReasonFor(group.key, value)}
-                        onBlur={() => setTouched(true)}
-                        placeholder={
-                          group.isOther
-                            ? "Why are these adjustments being made?"
-                            : `Why did ${group.title} change?`
-                        }
-                        placeholderTextColor={C.FAINT}
-                        multiline
-                        editable={!busy}
-                        maxLength={300}
-                      />
-
-                      <View style={styles.reasonFootRow}>
-                        {touched && missing ? (
-                          <Text style={styles.reasonHelpError}>
-                            A reason is required.
-                          </Text>
-                        ) : touched && tooShort ? (
-                          <Text style={styles.reasonHelpError}>
-                            Add a little more detail.
-                          </Text>
-                        ) : (
-                          <Text style={styles.reasonHelp}>
-                            Saved against this quotation&apos;s audit history.
-                          </Text>
-                        )}
-                        <Text style={styles.reasonCounter}>
-                          {trimmed.length}/300
-                        </Text>
-                      </View>
-                    </View>
-                  );
-                })
-              )}
-
-              {groups.length > 0 ? (
-                <View style={styles.reasonChipRow}>
-                  {REASON_PRESETS.map((preset) => (
-                    <Pressable
-                      key={preset}
-                      style={({ hovered, pressed }) => [
-                        styles.reasonChip,
-                        (hovered || pressed) && styles.reasonChipHover,
-                      ]}
-                      onPress={() => applyPresetEverywhere(preset)}
-                      disabled={busy}
-                    >
-                      <Text style={styles.reasonChipText}>{preset}</Text>
-                    </Pressable>
-                  ))}
+                <View style={styles.reasonFootRow}>
+                  {touched && missing ? (
+                    <Text style={styles.reasonHelpError}>
+                      A reason is required.
+                    </Text>
+                  ) : touched && tooShort ? (
+                    <Text style={styles.reasonHelpError}>
+                      Add a little more detail.
+                    </Text>
+                  ) : (
+                    <Text style={styles.reasonHelp}>
+                      Saved against this quotation&apos;s audit history.
+                    </Text>
+                  )}
+                  <Text style={styles.reasonCounter}>{trimmed.length}/300</Text>
                 </View>
-              ) : null}
+              </View>
+
+              <View style={styles.reasonChipRow}>
+                {REASON_PRESETS.map((preset) => (
+                  <Pressable
+                    key={preset}
+                    style={({ hovered, pressed }) => [
+                      styles.reasonChip,
+                      (hovered || pressed) && styles.reasonChipHover,
+                    ]}
+                    onPress={() => setReason(preset)}
+                    disabled={busy}
+                  >
+                    <Text style={styles.reasonChipText}>{preset}</Text>
+                  </Pressable>
+                ))}
+              </View>
             </View>
           </ScrollView>
 
-          {/* actions */}
           {error ? (
             <View style={styles.banner}>
               <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
@@ -1038,10 +1149,10 @@ function ReasonModal({ styles, request, busy, error, onSubmit, onClose }) {
               {busy ? (
                 <ActivityIndicator color="#FFFFFF" />
               ) : (
-                <Ionicons name="save-outline" size={17} color="#FFFFFF" />
+                <Ionicons name="trash-outline" size={17} color="#FFFFFF" />
               )}
               <Text style={styles.modalApplyText}>
-                {busy ? "SAVING…" : request?.confirmLabel || "SAVE"}
+                {busy ? "SAVING…" : "DELETE & SAVE"}
               </Text>
             </Pressable>
           </View>
@@ -1054,38 +1165,27 @@ function ReasonModal({ styles, request, busy, error, onSubmit, onClose }) {
 /**
  * Edit the plants on a quotation.
  *
- * Level drives the whole screen. In Draft the grid is fully editable and
- * nothing is audited: plants can be added, removed, re-quantified, re-packed
- * and re-flagged, then saved, without ever being asked for a reason. Once the
- * quotation leaves Draft every change is history, so the Reason Modal gates the
- * save and the delete; in Delivery shade each row also gets a tick box so the
- * packer can check items off. Once invoiced the screen is read-only.
+ * Access: on open the screen calls /check/access. Anything other than an
+ * explicit EDIT grant — including a failed lookup — defaults to READ, which is
+ * fully read-only (same surface as an invoiced quotation).
  *
- * `selectedByCustomer` is a Yes / No dropdown. New rows default to **No** — a
- * plant belongs to the nursery until somebody says the customer asked for it.
+ * Level drives the editable surface. In Draft the grid is fully editable and
+ * nothing is audited. Once the quotation leaves Draft every change is history:
+ * editing a field and clicking away opens a per-field reason popup then and
+ * there (Cancel reverts the field), and each reason rides along on its own row
+ * at save. Deletes past Draft are gated by their own reason modal. Once
+ * invoiced — or when access is READ — the screen is read-only.
  *
- * Reasons are never collected inline. The Reason Modal opens only when one is
- * actually required (past Draft), lists exactly what is about to be recorded
- * under "Values updated", takes a single reason, and then runs the action it
- * was gating. That same reason is sent on every changed row of the save.
+ * `selectedByCustomer` is a Yes / No dropdown. New rows default to No.
  *
  * Saving is deliberately inert: SAVE CHANGES, MOVE TO LOADING SHADE and
- * GENERATE INVOICE all call `updateQuotationPlants` and stop. Nothing chains
- * into `moveToLoadingShade` or `generateInvoice`; those run only from their own
- * dedicated confirm, once there is nothing left unsaved. The modal never closes
- * on save — the response is folded back into the screen by `rehydrate`, so the
- * plant list, special plants, packing, discount, transport, offers and every
- * total refresh in place.
+ * GENERATE INVOICE all call `updateQuotationPlants` and stop. The modal never
+ * closes on save — the response is folded back into the screen by `rehydrate`.
  *
- * Layout contract: the grid never scrolls sideways. Column widths come from the
- * measured container and the plant column absorbs the remainder. Under 760px
- * each row becomes an editable card.
- *
- * The screen holds the complete final state of the quotation and sends it in
- * one call: rows removed here are removed on the server. The request shape is
- * unchanged — for seedlings the tray count is still what goes over the wire.
+ * Layout contract: the grid never scrolls sideways. Under 760px each row
+ * becomes an editable card.
  */
-export default function Edit({ quotation, onClose, onSaved }) {
+function EditInner({ quotation, onClose, onSaved }) {
   const { width } = useWindowDimensions();
   const [avail, setAvail] = useState(0);
 
@@ -1105,15 +1205,34 @@ export default function Edit({ quotation, onClose, onSaved }) {
      without the parent having to remount it. */
   const [level, setLevel] = useState(quotation?.level);
 
+  /* Access control. Starts READ so the screen is locked until the check
+     resolves; only an explicit EDIT grant unlocks editing. `accessResolved`
+     avoids a flash of an editable grid before the answer lands. */
+  const [access, setAccess] = useState("READ");
+  const [accessResolved, setAccessResolved] = useState(false);
+  const canEdit = access === "EDIT";
+
   const isDraft = level === "DRAFT";
   const isDelivery = level === "DELIVERY_SHADE";
   const isInvoiced = level === "INVOICE_GENERATED";
 
-  const canEditLines = !isInvoiced; // quantities, units, packing, add and remove
-  const canEditTotals = !isInvoiced; // discount, transport, specials
-  const showChecks = isDelivery; // tick boxes live in the action column
+  /* Editing needs BOTH an EDIT grant and a non-invoiced level. READ collapses
+     the whole screen to the same read-only surface as an invoice. */
+  const canEditLines = canEdit && !isInvoiced; // quantities, units, packing, add/remove
+  const canEditTotals = canEdit && !isInvoiced; // discount, transport, specials
+  const showChecks = canEdit && isDelivery; // tick boxes live in the action column
   /* Draft is not history. Nothing before this point is audited or reasoned. */
   const auditActive = !isDraft;
+
+  /* The advance is only editable in Draft, and even then only in two cases:
+     nothing has been collected yet (advancePayment == 0), or it was collected
+     today and is still same-day editable (advancePaymentDate is today). Once
+     the quotation leaves Draft, or an advance was taken on an earlier day, it
+     is locked. */
+  const advanceUnlocked =
+    toMoney(quotation?.advancePayment) === 0 ||
+    isToday(quotation?.advancePaymentDate);
+  const canEditAdvance = canEditTotals && isDraft && advanceUnlocked;
 
   const levelMeta = LEVEL_META[level] || {
     label: level || "—",
@@ -1189,11 +1308,38 @@ export default function Edit({ quotation, onClose, onSaved }) {
   const [userId, setUserId] = useState(null);
   const [pdf, setPdf] = useState(null);
 
-  /* The reason modal is a gate in front of a pending action. */
-  const [pendingAction, setPendingAction] = useState(null);
+  /* The delete reason modal is a gate in front of a pending delete. */
+  const [pendingDelete, setPendingDelete] = useState(null);
+
+  /* The per-field reason popup. `fieldReasonRequest` describes the single field
+     that just changed and is awaiting a reason. */
+  const [fieldReasonRequest, setFieldReasonRequest] = useState(null);
 
   const searchTimer = useRef(null);
   const searchRef = useRef(null);
+
+  /* ── access check ─────────────────────────────────────────────────
+     Runs once on open. Any non-EDIT answer (including an error or a missing
+     payload) leaves access at READ, so the safe default is read-only. */
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const id = quotation?.quotationId;
+      if (id == null) {
+        if (alive) setAccessResolved(true);
+        return;
+      }
+      const response = await getQuotationAccess(id);
+      if (!alive) return;
+      const granted =
+        response?.status === "SUCCESS" ? response.payload?.accessLevel : null;
+      setAccess(granted === "EDIT" ? "EDIT" : "READ");
+      setAccessResolved(true);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [quotation?.quotationId]);
 
   /* ── bootstrap ───────────────────────────────────────────────────── */
   useEffect(() => {
@@ -1320,6 +1466,127 @@ export default function Edit({ quotation, onClose, onSaved }) {
     });
   }, []);
 
+  /* ── per-field reason handling ───────────────────────────────────────
+     `commitFieldEdit` is called from a field's onBlur. Past Draft, if the
+     field differs from its saved baseline and the row isn't new, it opens the
+     per-field reason popup pre-filled with any reason already recorded for that
+     field. In Draft it does nothing — Draft is never audited. */
+  const commitFieldEdit = useCallback(
+    (key, field) => {
+      if (!auditActive) return;
+      setLines((prev) => {
+        const line = prev.find((l) => l.key === key);
+        if (!line || line.isNew) return prev;
+        if (!fieldChanged(line, field)) {
+          /* Field returned to its baseline value — drop any stashed reason. */
+          if (line.fieldReasons?.[field]) {
+            const nextReasons = { ...line.fieldReasons };
+            delete nextReasons[field];
+            return prev.map((l) =>
+              l.key === key ? { ...l, fieldReasons: nextReasons } : l,
+            );
+          }
+          return prev;
+        }
+        const delta = fieldDelta(line, field);
+        setFieldReasonRequest({
+          key,
+          field,
+          plantName: line.plantName,
+          from: delta.from,
+          to: delta.to,
+          existing: line.fieldReasons?.[field] || "",
+          /* Snapshot the baseline value so Cancel can revert precisely. */
+          snapshot: {
+            quantity: line.baseQuantity,
+            unitId: line.baseUnitId,
+            unitName: line.baseUnitName,
+            packingName: line.basePackingName,
+            packingCharge: line.basePackingCharge,
+            packingId: line.packingId,
+            packingCustom: line.packingCustom,
+            packingManual: line.packingManual,
+            selectedByCustomer: line.baseSelectedByCustomer,
+          },
+        });
+        return prev;
+      });
+    },
+    [auditActive],
+  );
+
+  /* Reason accepted: stash it on the line under its field and close the popup. */
+  const acceptFieldReason = useCallback(
+    (reason) => {
+      const req = fieldReasonRequest;
+      if (!req) return;
+      setLines((prev) =>
+        prev.map((line) =>
+          line.key === req.key
+            ? {
+                ...line,
+                fieldReasons: { ...line.fieldReasons, [req.field]: reason },
+              }
+            : line,
+        ),
+      );
+      setFieldReasonRequest(null);
+    },
+    [fieldReasonRequest],
+  );
+
+  /* Reason cancelled: revert the just-edited field to its baseline snapshot and
+     clear any reason recorded for it. */
+  const cancelFieldReason = useCallback(() => {
+    const req = fieldReasonRequest;
+    if (!req) {
+      setFieldReasonRequest(null);
+      return;
+    }
+    setLines((prev) =>
+      prev.map((line) => {
+        if (line.key !== req.key) return line;
+        const nextReasons = { ...line.fieldReasons };
+        delete nextReasons[req.field];
+        const snap = req.snapshot || {};
+        switch (req.field) {
+          case "quantity":
+            return {
+              ...line,
+              quantity: snap.quantity,
+              fieldReasons: nextReasons,
+            };
+          case "unit":
+            return {
+              ...line,
+              unitId: snap.unitId ?? null,
+              unitName: snap.unitName ?? null,
+              fieldReasons: nextReasons,
+            };
+          case "packing":
+            return {
+              ...line,
+              packingName: snap.packingName,
+              packingCharge: snap.packingCharge,
+              packingId: snap.packingId ?? null,
+              packingCustom: !!snap.packingCustom,
+              packingManual: !!snap.packingManual,
+              fieldReasons: nextReasons,
+            };
+          case "choice":
+            return {
+              ...line,
+              selectedByCustomer: !!snap.selectedByCustomer,
+              fieldReasons: nextReasons,
+            };
+          default:
+            return { ...line, fieldReasons: nextReasons };
+        }
+      }),
+    );
+    setFieldReasonRequest(null);
+  }, [fieldReasonRequest]);
+
   const addPlant = useCallback(
     (plant) => {
       const inventory = plant.inventoryList || [];
@@ -1380,6 +1647,8 @@ export default function Edit({ quotation, onClose, onSaved }) {
             basePackingCharge: packingCharge,
             baseSelectedByCustomer: false,
             baseUnitId: preferred?.unitId ?? null,
+            baseUnitName: preferred?.unitName ?? null,
+            fieldReasons: {},
             checked: false,
             isNew: true,
           },
@@ -1468,8 +1737,10 @@ export default function Edit({ quotation, onClose, onSaved }) {
         available: inventory.quantity ?? null,
       });
       setPicker(null);
+      /* A picker selection is an immediate, discrete edit — reason it now. */
+      setTimeout(() => commitFieldEdit(line.key, "unit"), 0);
     },
-    [updateLine],
+    [updateLine, commitFieldEdit],
   );
 
   const choosePacking = useCallback(
@@ -1484,6 +1755,8 @@ export default function Edit({ quotation, onClose, onSaved }) {
           packingManual: true,
         });
         setPicker(null);
+        /* Custom leaves the charge to be typed; the charge input's own blur
+           will fire the packing reason once the amount is set. */
         return;
       }
 
@@ -1495,16 +1768,18 @@ export default function Edit({ quotation, onClose, onSaved }) {
         packingCustom: false,
       });
       setPicker(null);
+      setTimeout(() => commitFieldEdit(line.key, "packing"), 0);
     },
-    [updateLine, packings],
+    [updateLine, commitFieldEdit],
   );
 
   const chooseChoice = useCallback(
     (line, option) => {
       updateLine(line.key, { selectedByCustomer: option.value });
       setPicker(null);
+      setTimeout(() => commitFieldEdit(line.key, "choice"), 0);
     },
-    [updateLine],
+    [updateLine, commitFieldEdit],
   );
 
   const activeLine = useMemo(
@@ -1570,6 +1845,20 @@ export default function Edit({ quotation, onClose, onSaved }) {
     (line) => !line.unitId || toCount(line.quantity) <= 0,
   );
 
+  /* Past Draft, every changed field must carry a reason before saving. New
+     rows are exempt (they need no per-field reason). */
+  const missingFieldReason = useMemo(() => {
+    if (!auditActive) return false;
+    return lines.some((line) => {
+      if (line.isNew) return false;
+      return ["quantity", "unit", "packing", "choice"].some(
+        (field) =>
+          fieldChanged(line, field) &&
+          !String(line.fieldReasons?.[field] || "").trim(),
+      );
+    });
+  }, [auditActive, lines]);
+
   const discountEntered = toMoney(discount);
   const transportEntered = toMoney(transport);
   const advanceEntered = toMoney(advance);
@@ -1583,15 +1872,19 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   const working = saving || busy !== null;
 
-  const blockingReason = !userId
-    ? "Signed-in user not found. Sign in again to save."
-    : incomplete
-      ? "Every row needs a unit and a quantity above zero."
-      : discountRemarkMissing
-        ? "Add a remark for the additional discount."
-        : discountOverTotal
-          ? "The discount is more than the order total."
-          : null;
+  const blockingReason = !canEdit
+    ? "You have read-only access to this quotation."
+    : !userId
+      ? "Signed-in user not found. Sign in again to save."
+      : incomplete
+        ? "Every row needs a unit and a quantity above zero."
+        : missingFieldReason
+          ? "Add a reason for every changed field before saving."
+          : discountRemarkMissing
+            ? "Add a remark for the additional discount."
+            : discountOverTotal
+              ? "The discount is more than the order total."
+              : null;
 
   const canSave = dirty && !working && !blockingReason;
 
@@ -1611,11 +1904,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
     setAdvanceOpen(false);
   }, []);
 
-  /* ── rehydrate from a save response ──────────────────────────────────
-     The modal never closes on save, so everything the server recomputed —
-     prices, offers, packing amounts, totals, the level itself and the audit
-     trail — is folded back into the screen here. Tick state is preserved by
-     plant + unit so a packer does not lose their place. */
+  /* ── rehydrate from a save response ────────────────────────────────── */
   const rehydrate = useCallback(
     (payload) => {
       if (!payload) return;
@@ -1690,14 +1979,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
   );
 
   /* ── save ────────────────────────────────────────────────────────────
-     The only write this screen performs. It never chains into another call:
-     whatever asked for the save gets told whether it worked, and stops.
+     The only write this screen performs. It never chains into another call.
 
-     `reasons` is a map keyed by line key (plus "other" for quotation-level
-     adjustments), one entry per changed plant — the reason modal collects a
-     separate explanation for each row rather than one shared string. */
+     Per-field reasons now live on each line (line.fieldReasons). At save, each
+     changed field's reason is joined into a single per-row reason string sent
+     with that row. Draft is never audited, so no reasons are attached there. */
   const persist = useCallback(
-    async (reasons) => {
+    async ({ deleteReason } = {}) => {
       if (blockingReason) {
         setError(blockingReason);
         return null;
@@ -1711,25 +1999,30 @@ export default function Edit({ quotation, onClose, onSaved }) {
       const transportAmount = toMoney(transport);
       const advanceAmount = toMoney(advance);
 
+      const reasonForLine = (line) => {
+        if (!auditActive || line.isNew) return null;
+        const parts = ["quantity", "unit", "packing", "choice"]
+          .filter((field) => fieldChanged(line, field))
+          .map((field) => {
+            const r = String(line.fieldReasons?.[field] || "").trim();
+            return r ? `${FIELD_META[field].label}: ${r}` : null;
+          })
+          .filter(Boolean);
+        return parts.length > 0 ? parts.join(" · ") : null;
+      };
+
       const body = {
-        plantList: lines.map((line) => {
-          const reasonForLine = String(reasons?.[line.key] || "").trim();
-          return {
-            plantId: line.plantId,
-            // Unchanged contract: seedlings still send the tray count.
-            quantityReserved: toCount(line.quantity),
-            unitId: line.unitId,
-            unitName: line.unitName,
-            packingName: line.packingName,
-            packingCharge: toMoney(line.packingCharge),
-            selectedByCustomer: line.selectedByCustomer,
-            // Draft is never audited, so no reason is ever attached there.
-            reason:
-              auditActive && reasonForLine && lineChanged(line)
-                ? reasonForLine
-                : null,
-          };
-        }),
+        plantList: lines.map((line) => ({
+          plantId: line.plantId,
+          // Unchanged contract: seedlings still send the tray count.
+          quantityReserved: toCount(line.quantity),
+          unitId: line.unitId,
+          unitName: line.unitName,
+          packingName: line.packingName,
+          packingCharge: toMoney(line.packingCharge),
+          selectedByCustomer: line.selectedByCustomer,
+          reason: lineChanged(line) ? reasonForLine(line) : null,
+        })),
         specialPlantList: specials.map((special) => ({
           barcodeId: special.barcodeId,
         })),
@@ -1738,6 +2031,9 @@ export default function Edit({ quotation, onClose, onSaved }) {
           discountAmount > 0 ? discountRemark.trim() : null,
         transportationCost: transportAmount,
         advanceAmount,
+        /* Delete reasons aren't tied to a surviving row, so they ride along at
+           the document level when a removal triggered this save. */
+        deleteReason: deleteReason || null,
       };
 
       const response = await updateQuotationPlants(
@@ -1767,9 +2063,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
         }
 
         setNotice(response.message || "Quotation saved.");
-        /* The parent is told, but this is a plain in-place save: the second
-           argument tells the parent NOT to close the Edit screen. The reason
-           modal and the Edit screen both stay open; the user closes them. */
         onSaved?.(payload ?? true, { source: "save", keepOpen: true });
         return payload ?? true;
       }
@@ -1793,120 +2086,8 @@ export default function Edit({ quotation, onClose, onSaved }) {
     ],
   );
 
-  /* ── reason gate ─────────────────────────────────────────────────────
-     Builds the "values updated" summary for the modal from whatever is
-     actually dirty, so the operator sees precisely what will be recorded.
-     Grouped by plant — each changed plant gets its own reason field in the
-     modal, since one shared explanation rarely fits every row. Quotation-
-     level adjustments (transport, discount, advance) aren't tied to a
-     plant, so they come back separately as `otherChanges`. */
-  const describeChanges = useCallback(() => {
-    const lineGroups = [];
-
-    changedLines.forEach((line) => {
-      const changes = [];
-
-      if (line.isNew) {
-        changes.push({
-          icon: "add-circle-outline",
-          tone: "add",
-          title: "Added to quotation",
-          detail: `${formatNumber(toCount(line.quantity))} ${unitWord(line)} · ${
-            line.unitName || "no unit"
-          }`,
-        });
-      } else {
-        if (quantityChanged(line)) {
-          changes.push({
-            icon: "swap-horizontal",
-            tone: "edit",
-            title: "Quantity changed",
-            from: `${formatNumber(toCount(line.baseQuantity))} ${unitWord(line)}`,
-            to: `${formatNumber(toCount(line.quantity))} ${unitWord(line)}`,
-          });
-        }
-
-        if (unitChanged(line)) {
-          changes.push({
-            icon: "business-outline",
-            tone: "edit",
-            title: "Unit changed",
-            to: line.unitName || "—",
-            from: "previous unit",
-          });
-        }
-
-        if (packingChanged(line)) {
-          changes.push({
-            icon: "cube-outline",
-            tone: "edit",
-            title: "Packing changed",
-            from: `${line.basePackingName} (${formatAmount(
-              line.basePackingCharge,
-            )})`,
-            to: `${line.packingName} (${formatAmount(line.packingCharge)})`,
-          });
-        }
-
-        if (choiceChanged(line)) {
-          changes.push({
-            icon: "person-outline",
-            tone: "edit",
-            title: "Selected by customer changed",
-            from: line.baseSelectedByCustomer ? "Yes" : "No",
-            to: line.selectedByCustomer ? "Yes" : "No",
-          });
-        }
-      }
-
-      if (changes.length > 0) {
-        lineGroups.push({ key: line.key, title: line.plantName, changes });
-      }
-    });
-
-    const otherChanges = [];
-
-    if (transportEntered !== toMoney(quotation?.transportationCost)) {
-      otherChanges.push({
-        icon: "car-outline",
-        tone: "edit",
-        title: "Transport cost changed",
-        from: formatAmount(quotation?.transportationCost),
-        to: formatAmount(transportEntered),
-      });
-    }
-
-    if (discountEntered !== toMoney(quotation?.additionalDiscount)) {
-      otherChanges.push({
-        icon: "pricetag-outline",
-        tone: "edit",
-        title: "Additional discount changed",
-        from: formatAmount(quotation?.additionalDiscount),
-        to: formatAmount(discountEntered),
-      });
-    }
-
-    if (advanceEntered !== toMoney(quotation?.advancePayment)) {
-      otherChanges.push({
-        icon: "wallet-outline",
-        tone: "edit",
-        title: "Advance payment changed",
-        from: formatAmount(quotation?.advancePayment),
-        to: formatAmount(advanceEntered),
-      });
-    }
-
-    return { lineGroups, otherChanges };
-  }, [
-    changedLines,
-    transportEntered,
-    discountEntered,
-    advanceEntered,
-    quotation,
-  ]);
-
-  /* Save Changes. Past Draft it opens the reason modal first; in Draft it
-     saves straight away. Either way it stops at the save. */
+  /* Save Changes. All per-field reasons are already gathered inline, so this
+     just validates and writes — no summary modal in the way. */
   const handleSave = useCallback(() => {
     if (working) return;
 
@@ -1920,127 +2101,65 @@ export default function Edit({ quotation, onClose, onSaved }) {
       return;
     }
 
-    if (!auditActive) {
-      persist(null);
-      return;
-    }
+    persist();
+  }, [working, blockingReason, dirty, persist]);
 
-    const { lineGroups, otherChanges } = describeChanges();
-
-    setPendingAction({
-      type: "save",
-      request: {
-        summary:
-          "This quotation has left draft, so the changes below are recorded against its history.",
-        lineGroups,
-        otherChanges,
-        confirmLabel: "SAVE CHANGES",
-      },
-    });
-  }, [working, blockingReason, dirty, auditActive, persist, describeChanges]);
-
-  /* Delete. Allowed in Draft and Delivery shade; past Draft it is reasoned. */
+  /* Delete. Allowed in Draft and Delivery shade; past Draft it is reasoned via
+     the delete reason modal. */
   const requestDelete = useCallback(
     (line) => {
       if (working) return;
 
-      if (!auditActive) {
+      /* Draft, or a row added in this session (never saved): just drop it. */
+      if (!auditActive || line.isNew) {
         dropLine(line.key);
         return;
       }
 
-      /* A row added in this session was never saved, so removing it is not
-         history — it just goes away. */
-      if (line.isNew) {
-        dropLine(line.key);
-        return;
-      }
-
-      setPendingAction({
-        type: "delete",
+      setPendingDelete({
         lineKey: line.key,
         request: {
           summary: `${line.plantName} will be removed from this quotation and the removal recorded.`,
-          lineGroups: [
-            {
-              key: line.key,
-              title: line.plantName,
-              changes: [
-                {
-                  icon: "trash-outline",
-                  tone: "remove",
-                  title: "Deleted",
-                  detail: `${formatNumber(toCount(line.quantity))} ${unitWord(
-                    line,
-                  )} · ${line.unitName || "no unit"} · ${formatAmount(
-                    lineAmount(line),
-                  )}`,
-                },
-              ],
-            },
-          ],
-          otherChanges: [],
-          confirmLabel: "DELETE & SAVE",
-          confirmTone: "danger",
+          title: line.plantName,
+          detail: `${formatNumber(toCount(line.quantity))} ${unitWord(
+            line,
+          )} · ${line.unitName || "no unit"} · ${formatAmount(
+            lineAmount(line),
+          )}`,
         },
       });
     },
     [working, auditActive, dropLine],
   );
 
-  /* The reason modal hands the reason back here. A delete is applied to the
-     rows first, then the whole document is saved in one call. The modal
-     itself is not closed until the save actually resolves — closing it the
-     instant Save is pressed would hide the "SAVING…" state and, if the save
-     failed, drop the operator straight back to the screen with no obvious
-     way to see why or retry. */
-  const submitPendingAction = useCallback(
-    async (reasons) => {
-      const action = pendingAction;
+  /* The delete reason modal hands its reason back here. The row is dropped, the
+     resulting document is saved, and the modal closes only if the save
+     succeeds. `pendingDeleteReason` stages the save so it runs against the new
+     line list once state has committed. */
+  const [pendingDeleteReason, setPendingDeleteReason] = useState(null);
+
+  const submitDelete = useCallback(
+    (reason) => {
+      const action = pendingDelete;
       if (!action) return;
-
-      if (action.type === "delete") {
-        /* Drop the row, then save the resulting document. `persist` reads
-           `lines` from its closure, so the save is issued with the row
-           already removed rather than waiting for a re-render. */
-        const nextLines = lines.filter((line) => line.key !== action.lineKey);
-        setLines(nextLines);
-
-        // Give React a tick to commit before the save reads state.
-        setTimeout(() => {
-          setPendingActionReason({ reasons, lines: nextLines });
-        }, 0);
-        return;
-      }
-
-      /* Save the document, then close the reason modal only if the API
-         succeeded. `persist` returns the payload (truthy) on success and null
-         on failure, so a failed save leaves the modal open with its error. The
-         Edit screen itself stays open regardless — the parent keeps it open on
-         a plain save. */
-      const result = await persist(reasons);
-      if (result) setPendingAction(null);
+      setLines((prev) => prev.filter((line) => line.key !== action.lineKey));
+      setTimeout(() => {
+        setPendingDeleteReason({ reason });
+      }, 0);
     },
-    [pendingAction, lines, persist],
+    [pendingDelete],
   );
 
-  /* A delete needs the save to run against the *new* line list, so it is
-     staged here and picked up once the state has committed. The pending
-     action (and its modal) only closes once that save has actually gone
-     through. */
-  const [pendingActionReason, setPendingActionReason] = useState(null);
-
   useEffect(() => {
-    if (!pendingActionReason) return;
-    const { reasons } = pendingActionReason;
-    setPendingActionReason(null);
+    if (!pendingDeleteReason) return;
+    const { reason } = pendingDeleteReason;
+    setPendingDeleteReason(null);
     (async () => {
-      /* Close the reason modal only when the save actually succeeds. */
-      const result = await persist(reasons);
-      if (result) setPendingAction(null);
+      const result = await persist({ deleteReason: reason });
+      if (result) setPendingDelete(null);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingActionReason]);
+  }, [pendingDeleteReason]);
 
   /* ── paperwork ───────────────────────────────────────────────────── */
   const openPdf = useCallback(
@@ -2069,10 +2188,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
     setBusy(null);
   }, [working, isDelivery, openPdf]);
 
-  /* ── move / invoice ──────────────────────────────────────────────────
-     Neither of these ever fires from a save. When there is anything unsaved
-     the button saves and stops, leaving the operator to press it again once
-     the screen is clean. Only a clean screen actually runs the action. */
+  /* ── move / invoice ────────────────────────────────────────────────── */
   const runMove = useCallback(async () => {
     if (working) return;
 
@@ -2170,12 +2286,11 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   /* ── shared field renderers ──────────────────────────────────────── */
 
-  /* A row is editable when the quotation is not yet invoiced, or when it was
-     just added here. Past Draft the reserved rows are frozen for quantity, but
-     packing and the customer flag stay open — only invoicing freezes them. */
+  /* A row is editable when there's an EDIT grant AND the quotation is not yet
+     invoiced, or when it was just added here. */
   const lineEditable = useCallback(
-    (line) => canEditLines || !!line.isNew,
-    [canEditLines],
+    (line) => canEditLines || (canEdit && !!line.isNew),
+    [canEditLines, canEdit],
   );
 
   const checkBox = useCallback(
@@ -2325,6 +2440,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
               onChangeText={(value) =>
                 updateLine(line.key, { quantity: value.replace(/[^0-9]/g, "") })
               }
+              onBlur={() => commitFieldEdit(line.key, "quantity")}
               keyboardType="number-pad"
               selectTextOnFocus
               placeholder="0"
@@ -2357,7 +2473,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [styles, C, isDraft, lineEditable, updateLine],
+    [styles, C, isDraft, lineEditable, updateLine, commitFieldEdit],
   );
 
   const packingField = useCallback(
@@ -2389,8 +2505,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
       }
 
       const custom = isCustomPacking(line, packings);
-      /* The dropdown label: "Custom" when a hand-typed packing is in force,
-         otherwise the catalogue name (or the No-packing placeholder). */
       const selectLabel = custom
         ? "Custom"
         : line.packingName || NO_PACKING.packingName;
@@ -2437,6 +2551,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   packingManual: true,
                 })
               }
+              onBlur={() => commitFieldEdit(line.key, "packing")}
               keyboardType="decimal-pad"
               selectTextOnFocus
               placeholder="0"
@@ -2449,7 +2564,15 @@ export default function Edit({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [styles, C, lineEditable, openPackingPicker, updateLine, packings],
+    [
+      styles,
+      C,
+      lineEditable,
+      openPackingPicker,
+      updateLine,
+      packings,
+      commitFieldEdit,
+    ],
   );
 
   /* Selected by customer: a Yes / No dropdown, disabled when read-only. */
@@ -2539,8 +2662,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
     [styles, C, requestDelete],
   );
 
-  /* Delivery shade shows the tick box and the delete together: deletion is no
-     longer draft-only. */
   const actionField = useCallback(
     (line) => {
       if (line.isSpecial) {
@@ -2609,8 +2730,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
       packing: dense ? 150 : 168,
       choice: dense ? 108 : 120,
       amount: dense ? 104 : 118,
-      /* Check-all header is gone, so the action column no longer needs the
-         extra width the header checkbox used to demand. */
       action: showChecks && canEditLines ? 80 : 56,
     };
 
@@ -2631,8 +2750,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
         align: "left",
         render: (line) => (
           <View style={styles.cellFill}>
-            {/* Size is now folded into the title; the standalone size and
-                customer meta tags are gone. */}
             <Text style={styles.plantName} numberOfLines={1}>
               {line.isSpecial ? line.plantName : plantTitleWithSize(line)}
             </Text>
@@ -2769,7 +2886,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
         label: showChecks ? "Check" : "",
         size: w.action,
         align: "center",
-        /* The select-all header checkbox has been removed from delivery shade. */
         renderHead: null,
         render: actionField,
       },
@@ -2811,8 +2927,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
     [columns, styles],
   );
 
-  /* Special plants live in the same table as ordinary plants, flagged with a
-     SPECIAL tag. They render read-only cells (fixed qty of 1, no packing). */
   const tableRows = useMemo(
     () => [...lines, ...specials.map((sp) => ({ ...sp, isSpecial: true }))],
     [lines, specials],
@@ -2845,7 +2959,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
           </View>
 
           <View style={styles.fill}>
-            {/* Size folded into the title; no standalone size/customer tags. */}
             <Text style={styles.plantName} numberOfLines={1}>
               {item.isSpecial ? item.plantName : plantTitleWithSize(item)}
             </Text>
@@ -2958,8 +3071,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
       ? activeLine.inventoryList || []
       : choiceMode
         ? CHOICE_OPTIONS
-        : /* Packing options: No packing, the catalogue, then Custom. */
-          [NO_PACKING, ...packings, CUSTOM_PACKING];
+        : [NO_PACKING, ...packings, CUSTOM_PACKING];
 
     const title = unitMode
       ? "Select unit"
@@ -3137,10 +3249,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
     );
   };
 
-  /* ── audit history ───────────────────────────────────────────────────
-     Audit history is not shown on this screen. Reasons are still collected
-     and sent on save, but the history panel and its show/hide toggle are
-     removed entirely. */
+  /* Audit history is not shown on this screen. */
   const renderAudit = () => null;
 
   /* ── render ──────────────────────────────────────────────────────── */
@@ -3222,6 +3331,25 @@ export default function Edit({ quotation, onClose, onSaved }) {
           </View>
 
           <View style={styles.headerMeta}>
+            {/* Read-only badge whenever access is not EDIT (and the check has
+                resolved), so the operator knows why the grid is locked. */}
+            {accessResolved && !canEdit ? (
+              <View
+                style={[
+                  styles.levelPill,
+                  {
+                    backgroundColor: "#94A3B814",
+                    borderColor: "#94A3B833",
+                  },
+                ]}
+              >
+                <Ionicons name="lock-closed" size={12} color="#64748B" />
+                <Text style={[styles.levelPillText, { color: "#64748B" }]}>
+                  READ ONLY
+                </Text>
+              </View>
+            ) : null}
+
             {dirty ? (
               <View style={styles.dirtyPill}>
                 <View style={styles.dirtyDot} />
@@ -3428,20 +3556,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
           </View>
         ) : null}
 
-        {/* ── scrollable body: table (plants + special) + audit ──
-             Everything between the fixed toolbar and the fixed footer scrolls
-             as one block. Rows are laid out at their natural height rather than
-             inside a flex-crushed list, so at least four plants stay visible in
-             both portrait and landscape. */}
+        {/* ── scrollable body ── */}
         <ScrollView
           style={styles.bodyScroll}
           contentContainerStyle={styles.bodyContent}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* ── check progress (delivery shade) ──
-               The "Check all" affordance has been removed. The strip now just
-               reports progress so the packer knows how many rows are ticked. */}
           {showChecks && lines.length > 0 ? (
             <View style={styles.checkStrip}>
               <Ionicons
@@ -3457,7 +3578,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
             </View>
           ) : null}
 
-          {/* ── grid (plants + special plants in one table) ── */}
           <View style={styles.tableWrap} onLayout={onTableLayout}>
             {tableRows.length === 0 ? (
               <View style={styles.tableShell}>
@@ -3489,7 +3609,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
             )}
           </View>
 
-          {/* ── audit history ── */}
           {renderAudit()}
 
           {error ? (
@@ -3509,11 +3628,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
           ) : null}
         </ScrollView>
 
-        {/* ── totals + actions ──
-             The footer is deliberately compact: the adjustment chips, the
-             metric strip and the buttons all sit on as few rows as possible so
-             the table above keeps the room. On large screens the metrics run in
-             a single horizontal band with the grand total inline. */}
+        {/* ── totals + actions ── */}
         <View style={styles.footerDock}>
           {canEditTotals ? (
             <View style={styles.adjustBar}>
@@ -3613,7 +3728,19 @@ export default function Edit({ quotation, onClose, onSaved }) {
                 </Pressable>
               )}
 
-              {advanceEntered > 0 ? (
+              {advanceEntered > 0 && !canEditAdvance ? (
+                /* An advance taken on an earlier day is locked. Show it, with
+                   the date it was collected, but don't allow an edit. */
+                <View style={[styles.adjustChip, styles.adjustChipLocked]}>
+                  <Ionicons name="lock-closed" size={13} color={C.MUTED} />
+                  <Text style={styles.adjustChipText}>
+                    Advance {formatAmount(advanceEntered)}
+                    {quotation?.advancePaymentDate
+                      ? ` · ${formatDate(quotation.advancePaymentDate)}`
+                      : ""}
+                  </Text>
+                </View>
+              ) : advanceEntered > 0 ? (
                 <Pressable
                   style={({ hovered, pressed }) => [
                     styles.adjustChip,
@@ -3629,7 +3756,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   </Text>
                   <Ionicons name="create-outline" size={14} color={C.MUTED} />
                 </Pressable>
-              ) : (
+              ) : canEditAdvance ? (
                 <Pressable
                   style={({ hovered, pressed }) => [
                     styles.adjustAddBtn,
@@ -3643,7 +3770,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   <Text style={styles.adjustAddText}>Advance payment</Text>
                   <Ionicons name="add" size={16} color={C.NAVY} />
                 </Pressable>
-              )}
+              ) : null}
             </View>
           ) : transportEntered > 0 ||
             discountEntered > 0 ||
@@ -3678,8 +3805,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
           ) : null}
 
           <View style={styles.footerRow}>
-            {/* Compact metric band. On large screens everything — including the
-                grand total and remaining — sits on one horizontal line. */}
             <View style={styles.metricStrip}>
               <View style={styles.metric}>
                 <Text style={styles.metricLabel}>Plant types</Text>
@@ -3740,7 +3865,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
                 </View>
               ) : null}
 
-              {/* thin separator before the grand total */}
               <View style={styles.metricSpacer} />
 
               <View style={styles.metricGrand}>
@@ -3791,7 +3915,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
                 </Pressable>
               ) : null}
 
-              {isDraft ? (
+              {canEdit && isDraft ? (
                 <Pressable
                   style={({ hovered, pressed }) => [
                     styles.primaryButton,
@@ -3882,7 +4006,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
         />
       ) : null}
 
-      {advanceOpen ? (
+      {advanceOpen && canEditAdvance ? (
         <AdvanceModal
           styles={styles}
           grand={totals.grand}
@@ -3892,14 +4016,25 @@ export default function Edit({ quotation, onClose, onSaved }) {
         />
       ) : null}
 
-      {pendingAction ? (
-        <ReasonModal
+      {/* Per-field reason: opens on blur of a changed field past Draft. */}
+      {fieldReasonRequest ? (
+        <FieldReasonModal
           styles={styles}
-          request={pendingAction.request}
+          request={fieldReasonRequest}
+          onSubmit={acceptFieldReason}
+          onCancel={cancelFieldReason}
+        />
+      ) : null}
+
+      {/* Delete reason: gates a removal past Draft. */}
+      {pendingDelete ? (
+        <DeleteReasonModal
+          styles={styles}
+          request={pendingDelete.request}
           busy={saving}
           error={error}
-          onSubmit={submitPendingAction}
-          onClose={() => setPendingAction(null)}
+          onSubmit={submitDelete}
+          onClose={() => setPendingDelete(null)}
         />
       ) : null}
 
@@ -3914,5 +4049,94 @@ export default function Edit({ quotation, onClose, onSaved }) {
         onError={setError}
       />
     </KeyboardAvoidingView>
+  );
+}
+
+/**
+ * Public wrapper around EditInner.
+ *
+ * The server stamps `fetchDate` when it hands a quotation over. If that stamp
+ * isn't today, the copy we were given may be stale (stock, prices and
+ * reservations move daily), so before showing the editor we silently refetch a
+ * fresh copy from /find and hand THAT to EditInner. A `key` keyed on the data
+ * we render guarantees EditInner fully re-seeds from the fresh quotation
+ * instead of holding on to stale initial state.
+ *
+ * If the quotation is already current, EditInner renders immediately with no
+ * network round-trip. A failed refetch falls back to the copy we already have,
+ * so the operator is never blocked — worst case they edit the copy they came
+ * in with.
+ */
+export default function Edit({ quotation, onClose, onSaved }) {
+  const isStale = quotation?.fetchDate != null && !isToday(quotation.fetchDate);
+
+  /* `data` is the quotation EditInner actually renders. It starts as the prop,
+     and is replaced by the fresh copy once a stale refetch resolves. */
+  const [data, setData] = useState(quotation);
+  const [refreshing, setRefreshing] = useState(isStale);
+
+  useEffect(() => {
+    let alive = true;
+
+    /* Not stale — render straight away with what we were given. */
+    if (!isStale) {
+      setData(quotation);
+      setRefreshing(false);
+      return;
+    }
+
+    const id = quotation?.quotationId;
+    if (id == null) {
+      setData(quotation);
+      setRefreshing(false);
+      return;
+    }
+
+    setRefreshing(true);
+    (async () => {
+      const response = await getQuotation(id);
+      if (!alive) return;
+      /* Use the fresh copy on success; fall back to the original otherwise so
+         the editor is never blocked by a failed refresh. */
+      setData(
+        response?.status === "SUCCESS" && response.payload
+          ? response.payload
+          : quotation,
+      );
+      setRefreshing(false);
+    })();
+
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quotation?.quotationId]);
+
+  if (refreshing || !data) {
+    return (
+      <View
+        style={{
+          flex: 1,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: "#F1F5F9",
+        }}
+      >
+        <ActivityIndicator size="large" color="#0F4776" />
+        <Text style={{ marginTop: 12, color: "#64748B", fontSize: 14 }}>
+          Refreshing quotation…
+        </Text>
+      </View>
+    );
+  }
+
+  /* Re-seed EditInner whenever the identity or freshness of the data changes. */
+  return (
+    <EditInner
+      key={`${data.quotationId}:${data.fetchDate ?? ""}`}
+      quotation={data}
+      onClose={onClose}
+      onSaved={onSaved}
+    />
   );
 }

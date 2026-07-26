@@ -1465,6 +1465,67 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     pdfBtnGhostText: { color: NAVY },
     pdfDone: { paddingVertical: 14 },
     pdfDoneText: { fontSize: 13.5, fontWeight: "700", color: MUTED },
+
+    /*
+     * Add these keys to the object returned by makeStyles() in Edit.styles.js.
+     * They back the two new pieces of UI:
+     *   - adjustChipLocked : the greyed-out, non-tappable advance chip when the
+     *     advance was collected on an earlier day (locked).
+     *   - staleBar / staleText / staleButton* : the "loaded on an earlier day"
+     *     banner shown at the top of the body when fetchDate is not today.
+     *
+     * Colour references (C.*) assume your existing palette exposes NAVY, MUTED,
+     * ALERT and a light surface. Swap them for whatever your palette already uses.
+     */
+
+    // ── locked advance chip ────────────────────────────────────────────────
+    adjustChipLocked: {
+      opacity: 0.6,
+      backgroundColor: "#F1F5F9",
+      borderColor: "#E2E8F0",
+    },
+
+    // ── stale-data banner ──────────────────────────────────────────────────
+    staleBar: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingVertical: 10,
+      paddingHorizontal: 14,
+      marginBottom: 12,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: "#F6D6A8", // warm amber border
+      backgroundColor: "#FEF6E7", // warm amber surface
+    },
+    staleText: {
+      flex: 1,
+      fontSize: 13,
+      lineHeight: 18,
+      color: "#8A5A00",
+      fontWeight: "500",
+    },
+    staleButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      paddingVertical: 7,
+      paddingHorizontal: 12,
+      borderRadius: 9,
+      borderWidth: 1,
+      borderColor: "#CBD5E1",
+      backgroundColor: "#FFFFFF",
+    },
+    staleButtonHover: {
+      backgroundColor: "#F8FAFC",
+      borderColor: "#94A3B8",
+    },
+    staleButtonText: {
+      fontSize: 12,
+      fontWeight: "700",
+      letterSpacing: 0.4,
+      color: "#0F4776", // NAVY
+    },
   });
 
   styles.iconSize = large ? 20 : 18;

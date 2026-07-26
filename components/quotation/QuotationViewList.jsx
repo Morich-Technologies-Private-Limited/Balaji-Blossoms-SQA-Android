@@ -471,16 +471,10 @@ export default function QuotationViewList({
     [styles],
   );
 
+  /* View button removed — the row now exposes only Edit and Send. */
   const actionButtons = useCallback(
     (item) => (
       <View style={styles.actionCell}>
-        <Pressable
-          style={styles.actionBtn}
-          hitSlop={6}
-          onPress={() => onSelect?.(item)}
-        >
-          <Ionicons name="eye-outline" size={16} color={C.NAVY} />
-        </Pressable>
         <Pressable
           style={styles.actionBtn}
           hitSlop={6}
@@ -497,7 +491,7 @@ export default function QuotationViewList({
         </Pressable>
       </View>
     ),
-    [styles, C, onSelect, openShare],
+    [styles, C, openShare],
   );
 
   /* ── columns: always sum to the measured width ───────────────────────── */
@@ -524,8 +518,9 @@ export default function QuotationViewList({
       { key: "level", label: "Level", w: dense ? 108 : 124 },
       {
         key: "action",
+        // Narrower now that the View button is gone (2 icons instead of 3).
         label: "Actions",
-        w: dense ? 112 : 124,
+        w: dense ? 84 : 96,
         align: "center",
       },
     ].filter(Boolean);
@@ -625,6 +620,8 @@ export default function QuotationViewList({
       { label: "Plant count", value: String(plants) },
       { label: "Special plants", value: String(special) },
       { label: "Total items", value: String(plants + special), accent: true },
+      { label: "Advance paid", text: formatAmount(item.advancePayment) },
+      { label: "Remaining", text: formatAmount(item.remainingPayment) },
       {
         label: "Sales person",
         text: item.assignedUserName || item.assignedUserId || "Unassigned",
@@ -730,6 +727,18 @@ export default function QuotationViewList({
             <Text style={styles.statLabel}>Items</Text>
             <Text style={styles.statText}>{plants}</Text>
           </View>
+          <View style={styles.cardMeta}>
+            <Text style={styles.statLabel}>Advance paid</Text>
+            <Text style={styles.statText}>
+              {formatAmount(item.advancePayment)}
+            </Text>
+          </View>
+          <View style={styles.cardMeta}>
+            <Text style={styles.statLabel}>Remaining</Text>
+            <Text style={styles.statText}>
+              {formatAmount(item.remainingPayment)}
+            </Text>
+          </View>
           {open ? (
             <>
               <View style={styles.cardMeta}>
@@ -746,14 +755,8 @@ export default function QuotationViewList({
           ) : null}
         </View>
 
+        {/* View button removed — cards now offer Edit and Send only. */}
         <View style={styles.cardActions}>
-          <Pressable
-            style={styles.cardActionBtn}
-            onPress={() => onSelect?.(item)}
-          >
-            <Ionicons name="eye-outline" size={16} color={C.NAVY} />
-            <Text style={styles.cardActionText}>View</Text>
-          </Pressable>
           <Pressable
             style={styles.cardActionBtn}
             onPress={() => setEditing(item)}

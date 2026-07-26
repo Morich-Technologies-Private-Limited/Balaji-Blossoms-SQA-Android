@@ -42,6 +42,21 @@ const cardShadow = Platform.select({
   },
 });
 
+/* Modal sheets sit above the app, so they use a slightly heavier shadow than
+   the in-page cards to lift off the dimmed backdrop. */
+const sheetShadow = Platform.select({
+  web: {
+    boxShadow: "0 10px 40px rgba(15,23,42,0.24)",
+  },
+  default: {
+    shadowColor: "#0F172A",
+    shadowOpacity: 0.24,
+    shadowRadius: 28,
+    shadowOffset: { width: 0, height: 14 },
+    elevation: 12,
+  },
+});
+
 const makeStyles = ({ width, isTablet, isDesktop, isCardMode }) => {
   const large = isTablet || isDesktop;
   const gutter = isDesktop ? 24 : isTablet ? 16 : 12;
@@ -421,6 +436,106 @@ const makeStyles = ({ width, isTablet, isDesktop, isCardMode }) => {
       fontSize: 12.5,
       fontWeight: "700",
       color: NAVY,
+    },
+
+    /* ── share chooser modal ──────────────────────────────────────────────
+       These were missing, which is why the Send chooser rendered as raw text
+       in the top-left corner: the Modal's views were receiving `undefined`
+       styles and so had no backdrop, no centering and no sheet.            */
+    shareBackdrop: {
+      flex: 1,
+      backgroundColor: "rgba(15,23,42,0.45)",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20,
+    },
+    shareSheet: {
+      width: "100%",
+      maxWidth: 420,
+      backgroundColor: SURFACE,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: BORDER,
+      overflow: "hidden",
+      ...sheetShadow,
+    },
+    shareHeader: {
+      paddingHorizontal: 20,
+      paddingTop: 20,
+      paddingBottom: 14,
+      gap: 3,
+      borderBottomWidth: 1,
+      borderBottomColor: BORDER,
+    },
+    shareTitle: {
+      fontSize: 17,
+      fontWeight: "800",
+      letterSpacing: -0.2,
+      color: TEXT,
+    },
+    shareSubtitle: {
+      fontSize: 12.5,
+      fontWeight: "600",
+      color: MUTED,
+    },
+    shareBody: {
+      padding: 12,
+      gap: 8,
+    },
+    shareOption: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      padding: 12,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: BORDER,
+      backgroundColor: INPUT_FILL,
+    },
+    shareOptionHover: {
+      borderColor: NAVY,
+      backgroundColor: NAVY_TINT,
+    },
+    shareOptionDisabled: {
+      opacity: 0.5,
+    },
+    shareOptionIcon: {
+      height: 40,
+      width: 40,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: NAVY_TINT,
+    },
+    shareOptionText: {
+      flex: 1,
+      gap: 2,
+    },
+    shareOptionTitle: {
+      fontSize: 14.5,
+      fontWeight: "800",
+      color: TEXT,
+    },
+    shareOptionSub: {
+      fontSize: 12,
+      lineHeight: 16,
+      color: MUTED,
+    },
+    shareCancel: {
+      height: 48,
+      alignItems: "center",
+      justifyContent: "center",
+      borderTopWidth: 1,
+      borderTopColor: BORDER,
+    },
+    shareCancelHover: {
+      backgroundColor: INPUT_FILL,
+    },
+    shareCancelText: {
+      fontSize: 13,
+      fontWeight: "800",
+      letterSpacing: 0.8,
+      color: MUTED,
     },
 
     /* ── states ── */

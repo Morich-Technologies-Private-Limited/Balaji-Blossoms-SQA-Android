@@ -11,6 +11,7 @@ import { handleApiError } from "./errorHandler";
  *
  * Prices are never sent: the backend resolves plant, offer and packing itself.
  */
+
 export const updateQuotationPlants = async (quotationId, userId, body) => {
   try {
     const response = await axiosClient.put(UPDATE_QUOTATION_PLANTS_URL, body, {
