@@ -13,7 +13,7 @@ import {
   View,
 } from "react-native";
 
-import { downloadQuotationPdf } from "../../api/downloadQuotationPdf";
+import { downloadQuotationPdf } from "../../api/downloadPdfApis.js";
 import { fetchPackingList } from "../../api/fetchPacking";
 import { getApplicableOffer } from "../../api/getOffer";
 import { getSpecialPlantByBarcodeId } from "../../api/getSpecialPlant";
@@ -36,6 +36,12 @@ const LEVEL_META = {
 
 const SEARCH_DEBOUNCE = 350;
 const NO_PACKING = { packingId: null, packingName: "No packing", price: 0 };
+/* Sentinel packing option: user types their own packing name + charge. */
+const CUSTOM_PACKING = {
+  packingId: "__custom__",
+  packingName: "Custom",
+  price: 0,
+};
 
 /* Selected-by-customer is a two-value dropdown. New rows default to NO. */
 const CHOICE_OPTIONS = [
@@ -98,19 +104,6 @@ const formatDate = (value) => {
   });
 };
 
-const formatStamp = (value) => {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-};
-
 let lineSeq = 0;
 const nextKey = () => `line-${(lineSeq += 1)}`;
 
@@ -119,6 +112,18 @@ const packingForSize = (size, packings) =>
 
 const packingLabel = (packing) =>
   packing?.packingName || packing?.size || NO_PACKING.packingName;
+
+/** Is this line using a custom (hand-typed) packing name? A packing is custom
+    when its name is not "No packing" and doesn't match any catalogue option. */
+const isCustomPacking = (line, packings) => {
+  if (line.packingCustom) return true;
+  const name = norm(line.packingName);
+  if (!name || name === norm(NO_PACKING.packingName)) return false;
+  const known = [NO_PACKING, ...packings].some(
+    (p) => norm(packingLabel(p)) === name,
+  );
+  return !known;
+};
 
 /** What the customer is actually billed: the discount wins when there is one. */
 const priceOf = (source) => {
@@ -162,6 +167,11 @@ const subtitleOf = (source, seedling) =>
   source?.scientificName ||
   source?.variety ||
   (seedling ? "Sold by tray" : "Single plant");
+
+/** Plant title with its size appended for display, e.g. "Rose · 6 inch". Size
+    is folded into the name in the table/card so it no longer needs its own tag. */
+const plantTitleWithSize = (line) =>
+  line.size ? `${line.plantName} · ${line.size}` : line.plantName;
 
 const derivedQuantity = (line) => {
   const entered = toCount(line.quantity);
@@ -270,6 +280,7 @@ const lineFromReservation = (reservation, isDraft) => {
     packingName,
     packingCharge,
     packingManual: false,
+    packingCustom: false,
     selectedByCustomer: chosen,
     /* the saved baseline this row is compared against */
     baseQuantity: String(quantity ?? 0),
@@ -1149,11 +1160,11 @@ export default function Edit({ quotation, onClose, onSaved }) {
   const [discountOpen, setDiscountOpen] = useState(false);
   const [advanceOpen, setAdvanceOpen] = useState(false);
 
-  /* Audit history, refreshed from every save response. */
+  /* Audit history, refreshed from every save response. Kept in state because
+     the save response still carries it, but it is not rendered on this screen. */
   const [auditTrail, setAuditTrail] = useState(() =>
     (quotation?.invoiceUpdateDetailList || []).map(auditFromRecord),
   );
-  const [auditOpen, setAuditOpen] = useState(false);
 
   const baselineRef = useRef(
     stateSignatureOf(
@@ -1361,6 +1372,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
             packingName,
             packingCharge,
             packingManual: false,
+            packingCustom: false,
             /* new rows are the nursery's until told otherwise */
             selectedByCustomer: false,
             baseQuantity: "0",
@@ -1462,15 +1474,29 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
   const choosePacking = useCallback(
     (line, packing) => {
+      /* Custom: the operator only enters an amount — the name is fixed to
+         "Custom packing" so nothing else needs typing. */
+      if (packing.packingId === CUSTOM_PACKING.packingId) {
+        updateLine(line.key, {
+          packingId: null,
+          packingName: "Custom packing",
+          packingCustom: true,
+          packingManual: true,
+        });
+        setPicker(null);
+        return;
+      }
+
       updateLine(line.key, {
         packingId: packing.packingId ?? null,
         packingName: packingLabel(packing),
         packingCharge: String(packing.price ?? 0),
         packingManual: false,
+        packingCustom: false,
       });
       setPicker(null);
     },
-    [updateLine],
+    [updateLine, packings],
   );
 
   const chooseChoice = useCallback(
@@ -1741,8 +1767,10 @@ export default function Edit({ quotation, onClose, onSaved }) {
         }
 
         setNotice(response.message || "Quotation saved.");
-        // The parent is told, but the modal stays open.
-        onSaved?.(payload ?? true);
+        /* The parent is told, but this is a plain in-place save: the second
+           argument tells the parent NOT to close the Edit screen. The reason
+           modal and the Edit screen both stay open; the user closes them. */
+        onSaved?.(payload ?? true, { source: "save", keepOpen: true });
         return payload ?? true;
       }
 
@@ -1985,6 +2013,11 @@ export default function Edit({ quotation, onClose, onSaved }) {
         return;
       }
 
+      /* Save the document, then close the reason modal only if the API
+         succeeded. `persist` returns the payload (truthy) on success and null
+         on failure, so a failed save leaves the modal open with its error. The
+         Edit screen itself stays open regardless — the parent keeps it open on
+         a plain save. */
       const result = await persist(reasons);
       if (result) setPendingAction(null);
     },
@@ -2002,6 +2035,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
     const { reasons } = pendingActionReason;
     setPendingActionReason(null);
     (async () => {
+      /* Close the reason modal only when the save actually succeeds. */
       const result = await persist(reasons);
       if (result) setPendingAction(null);
     })();
@@ -2063,7 +2097,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
     }
 
     if (response.payload) rehydrate(response.payload);
-    onSaved?.(response.payload || {});
+    onSaved?.(response.payload || {}, { source: "move", keepOpen: false });
     setNotice("Moved to the loading shade.");
 
     await openPdf("shade", "Moved to loading shade");
@@ -2107,7 +2141,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
     }
 
     if (response.payload) rehydrate(response.payload);
-    onSaved?.(response.payload || {});
+    onSaved?.(response.payload || {}, { source: "invoice", keepOpen: false });
     setNotice("Invoice generated.");
 
     await openPdf("invoice", "Invoice generated");
@@ -2344,7 +2378,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
         return (
           <View style={styles.packStack}>
             <Text style={styles.readValue} numberOfLines={1}>
-              {line.packingName}
+              {line.packingName || "No packing"}
             </Text>
             <Text style={styles.readSub} numberOfLines={1}>
               {formatAmount(line.packingCharge)}{" "}
@@ -2353,6 +2387,13 @@ export default function Edit({ quotation, onClose, onSaved }) {
           </View>
         );
       }
+
+      const custom = isCustomPacking(line, packings);
+      /* The dropdown label: "Custom" when a hand-typed packing is in force,
+         otherwise the catalogue name (or the No-packing placeholder). */
+      const selectLabel = custom
+        ? "Custom"
+        : line.packingName || NO_PACKING.packingName;
 
       return (
         <View style={styles.packStack}>
@@ -2365,7 +2406,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
             onPress={() => openPackingPicker(line.key)}
           >
             <Text style={styles.selectText} numberOfLines={1}>
-              {line.packingName}
+              {selectLabel}
             </Text>
             <Ionicons name="chevron-down" size={14} color={C.MUTED} />
           </Pressable>
@@ -2408,7 +2449,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [styles, C, lineEditable, openPackingPicker, updateLine],
+    [styles, C, lineEditable, openPackingPicker, updateLine, packings],
   );
 
   /* Selected by customer: a Yes / No dropdown, disabled when read-only. */
@@ -2568,7 +2609,9 @@ export default function Edit({ quotation, onClose, onSaved }) {
       packing: dense ? 150 : 168,
       choice: dense ? 108 : 120,
       amount: dense ? 104 : 118,
-      action: showChecks && canEditLines ? 88 : 56,
+      /* Check-all header is gone, so the action column no longer needs the
+         extra width the header checkbox used to demand. */
+      action: showChecks && canEditLines ? 80 : 56,
     };
 
     const defs = [
@@ -2588,8 +2631,10 @@ export default function Edit({ quotation, onClose, onSaved }) {
         align: "left",
         render: (line) => (
           <View style={styles.cellFill}>
+            {/* Size is now folded into the title; the standalone size and
+                customer meta tags are gone. */}
             <Text style={styles.plantName} numberOfLines={1}>
-              {line.plantName}
+              {line.isSpecial ? line.plantName : plantTitleWithSize(line)}
             </Text>
             <Text style={styles.plantSub} numberOfLines={1}>
               {line.isSpecial
@@ -2601,11 +2646,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
                 <View style={styles.specialTag}>
                   <Ionicons name="pricetag" size={9} color={C.NAVY} />
                   <Text style={styles.specialTagText}>SPECIAL</Text>
-                </View>
-              ) : null}
-              {line.size ? (
-                <View style={styles.metaTag}>
-                  <Text style={styles.metaTagText}>{line.size}</Text>
                 </View>
               ) : null}
               {!line.isSpecial && !showPrice ? (
@@ -2729,9 +2769,8 @@ export default function Edit({ quotation, onClose, onSaved }) {
         label: showChecks ? "Check" : "",
         size: w.action,
         align: "center",
-        renderHead: showChecks
-          ? () => checkBox(allChecked, toggleCheckAll, "Check every row")
-          : null,
+        /* The select-all header checkbox has been removed from delivery shade. */
+        renderHead: null,
         render: actionField,
       },
     ].filter(Boolean);
@@ -2751,9 +2790,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
     isDraft,
     showChecks,
     canEditLines,
-    allChecked,
-    toggleCheckAll,
-    checkBox,
     priceBlock,
     unitSelect,
     qtyField,
@@ -2809,8 +2845,9 @@ export default function Edit({ quotation, onClose, onSaved }) {
           </View>
 
           <View style={styles.fill}>
+            {/* Size folded into the title; no standalone size/customer tags. */}
             <Text style={styles.plantName} numberOfLines={1}>
-              {item.plantName}
+              {item.isSpecial ? item.plantName : plantTitleWithSize(item)}
             </Text>
             <Text style={styles.plantSub} numberOfLines={1}>
               {item.isSpecial
@@ -2822,11 +2859,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
                 <View style={styles.specialTag}>
                   <Ionicons name="pricetag" size={9} color={C.NAVY} />
                   <Text style={styles.specialTagText}>SPECIAL</Text>
-                </View>
-              ) : null}
-              {item.size ? (
-                <View style={styles.metaTag}>
-                  <Text style={styles.metaTagText}>{item.size}</Text>
                 </View>
               ) : null}
               <View style={styles.metaTag}>
@@ -2920,18 +2952,22 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
     const unitMode = picker.type === "unit";
     const choiceMode = picker.type === "choice";
+    const packingMode = picker.type === "packing";
 
     const options = unitMode
       ? activeLine.inventoryList || []
       : choiceMode
         ? CHOICE_OPTIONS
-        : [NO_PACKING, ...packings];
+        : /* Packing options: No packing, the catalogue, then Custom. */
+          [NO_PACKING, ...packings, CUSTOM_PACKING];
 
     const title = unitMode
       ? "Select unit"
       : choiceMode
         ? "Selected by customer"
         : "Select packing";
+
+    const activeCustom = packingMode && isCustomPacking(activeLine, packings);
 
     return (
       <Modal
@@ -2966,11 +3002,18 @@ export default function Edit({ quotation, onClose, onSaved }) {
                 ) : null}
 
                 {options.map((option) => {
+                  const isCustomOption =
+                    packingMode &&
+                    option.packingId === CUSTOM_PACKING.packingId;
+
                   const active = unitMode
                     ? option.unitId === activeLine.unitId
                     : choiceMode
                       ? option.value === !!activeLine.selectedByCustomer
-                      : packingLabel(option) === activeLine.packingName;
+                      : isCustomOption
+                        ? activeCustom
+                        : !activeCustom &&
+                          packingLabel(option) === activeLine.packingName;
 
                   const optionKey = unitMode
                     ? `unit-${option.unitId}`
@@ -3024,6 +3067,34 @@ export default function Edit({ quotation, onClose, onSaved }) {
                             <Text style={styles.optionMeta}>{option.hint}</Text>
                           </View>
                         </View>
+                      ) : isCustomOption ? (
+                        <View style={styles.optionLead}>
+                          <View
+                            style={[
+                              styles.optionIcon,
+                              activeCustom && styles.optionIconCustom,
+                            ]}
+                          >
+                            <Ionicons
+                              name="create-outline"
+                              size={16}
+                              color={activeCustom ? C.ALERT : C.MUTED}
+                            />
+                          </View>
+                          <View style={styles.fill}>
+                            <Text
+                              style={[
+                                styles.optionText,
+                                active && styles.optionTextActive,
+                              ]}
+                            >
+                              Custom packing
+                            </Text>
+                            <Text style={styles.optionMeta}>
+                              Type your own name and charge
+                            </Text>
+                          </View>
+                        </View>
                       ) : (
                         <View style={styles.fill}>
                           <Text
@@ -3050,7 +3121,7 @@ export default function Edit({ quotation, onClose, onSaved }) {
 
                       {active ? (
                         <Ionicons name="checkmark" size={18} color={C.NAVY} />
-                      ) : !unitMode && !choiceMode ? (
+                      ) : packingMode && !isCustomOption ? (
                         <Text style={styles.optionBadge}>
                           {formatAmount(option.price)}
                         </Text>
@@ -3066,92 +3137,11 @@ export default function Edit({ quotation, onClose, onSaved }) {
     );
   };
 
-  /* ── audit history ───────────────────────────────────────────────── */
-  const renderAudit = () => {
-    if (!auditActive || auditTrail.length === 0) return null;
-
-    const valuesWidth = isCardMode ? undefined : "46%";
-    const reasonWidth = isCardMode ? undefined : "54%";
-
-    return (
-      <View style={styles.auditSection}>
-        <View style={styles.auditHead}>
-          <Ionicons name="time-outline" size={16} color={C.NAVY} />
-          <Text style={styles.auditTitle}>Audit history</Text>
-          <View style={styles.metaTag}>
-            <Text style={styles.metaTagText}>{auditTrail.length}</Text>
-          </View>
-          <Pressable onPress={() => setAuditOpen((prev) => !prev)} hitSlop={8}>
-            <Text style={styles.auditToggleText}>
-              {auditOpen ? "Hide" : "Show"}
-            </Text>
-          </Pressable>
-        </View>
-
-        {auditOpen ? (
-          <View style={styles.auditShell}>
-            {!isCardMode ? (
-              <View style={styles.auditHeadRow}>
-                <View style={[styles.auditCell, { width: valuesWidth }]}>
-                  <Text style={styles.auditHeadCell}>Values updated</Text>
-                </View>
-                <View style={[styles.auditCell, { width: reasonWidth }]}>
-                  <Text style={styles.auditHeadCell}>Reason</Text>
-                </View>
-              </View>
-            ) : null}
-
-            <ScrollView
-              showsVerticalScrollIndicator={false}
-              nestedScrollEnabled
-            >
-              {auditTrail.map((entry, index) => (
-                <View
-                  key={entry.key}
-                  style={[
-                    styles.auditRow,
-                    index % 2 === 1 && styles.auditRowAlt,
-                  ]}
-                >
-                  <View style={[styles.auditCell, { width: valuesWidth }]}>
-                    {isCardMode ? (
-                      <Text style={styles.auditCardLabel}>Values updated</Text>
-                    ) : null}
-                    <Text style={styles.auditValueText}>{entry.values}</Text>
-                    <View style={styles.auditMetaRow}>
-                      {entry.updatedBy ? (
-                        <Text style={styles.auditMetaText}>
-                          {entry.updatedBy}
-                        </Text>
-                      ) : null}
-                      {entry.date ? (
-                        <Text style={styles.auditMetaText}>
-                          {formatStamp(entry.date)}
-                        </Text>
-                      ) : null}
-                    </View>
-                  </View>
-
-                  <View style={[styles.auditCell, { width: reasonWidth }]}>
-                    {isCardMode ? (
-                      <Text style={styles.auditCardLabel}>Reason</Text>
-                    ) : null}
-                    {entry.reason ? (
-                      <Text style={styles.auditReasonText}>{entry.reason}</Text>
-                    ) : (
-                      <Text style={styles.auditReasonEmpty}>
-                        No reason recorded
-                      </Text>
-                    )}
-                  </View>
-                </View>
-              ))}
-            </ScrollView>
-          </View>
-        ) : null}
-      </View>
-    );
-  };
+  /* ── audit history ───────────────────────────────────────────────────
+     Audit history is not shown on this screen. Reasons are still collected
+     and sent on save, but the history panel and its show/hide toggle are
+     removed entirely. */
+  const renderAudit = () => null;
 
   /* ── render ──────────────────────────────────────────────────────── */
   const showResults = term.trim().length >= 2;
@@ -3264,23 +3254,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   <Text style={styles.dateText}>{quotationDate}</Text>
                 </View>
               </>
-            ) : null}
-
-            {auditActive && auditTrail.length > 0 ? (
-              <Pressable
-                style={({ hovered, pressed }) => [
-                  styles.iconBtn,
-                  auditOpen && styles.iconBtnActive,
-                  hovered && styles.iconBtnHover,
-                  pressed && styles.iconBtnPressed,
-                ]}
-                hitSlop={8}
-                accessibilityRole="button"
-                accessibilityLabel="Toggle audit history"
-                onPress={() => setAuditOpen((prev) => !prev)}
-              >
-                <Ionicons name="time-outline" size={19} color={C.NAVY} />
-              </Pressable>
             ) : null}
 
             <Pressable
@@ -3466,7 +3439,9 @@ export default function Edit({ quotation, onClose, onSaved }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* ── check progress (delivery shade) ── */}
+          {/* ── check progress (delivery shade) ──
+               The "Check all" affordance has been removed. The strip now just
+               reports progress so the packer knows how many rows are ticked. */}
           {showChecks && lines.length > 0 ? (
             <View style={styles.checkStrip}>
               <Ionicons
@@ -3479,11 +3454,6 @@ export default function Edit({ quotation, onClose, onSaved }) {
                   ? "Every row checked. The invoice is ready."
                   : `${checkedCount} of ${checkableLines.length} rows checked`}
               </Text>
-              <Pressable onPress={toggleCheckAll} hitSlop={8}>
-                <Text style={styles.checkStripLink}>
-                  {allChecked ? "Clear all" : "Check all"}
-                </Text>
-              </Pressable>
             </View>
           ) : null}
 
@@ -3539,7 +3509,11 @@ export default function Edit({ quotation, onClose, onSaved }) {
           ) : null}
         </ScrollView>
 
-        {/* ── totals + actions ── */}
+        {/* ── totals + actions ──
+             The footer is deliberately compact: the adjustment chips, the
+             metric strip and the buttons all sit on as few rows as possible so
+             the table above keeps the room. On large screens the metrics run in
+             a single horizontal band with the grand total inline. */}
         <View style={styles.footerDock}>
           {canEditTotals ? (
             <View style={styles.adjustBar}>
@@ -3704,71 +3678,70 @@ export default function Edit({ quotation, onClose, onSaved }) {
           ) : null}
 
           <View style={styles.footerRow}>
+            {/* Compact metric band. On large screens everything — including the
+                grand total and remaining — sits on one horizontal line. */}
             <View style={styles.metricStrip}>
-              <View style={styles.metricRow}>
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Plant types</Text>
-                  <Text style={styles.metricValue}>
-                    {formatNumber(totals.rows)}
-                  </Text>
-                </View>
-
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Quantity</Text>
-                  <Text style={styles.metricValue}>
-                    {formatNumber(totals.quantity)}
-                  </Text>
-                  <Text style={styles.metricUnit}>plants</Text>
-                </View>
-
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Packing</Text>
-                  <Text style={[styles.metricValue, styles.metricWarm]}>
-                    {formatAmount(totals.packing)}
-                  </Text>
-                </View>
-
-                {totals.special > 0 ? (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Special plants</Text>
-                    <Text style={[styles.metricValue, styles.metricWarm]}>
-                      {formatAmount(totals.special)}
-                    </Text>
-                    <Text style={styles.metricUnit}>
-                      {formatNumber(totals.specialRows)} item
-                      {totals.specialRows === 1 ? "" : "s"}
-                    </Text>
-                  </View>
-                ) : null}
-
-                {totals.transport > 0 ? (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Transport</Text>
-                    <Text style={[styles.metricValue, styles.metricWarm]}>
-                      {formatAmount(totals.transport)}
-                    </Text>
-                  </View>
-                ) : null}
-
-                {totals.discount > 0 ? (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Discount</Text>
-                    <Text style={[styles.metricValue, styles.metricDiscount]}>
-                      −{formatAmount(totals.discount)}
-                    </Text>
-                  </View>
-                ) : null}
-
-                {totals.advance > 0 ? (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Advance</Text>
-                    <Text style={[styles.metricValue, styles.metricDiscount]}>
-                      {formatAmount(totals.advance)}
-                    </Text>
-                    <Text style={styles.metricUnit}>received</Text>
-                  </View>
-                ) : null}
+              <View style={styles.metric}>
+                <Text style={styles.metricLabel}>Plant types</Text>
+                <Text style={styles.metricValue}>
+                  {formatNumber(totals.rows)}
+                </Text>
               </View>
+
+              <View style={styles.metric}>
+                <Text style={styles.metricLabel}>Quantity</Text>
+                <Text style={styles.metricValue}>
+                  {formatNumber(totals.quantity)}
+                </Text>
+                <Text style={styles.metricUnit}>plants</Text>
+              </View>
+
+              <View style={styles.metric}>
+                <Text style={styles.metricLabel}>Packing</Text>
+                <Text style={[styles.metricValue, styles.metricWarm]}>
+                  {formatAmount(totals.packing)}
+                </Text>
+              </View>
+
+              {totals.special > 0 ? (
+                <View style={styles.metric}>
+                  <Text style={styles.metricLabel}>Special</Text>
+                  <Text style={[styles.metricValue, styles.metricWarm]}>
+                    {formatAmount(totals.special)}
+                  </Text>
+                </View>
+              ) : null}
+
+              {totals.transport > 0 ? (
+                <View style={styles.metric}>
+                  <Text style={styles.metricLabel}>Transport</Text>
+                  <Text style={[styles.metricValue, styles.metricWarm]}>
+                    {formatAmount(totals.transport)}
+                  </Text>
+                </View>
+              ) : null}
+
+              {totals.discount > 0 ? (
+                <View style={styles.metric}>
+                  <Text style={styles.metricLabel}>Discount</Text>
+                  <Text style={[styles.metricValue, styles.metricDiscount]}>
+                    −{formatAmount(totals.discount)}
+                  </Text>
+                </View>
+              ) : null}
+
+              {totals.advance > 0 ? (
+                <View style={styles.metric}>
+                  <Text style={styles.metricLabel}>Advance</Text>
+                  <Text style={[styles.metricValue, styles.metricDiscount]}>
+                    {formatAmount(totals.advance)}
+                  </Text>
+                  <Text style={styles.metricUnit}>received</Text>
+                </View>
+              ) : null}
+
+              {/* thin separator before the grand total */}
+              <View style={styles.metricSpacer} />
 
               <View style={styles.metricGrand}>
                 <Text style={styles.metricGrandLabel}>Grand total</Text>

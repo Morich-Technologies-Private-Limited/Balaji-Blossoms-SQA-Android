@@ -13,9 +13,15 @@ import {
 } from "react-native";
 
 import {
+  downloadCollectionSheetPdf,
+  downloadQuotationPdf,
+} from "../../api/downloadPdfApis";
+
+import {
   fetchQuotationsByUnit,
   fetchQuotationsByUser,
 } from "../../api/fetchQuotation";
+import PdfShareSheet from "../../utility/PdfShareSheet";
 import { getCurrentUser } from "../../utility/secureStorage";
 import CreateQuotationModal from "./CreateQuotationModal";
 import Edit from "./Edit";
@@ -77,6 +83,91 @@ const formatAmount = (value) => {
 const levelOf = (item) =>
   LEVEL_META[item.level] || { label: item.level || "—", tint: "#94A3B8" };
 
+/* ── share chooser ─────────────────────────────────────────────────────
+   A small sheet offered when the operator taps Send on a row. It only picks
+   *what* to share — Quotation or Collector Sheet — and hands the choice back;
+   the download and the actual share are driven by the parent. */
+function ShareKindModal({ styles, quotationLine, busyKind, onPick, onClose }) {
+  const C = styles.colors;
+
+  const options = [
+    {
+      key: "quotation",
+      icon: "document-text-outline",
+      title: "Quotation",
+      subtitle: "The customer-facing quotation PDF",
+    },
+    {
+      key: "collector",
+      icon: "clipboard-outline",
+      title: "Collector Sheet",
+      subtitle: "The picking / collection sheet",
+    },
+  ];
+
+  return (
+    <Modal transparent animationType="fade" visible onRequestClose={onClose}>
+      <Pressable style={styles.shareBackdrop} onPress={onClose}>
+        <Pressable style={styles.shareSheet} onPress={() => {}}>
+          <View style={styles.shareHeader}>
+            <Text style={styles.shareTitle}>Share</Text>
+            <Text style={styles.shareSubtitle}>{quotationLine}</Text>
+          </View>
+
+          <View style={styles.shareBody}>
+            {options.map((option) => {
+              const busy = busyKind === option.key;
+              const disabled = busyKind !== null;
+              return (
+                <Pressable
+                  key={option.key}
+                  style={({ hovered, pressed }) => [
+                    styles.shareOption,
+                    (hovered || pressed) &&
+                      !disabled &&
+                      styles.shareOptionHover,
+                    disabled && !busy && styles.shareOptionDisabled,
+                  ]}
+                  onPress={() => onPick(option.key)}
+                  disabled={disabled}
+                >
+                  <View style={styles.shareOptionIcon}>
+                    {busy ? (
+                      <ActivityIndicator color={C.NAVY} />
+                    ) : (
+                      <Ionicons name={option.icon} size={20} color={C.NAVY} />
+                    )}
+                  </View>
+                  <View style={styles.shareOptionText}>
+                    <Text style={styles.shareOptionTitle}>{option.title}</Text>
+                    <Text style={styles.shareOptionSub}>{option.subtitle}</Text>
+                  </View>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={18}
+                    color={C.PLACEHOLDER}
+                  />
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <Pressable
+            style={({ hovered, pressed }) => [
+              styles.shareCancel,
+              (hovered || pressed) && styles.shareCancelHover,
+            ]}
+            onPress={onClose}
+            disabled={busyKind !== null}
+          >
+            <Text style={styles.shareCancelText}>CANCEL</Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
 /**
  * Quotation list.
  *
@@ -88,6 +179,16 @@ const levelOf = (item) =>
  *
  * Edit opens the plant editor over the list. The saved quotation comes back
  * from the server, so the row is refreshed in place instead of refetching.
+ *
+ * The Edit screen distinguishes a plain in-place save (which should leave the
+ * editor open so the operator can keep working) from a finalizing action —
+ * moving to the loading shade or generating the invoice — which closes it. It
+ * signals this in the second argument to `onSaved` as `{ keepOpen }`, and
+ * `handleSaved` only dismisses the modal when `keepOpen` is false.
+ *
+ * Send opens a small chooser: the operator shares either the Quotation PDF or
+ * the Collector Sheet PDF. The chosen PDF is downloaded and handed to the
+ * shared PdfShareSheet. If a parent passes `onSend`, that takes over instead.
  */
 export default function QuotationViewList({
   mode = "user",
@@ -122,6 +223,12 @@ export default function QuotationViewList({
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [expanded, setExpanded] = useState({});
+
+  /* Share flow: the row whose Send was tapped, which kind is downloading, and
+     the downloaded PDF once it is ready to hand to the share sheet. */
+  const [shareTarget, setShareTarget] = useState(null);
+  const [shareBusyKind, setShareBusyKind] = useState(null);
+  const [pdf, setPdf] = useState(null);
 
   const resolvedUserId = currentUser?.emailId;
   const resolvedUnitId = currentUser?.unitId;
@@ -225,19 +332,115 @@ export default function QuotationViewList({
     else load();
   };
 
+  /* Edit's onSaved fires for every successful write. The second argument tells
+     us the intent:
+       • a plain save sends { keepOpen: true }  → refresh the row, leave the
+         editor open so the operator can keep working (they close it manually);
+       • move-to-shade / generate-invoice send { keepOpen: false } → refresh
+         and dismiss the editor.
+     Older callers with no meta object are treated as "close", preserving the
+     previous behaviour. */
   const handleSaved = useCallback(
-    (saved) => {
-      setEditing(null);
-      if (!saved) {
+    (saved, meta) => {
+      const keepOpen = meta?.keepOpen === true;
+
+      if (!keepOpen) {
+        setEditing(null);
+      }
+
+      if (!saved || saved === true) {
+        // No echo (or a bare success flag) from the server: refetch the list.
         load();
         return;
       }
+
       setQuotations((prev) =>
         prev.map((q) => (q.quotationId === saved.quotationId ? saved : q)),
       );
+
+      /* Keep the open editor bound to the freshly saved quotation so, if it
+         stays open, it is working against the server's latest copy. */
+      if (keepOpen) {
+        setEditing((current) =>
+          current && current.quotationId === saved.quotationId
+            ? saved
+            : current,
+        );
+      }
+
       onUpdate?.(saved);
     },
     [load, onUpdate],
+  );
+
+  /* ── share ────────────────────────────────────────────────────────────
+     Tapping Send opens the kind chooser. Picking a kind downloads the matching
+     PDF and, on success, hands it to PdfShareSheet. The chooser closes once the
+     download resolves; a failed download surfaces an inline error and leaves
+     the chooser open to retry. A parent-supplied `onSend` takes over entirely
+     if present. */
+  const openShare = useCallback(
+    (item) => {
+      if (onSend) {
+        onSend(item);
+        return;
+      }
+      setError(null);
+      setShareTarget(item);
+      setShareBusyKind(null);
+    },
+    [onSend],
+  );
+
+  const closeShare = useCallback(() => {
+    setShareTarget(null);
+    setShareBusyKind(null);
+  }, []);
+
+  const pickShareKind = useCallback(
+    async (kind) => {
+      if (!shareTarget || shareBusyKind) return;
+
+      setError(null);
+      setShareBusyKind(kind);
+
+      const id = shareTarget.quotationId;
+      const response =
+        kind === "collector"
+          ? await downloadCollectionSheetPdf(id)
+          : await downloadQuotationPdf(id);
+
+      setShareBusyKind(null);
+
+      if (response?.status !== "SUCCESS" || !response.payload) {
+        setError(
+          response?.message ||
+            (kind === "collector"
+              ? "The collector sheet could not be downloaded."
+              : "The quotation PDF could not be downloaded."),
+        );
+        return;
+      }
+
+      const isCollector = kind === "collector";
+      const quotationLine = `QTN-${id}${
+        shareTarget.customerName ? ` · ${shareTarget.customerName}` : ""
+      }`;
+
+      setPdf({
+        kind,
+        title: isCollector ? "Collector sheet" : "Quotation",
+        subtitle: quotationLine,
+        message: `${
+          isCollector ? "Collector sheet" : "Quotation"
+        } for ${quotationLine}`,
+        file: response.payload,
+      });
+
+      // The chooser has done its job; the share sheet takes over.
+      closeShare();
+    },
+    [shareTarget, shareBusyKind, closeShare],
   );
 
   /* ── shared bits ─────────────────────────────────────────────────────── */
@@ -288,13 +491,13 @@ export default function QuotationViewList({
         <Pressable
           style={styles.actionBtn}
           hitSlop={6}
-          onPress={() => onSend?.(item)}
+          onPress={() => openShare(item)}
         >
           <Ionicons name="send-outline" size={15} color={C.GREEN} />
         </Pressable>
       </View>
     ),
-    [styles, C, onSelect, onSend],
+    [styles, C, onSelect, openShare],
   );
 
   /* ── columns: always sum to the measured width ───────────────────────── */
@@ -562,7 +765,7 @@ export default function QuotationViewList({
           </Pressable>
           <Pressable
             style={styles.cardActionBtn}
-            onPress={() => onSend?.(item)}
+            onPress={() => openShare(item)}
           >
             <Ionicons name="send-outline" size={15} color={C.GREEN} />
             <Text style={[styles.cardActionText, { color: C.GREEN }]}>
@@ -619,6 +822,12 @@ export default function QuotationViewList({
     (mode === "unit"
       ? "Every quotation raised by your unit"
       : "Quotations you created");
+
+  const shareLine = shareTarget
+    ? `QTN-${shareTarget.quotationId}${
+        shareTarget.customerName ? ` · ${shareTarget.customerName}` : ""
+      }`
+    : "";
 
   return (
     <View style={styles.screen}>
@@ -738,6 +947,25 @@ export default function QuotationViewList({
           />
         ) : null}
       </Modal>
+
+      {shareTarget ? (
+        <ShareKindModal
+          styles={styles}
+          quotationLine={shareLine}
+          busyKind={shareBusyKind}
+          onPick={pickShareKind}
+          onClose={closeShare}
+        />
+      ) : null}
+
+      <PdfShareSheet
+        file={pdf?.file}
+        title={pdf?.title}
+        subtitle={pdf?.subtitle}
+        message={pdf?.message}
+        onClose={() => setPdf(null)}
+        onError={setError}
+      />
     </View>
   );
 }
