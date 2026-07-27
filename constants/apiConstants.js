@@ -17,3 +17,8 @@ export const SEARCH_PLANTS_URL = `${API_BASE_URL}/plants/searchPlants`;
 export const SPECIAL_PLANT_BY_BARCODE_URL = `${API_BASE_URL}/plants/getSpecialPlantByBarcodeId`;
 export const PACKING_LIST_URL = `${API_BASE_URL}/info/packingList`;
 export const CREATE_CUSTOMER_URL = `${API_BASE_URL}/customer/create`;
+export const CUSTOMER_SEARCH_URL = `${API_BASE_URL}/customer/search`;
+
+export const INVOICE_FIND_BY_UNIT_URL = `${API_BASE_URL}/invoice/findByUnitId`;
+export const INVOICE_FIND_URL = `${API_BASE_URL}/invoice/find`;
+export const INVOICE_PDF_URL = `${API_BASE_URL}/invoice/pdf`;

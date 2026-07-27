@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { usePathname, useRouter } from "expo-router";
-import { Fragment, useMemo } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   Image,
   Pressable,
@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import logo from "../../assets/images/balaji_logo.png";
+import { getCurrentUser } from "../../utility/secureStorage";
 import makeStyles, { COLORS } from "./SalesSidebar.styles";
 
 export const SALES_MENU = [
@@ -50,6 +51,11 @@ export const SALES_MENU = [
   },
 ];
 
+/* Lists that should reflect a freshly created quotation. When the create flow
+   finishes while one of these is on screen, we remount it so the new row
+   appears; the other one loads fresh whenever it is next visited. */
+const QUOTATION_ROUTES = ["/sales/myQuotation", "/sales/allQuotation"];
+
 /**
  * SalesSidebar
  * @param {boolean} collapsed   icon-only rail (desktop)
@@ -77,6 +83,37 @@ export default function SalesSidebar({
 
   const router = useRouter();
   const pathname = usePathname();
+
+  /* Create-quotation flow lives here so the button can sit in the sidebar and
+     work on every /sales screen without touching the page files. */
+  const [currentUser, setCurrentUser] = useState(null);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const user = await getCurrentUser();
+        if (alive) setCurrentUser(user);
+      } catch {
+        // ignore — button stays visible, create flow validates on submit
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const openCreate = () => {
+    onNavigate?.(); // close the drawer on phone / tablet (no-op on desktop)
+    setCreateOpen(true);
+  };
+
+  const handleCreated = () => {
+    setCreateOpen(false);
+    // Remount the list we're on so the new quotation shows immediately.
+    if (QUOTATION_ROUTES.includes(pathname)) router.replace(pathname);
+  };
 
   const go = (route) => {
     if (pathname !== route) router.push(route);
@@ -154,6 +191,40 @@ export default function SalesSidebar({
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
+        {/* New quotation — styled as a menu item so it merges with the nav,
+            accented so it still reads as the primary action. */}
+        <Pressable
+          onPress={openCreate}
+          accessibilityRole="button"
+          accessibilityLabel="New quotation"
+          style={({ pressed, hovered }) => [
+            styles.item,
+            collapsed && styles.itemCollapsed,
+            (pressed || hovered) && styles.itemHovered,
+          ]}
+        >
+          <View style={styles.itemIcon}>
+            <Ionicons
+              name="add-circle-outline"
+              size={styles.iconSize}
+              color="#E8622C"
+            />
+          </View>
+
+          {showLabels && (
+            <View style={styles.itemTextWrap}>
+              <Text
+                style={[styles.itemLabel, { color: "#E8622C" }]}
+                numberOfLines={1}
+              >
+                New Quotation
+              </Text>
+            </View>
+          )}
+        </Pressable>
+
+        {showLabels && <View style={styles.itemDivider} />}
+
         {SALES_MENU.map((item, i) => {
           const active = pathname === item.route;
           return (
@@ -237,6 +308,17 @@ export default function SalesSidebar({
           </View>
         )}
       </View>
+
+      {/* Create-quotation modal — RN Modal portals to root, so it shows over
+          everything even though it's mounted inside the sidebar/drawer. */}
+      <CreateQuotationModal
+        visible={createOpen}
+        userId={currentUser?.emailId}
+        unitId={currentUser?.unitId}
+        userName={currentUser?.name || currentUser?.userName}
+        onClose={() => setCreateOpen(false)}
+        onCreated={handleCreated}
+      />
     </View>
   );
 }

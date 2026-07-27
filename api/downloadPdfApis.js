@@ -1,5 +1,6 @@
 import {
   COLLECTION_SHEET_PDF_URL,
+  INVOICE_PDF_URL,
   QUOTATION_PDF_URL,
 } from "../constants/apiConstants";
 import axiosClient from "./axiosClient";
@@ -176,6 +177,72 @@ export const downloadCollectionSheetPdf = async (
           response.headers,
           `collection-sheet-${quotationId}.pdf`,
         ),
+      },
+    };
+  } catch (error) {
+    const body = error?.response?.data;
+
+    if (isBlob(body)) {
+      const text = await blobToText(body);
+
+      try {
+        error.response.data = JSON.parse(text);
+      } catch {
+        error.response.data = {
+          message: parseMessage(text, ""),
+        };
+      }
+    }
+
+    return handleApiError(error);
+  }
+};
+
+/**
+ * Download Invoice PDF
+ */
+export const downloadInvoicePdf = async (invoiceId, { signal } = {}) => {
+  if (!invoiceId) {
+    return {
+      status: "FAILURE",
+      message: "Invoice id is missing.",
+    };
+  }
+
+  try {
+    const response = await axiosClient.get(INVOICE_PDF_URL, {
+      params: { invoiceId },
+      responseType: "blob",
+      headers: {
+        Accept: `${PDF_TYPE}, application/json`,
+      },
+      signal,
+    });
+
+    const blob = response.data;
+    const type = String(blob?.type || "").toLowerCase();
+
+    if (!blob || blob.size === 0) {
+      return {
+        status: "FAILURE",
+        message: "The server returned an empty file.",
+      };
+    }
+
+    if (type && !type.includes("pdf")) {
+      const text = await blobToText(blob);
+      return {
+        status: "FAILURE",
+        message: parseMessage(text, "The server did not return a PDF."),
+      };
+    }
+
+    return {
+      status: "SUCCESS",
+      payload: {
+        blob,
+        mimeType: PDF_TYPE,
+        fileName: fileNameFrom(response.headers, `invoice-${invoiceId}.pdf`),
       },
     };
   } catch (error) {

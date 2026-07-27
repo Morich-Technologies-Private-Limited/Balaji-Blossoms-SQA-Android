@@ -1,5 +1,14 @@
 import { Ionicons } from "@expo/vector-icons";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  forwardRef,
+  Fragment,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -20,6 +29,7 @@ import {
 import {
   fetchQuotationsByUnit,
   fetchQuotationsByUser,
+  getQuotation,
 } from "../../api/fetchQuotation";
 import PdfShareSheet from "../../utility/PdfShareSheet";
 import { getCurrentUser } from "../../utility/secureStorage";
@@ -73,6 +83,32 @@ const dateValue = (item) => {
   const raw = item?.creationDate || item?.updateDate;
   const time = raw ? new Date(raw).getTime() : NaN;
   return Number.isNaN(time) ? 0 : time;
+};
+
+/* A loose date haystack for search: matches both the displayed dd-mm-yyyy form
+   and common typed variants (yyyy-mm-dd, dd/mm, month name), so an operator can
+   find a quotation by typing part of its date however they think of it. */
+const dateSearchText = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yyyy = date.getFullYear();
+  const month = date.toLocaleString("en-IN", { month: "long" }).toLowerCase();
+  const monthShort = date
+    .toLocaleString("en-IN", { month: "short" })
+    .toLowerCase();
+  return [
+    `${dd}-${mm}-${yyyy}`,
+    `${dd}/${mm}/${yyyy}`,
+    `${yyyy}-${mm}-${dd}`,
+    `${dd} ${month} ${yyyy}`,
+    `${dd} ${monthShort}`,
+    month,
+    monthShort,
+    String(yyyy),
+  ].join(" ");
 };
 
 const formatAmount = (value) => {
@@ -177,8 +213,18 @@ function ShareKindModal({ styles, quotationLine, busyKind, onPick, onClose }) {
  * are removed in order of importance and their values move into the expand
  * panel; under 620px the rows become cards.
  *
- * Edit opens the plant editor over the list. The saved quotation comes back
- * from the server, so the row is refreshed in place instead of refetching.
+ * The "New quotation" trigger no longer lives in this component's header — the
+ * hosting screen renders it in the SalesLayout header (top-right, beside the
+ * page title) and calls the imperative `openCreate()` handle exposed via ref.
+ *
+ * Rows are shown newest-first (descending creationDate); the Sno numbering
+ * follows that order. Search matches customer name, quotation / customer ID,
+ * mobile, sales person, and the creation date in several written forms.
+ *
+ * Edit opens the plant editor over the list. On save the row is refreshed in
+ * place from the server echo; additionally, whenever the editor closes (X,
+ * Android back, or a finalizing action) the edited quotation is refetched so
+ * the row always reflects the server's latest copy.
  *
  * The Edit screen distinguishes a plain in-place save (which should leave the
  * editor open so the operator can keep working) from a finalizing action —
@@ -190,14 +236,10 @@ function ShareKindModal({ styles, quotationLine, busyKind, onPick, onClose }) {
  * the Collector Sheet PDF. The chosen PDF is downloaded and handed to the
  * shared PdfShareSheet. If a parent passes `onSend`, that takes over instead.
  */
-export default function QuotationViewList({
-  mode = "user",
-  title,
-  subtitle,
-  onSelect,
-  onUpdate,
-  onSend,
-}) {
+function QuotationViewList(
+  { mode = "user", title, subtitle, onSelect, onUpdate, onSend },
+  ref,
+) {
   const { width } = useWindowDimensions();
   const [avail, setAvail] = useState(0);
 
@@ -236,6 +278,14 @@ export default function QuotationViewList({
   const toggleRow = useCallback((id) => {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
+
+  /* The hosting screen owns the "New quotation" button in the page header and
+     opens the create modal through this handle. */
+  useImperativeHandle(
+    ref,
+    () => ({ openCreate: () => setCreateOpen(true) }),
+    [],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -301,10 +351,12 @@ export default function QuotationViewList({
     load();
   }, [load]);
 
+  /* Newest first: sort by creationDate descending, then number the rows so Sno
+     1 is the most recent quotation. */
   const numbered = useMemo(
     () =>
       [...quotations]
-        .sort((a, b) => dateValue(a) - dateValue(b))
+        .sort((a, b) => dateValue(b) - dateValue(a))
         .map((q, index) => ({ ...q, sno: index + 1 })),
     [quotations],
   );
@@ -321,7 +373,8 @@ export default function QuotationViewList({
           String(q.mobileNo || "").includes(term) ||
           (q.customerName || "").toLowerCase().includes(term) ||
           (q.assignedUserName || "").toLowerCase().includes(term) ||
-          (q.assignedUserId || "").toLowerCase().includes(term)
+          (q.assignedUserId || "").toLowerCase().includes(term) ||
+          dateSearchText(q.creationDate).includes(term)
         );
       });
   }, [numbered, search, level]);
@@ -372,6 +425,41 @@ export default function QuotationViewList({
     },
     [load, onUpdate],
   );
+
+  /* ── refetch on editor close ──────────────────────────────────────────
+     Re-pull the single quotation from the server whenever the editor is
+     dismissed, whatever the cause (X button, Android back, or a finalizing
+     save). Runs once per close via the was-editing latch. */
+  const refreshQuotation = useCallback(async (quotationId) => {
+    if (quotationId == null) return;
+    const response = await getQuotation(quotationId);
+    if (response?.status === "SUCCESS" && response.payload) {
+      setQuotations((prev) =>
+        prev.map((q) =>
+          q.quotationId === response.payload.quotationId ? response.payload : q,
+        ),
+      );
+    } else if (response?.status === "NOT_FOUND") {
+      // Gone on the server — drop it from the list.
+      setQuotations((prev) =>
+        prev.filter((q) => q.quotationId !== quotationId),
+      );
+    }
+  }, []);
+
+  const editingIdRef = useRef(null);
+  const wasEditingRef = useRef(false);
+  useEffect(() => {
+    if (editing) {
+      editingIdRef.current = editing.quotationId;
+      wasEditingRef.current = true;
+      return;
+    }
+    if (wasEditingRef.current) {
+      wasEditingRef.current = false;
+      refreshQuotation(editingIdRef.current);
+    }
+  }, [editing, refreshQuotation]);
 
   /* ── share ────────────────────────────────────────────────────────────
      Tapping Send opens the kind chooser. Picking a kind downloads the matching
@@ -818,14 +906,6 @@ export default function QuotationViewList({
     );
   };
 
-  const heading =
-    title || (mode === "unit" ? "Unit quotations" : "My quotations");
-  const sub =
-    subtitle ||
-    (mode === "unit"
-      ? "Every quotation raised by your unit"
-      : "Quotations you created");
-
   const shareLine = shareTarget
     ? `QTN-${shareTarget.quotationId}${
         shareTarget.customerName ? ` · ${shareTarget.customerName}` : ""
@@ -847,7 +927,7 @@ export default function QuotationViewList({
               style={styles.searchInput}
               value={search}
               onChangeText={setSearch}
-              placeholder="Search customer, quotation ID, mobile or sales person"
+              placeholder="Search by customer name, date, quotation ID or mobile"
               placeholderTextColor={C.PLACEHOLDER}
               returnKeyType="search"
             />
@@ -972,3 +1052,5 @@ export default function QuotationViewList({
     </View>
   );
 }
+
+export default forwardRef(QuotationViewList);

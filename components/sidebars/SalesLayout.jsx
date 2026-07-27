@@ -126,7 +126,7 @@ export default function SalesLayout({ title, subtitle, right, children }) {
 
   const handleLogout = useCallback(() => {
     setOpen(false);
-    router.replace("/login");
+    router.replace("/auth/Login");
   }, [router]);
 
   /* ---------------- swipe gesture ---------------- */
