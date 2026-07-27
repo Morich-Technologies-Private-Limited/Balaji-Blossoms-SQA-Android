@@ -1,70 +1,64 @@
 import { Ionicons } from "@expo/vector-icons";
 import { usePathname, useRouter } from "expo-router";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useMemo } from "react";
 import {
-  Image,
-  Pressable,
-  ScrollView,
-  Text,
-  useWindowDimensions,
-  View,
+    Image,
+    Pressable,
+    ScrollView,
+    Text,
+    useWindowDimensions,
+    View,
 } from "react-native";
 import logo from "../../assets/images/balaji_logo.png";
-import { getCurrentUser } from "../../utility/secureStorage";
-import CreateQuotationModal from "../quotation/CreateQuotationModal";
 import makeStyles, { COLORS } from "./SalesSidebar.styles";
 
-export const SALES_MENU = [
+/* The delivery section's menu. Same shape as SALES_MENU so the layout can read
+   title/hint from it keyed on the active route. Routes map to
+   app/delivery/<name>.jsx via expo-router. */
+export const DELIVERY_MENU = [
   {
-    key: "myQuotation",
-    label: "My Quotation",
-    hint: "Quotations you created",
-    icon: "document-text-outline",
-    route: "/sales/myQuotation",
-  },
-  {
-    key: "allQuotation",
-    label: "Unit Quotation",
+    key: "viewQuotationUnit",
+    label: "View Quotation",
     hint: "Everything in your unit",
     icon: "albums-outline",
-    route: "/sales/allQuotation",
-  },
-  {
-    key: "myInvoice",
-    label: "My Invoice",
-    hint: "Invoices you raised",
-    icon: "receipt-outline",
-    route: "/sales/myInvoice",
+    route: "/delivery/viewQuotationUnit",
   },
   {
     key: "invoice",
+    label: "Invoice",
+    hint: "Invoices raised in your unit",
+    icon: "receipt-outline",
+    route: "/delivery/invoice",
+  },
+  {
+    key: "searchInvoice",
     label: "Search Invoice",
     hint: "Find any invoice",
     icon: "search-outline",
-    route: "/sales/searchInvoice",
+    route: "/delivery/searchInvoice",
   },
   {
     key: "createCustomer",
-    label: "New Customer",
+    label: "Create Customer",
     hint: "Add a buyer once, reuse everywhere",
     icon: "person-add-outline",
-    route: "/sales/createCustomer",
+    route: "/delivery/createCustomer",
   },
 ];
 
-/* Lists that should reflect a freshly created quotation. When the create flow
-   finishes while one of these is on screen, we remount it so the new row
-   appears; the other one loads fresh whenever it is next visited. */
-const QUOTATION_ROUTES = ["/sales/myQuotation", "/sales/allQuotation"];
-
 /**
- * SalesSidebar
+ * DeliverySidebar
+ *
+ * A sibling of SalesSidebar for the /delivery section. Reuses the Sales sidebar
+ * styles verbatim so the chrome matches, carries the delivery menu, and drops
+ * the New Quotation flow — delivery is not where quotations are created.
+ *
  * @param {boolean} collapsed   icon-only rail (desktop)
  * @param {boolean} floating    rendered as an overlay drawer (phone / tablet)
  * @param {boolean} showHints   small caption under each label
  * @param {string}  storeName   footer store label
  */
-export default function SalesSidebar({
+export default function DeliverySidebar({
   collapsed = false,
   floating = false,
   showHints = false,
@@ -84,37 +78,6 @@ export default function SalesSidebar({
 
   const router = useRouter();
   const pathname = usePathname();
-
-  /* Create-quotation flow lives here so the button can sit in the sidebar and
-     work on every /sales screen without touching the page files. */
-  const [currentUser, setCurrentUser] = useState(null);
-  const [createOpen, setCreateOpen] = useState(false);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const user = await getCurrentUser();
-        if (alive) setCurrentUser(user);
-      } catch {
-        // ignore — button stays visible, create flow validates on submit
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  const openCreate = () => {
-    onNavigate?.(); // close the drawer on phone / tablet (no-op on desktop)
-    setCreateOpen(true);
-  };
-
-  const handleCreated = () => {
-    setCreateOpen(false);
-    // Remount the list we're on so the new quotation shows immediately.
-    if (QUOTATION_ROUTES.includes(pathname)) router.replace(pathname);
-  };
 
   const go = (route) => {
     if (pathname !== route) router.push(route);
@@ -185,48 +148,14 @@ export default function SalesSidebar({
         </Pressable>
       )}
 
-      {showLabels && <Text style={styles.sectionLabel}>Sales</Text>}
+      {showLabels && <Text style={styles.sectionLabel}>Delivery</Text>}
 
       <ScrollView
         contentContainerStyle={styles.menu}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* New quotation — styled as a menu item so it merges with the nav,
-            accented so it still reads as the primary action. */}
-        <Pressable
-          onPress={openCreate}
-          accessibilityRole="button"
-          accessibilityLabel="New quotation"
-          style={({ pressed, hovered }) => [
-            styles.item,
-            collapsed && styles.itemCollapsed,
-            (pressed || hovered) && styles.itemHovered,
-          ]}
-        >
-          <View style={styles.itemIcon}>
-            <Ionicons
-              name="add-circle-outline"
-              size={styles.iconSize}
-              color="#ffffff"
-            />
-          </View>
-
-          {showLabels && (
-            <View style={styles.itemTextWrap}>
-              <Text
-                style={[styles.itemLabel, { color: "#ffffff" }]}
-                numberOfLines={1}
-              >
-                New Quotation
-              </Text>
-            </View>
-          )}
-        </Pressable>
-
-        {showLabels && <View style={styles.itemDivider} />}
-
-        {SALES_MENU.map((item, i) => {
+        {DELIVERY_MENU.map((item, i) => {
           const active = pathname === item.route;
           return (
             <Fragment key={item.key}>
@@ -272,7 +201,7 @@ export default function SalesSidebar({
                 )}
               </Pressable>
 
-              {showLabels && i < SALES_MENU.length - 1 && (
+              {showLabels && i < DELIVERY_MENU.length - 1 && (
                 <View style={styles.itemDivider} />
               )}
             </Fragment>
@@ -309,17 +238,6 @@ export default function SalesSidebar({
           </View>
         )}
       </View>
-
-      {/* Create-quotation modal — RN Modal portals to root, so it shows over
-          everything even though it's mounted inside the sidebar/drawer. */}
-      <CreateQuotationModal
-        visible={createOpen}
-        userId={currentUser?.emailId}
-        unitId={currentUser?.unitId}
-        userName={currentUser?.name || currentUser?.userName}
-        onClose={() => setCreateOpen(false)}
-        onCreated={handleCreated}
-      />
     </View>
   );
 }

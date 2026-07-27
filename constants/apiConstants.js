@@ -22,3 +22,4 @@ export const CUSTOMER_SEARCH_URL = `${API_BASE_URL}/customer/search`;
 export const INVOICE_FIND_BY_UNIT_URL = `${API_BASE_URL}/invoice/findByUnitId`;
 export const INVOICE_FIND_URL = `${API_BASE_URL}/invoice/find`;
 export const INVOICE_PDF_URL = `${API_BASE_URL}/invoice/pdf`;
+export const INVOICE_SEARCH_URL = `${API_BASE_URL}/invoice/search`;

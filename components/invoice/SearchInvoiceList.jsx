@@ -1,11 +1,17 @@
 import { Ionicons } from "@expo/vector-icons";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ActivityIndicator,
   FlatList,
   Modal,
   Pressable,
-  RefreshControl,
   Text,
   TextInput,
   useWindowDimensions,
@@ -13,14 +19,17 @@ import {
 } from "react-native";
 
 import { downloadInvoicePdf } from "../../api/downloadPdfApis.js";
-import { fetchInvoicesByUnit } from "../../api/fetchInvoice.js";
+import { searchInvoice } from "../../api/fetchInvoice.js";
 import PdfShareSheet from "../../utility/PdfShareSheet.js";
 import { getCurrentUser } from "../../utility/secureStorage.js";
 import makeStyles from "./InvoiceList.styles.js";
 import InvoiceView from "./View.jsx";
 
-/* Payment status drives the filter chips and the row pill. Keys match the
-   PaymentStatus enum coming back from the server. */
+/* Server-side search tuning. */
+const DEBOUNCE_MS = 400; // wait after the last keystroke before hitting the API
+const MIN_CHARS = 2; // don't search on a single character
+const MAX_RECORDS = 20; // matches the endpoint's default cap
+
 const STATUSES = [
   { key: "ALL", label: "All" },
   { key: "DUE", label: "Due" },
@@ -34,19 +43,15 @@ const STATUS_META = {
   FULL: { label: "Paid", tint: "#5B8E2E" },
 };
 
-/* Tally sync is a secondary badge shown in the expand panel / cards. */
 const TALLY_META = {
   SYNC: { label: "Synced", tint: "#5B8E2E" },
   REQUEST_INITIATED: { label: "Sync requested", tint: "#E8622C" },
   NOT_SYNC: { label: "Not synced", tint: "#94A3B8" },
 };
 
-/* Breakpoints are measured on the table container, not the window, so the
-   layout stays correct inside drawers, split panes and modals. */
-const BP_WIDE = 940; // every column
-const BP_MID = 780; // mobile no. moves into the panel
-const BP_COMPACT = 620; // sno moves into the panel
-// below BP_COMPACT the list renders as cards
+const BP_WIDE = 940;
+const BP_MID = 780;
+const BP_COMPACT = 620;
 
 const formatDate = (value) => {
   if (!value) return "—";
@@ -93,40 +98,32 @@ const tallyOf = (item) =>
     tint: "#94A3B8",
   };
 
+/* Debounce any fast-changing value: returns `value` only after it has stopped
+   changing for `delay` ms. The cleanup cancels the pending timer on every new
+   keystroke, so only the final pause fires. */
+function useDebouncedValue(value, delay) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]);
+  return debounced;
+}
+
 /**
- * Invoice list.
+ * Search Invoice.
  *
- * Layout contract: the table never scrolls sideways. Column widths are derived
- * from the measured container width and always add up to it, so the Action
- * column can never be pushed out of frame. As the container narrows, columns
- * are removed in order of importance and their values move into the expand
- * panel; under 620px the rows become cards.
+ * Server-side search against GET /search (searchKey, unitId, maxRecord). Typing
+ * is debounced, so the API is only called once the operator pauses; pressing
+ * the keyboard's Search key fires immediately. Results are capped at
+ * MAX_RECORDS and can be narrowed further by the payment-status chips
+ * client-side. View and Send behave exactly as in the main invoice list.
  *
- * Data: every row returned by GET /findByUnitId is rendered as-is. Scoping to
- * the signed-in user is the server's job — it reads the caller from the bearer
- * token and returns only what that user is allowed to see. There is
- * deliberately no client-side ownership filter here: duplicating that rule on
- * the client only creates a second place for it to go wrong, and a mismatched
- * display name would silently hide rows the server intended to send.
- *
- * The only client-side narrowing is the search box and the status chips, both
- * of which are presentation concerns the operator controls directly.
- *
- * View opens the read-only invoice viewer over the list. Its actions (Add
- * payment, Send to Tally) refetch the invoice and echo the fresh InvoiceDto
- * back through onSaved, so the row is refreshed in place; a bare `true` echo
- * (failed refetch) triggers a full reload instead.
- *
- * Send downloads the invoice PDF and hands it to the shared PdfShareSheet.
- * If a parent passes `onSend`, that takes over instead.
+ * A monotonic request id guards against out-of-order responses: only the newest
+ * in-flight query is allowed to write results, so a slow earlier request can't
+ * clobber a faster later one.
  */
-export default function InvoiceList({
-  title,
-  subtitle,
-  onSelect,
-  onUpdate,
-  onSend,
-}) {
+export default function SearchInvoiceList({ onUpdate, onSend }) {
   const { width } = useWindowDimensions();
   const [avail, setAvail] = useState(0);
 
@@ -144,20 +141,22 @@ export default function InvoiceList({
   const [currentUser, setCurrentUser] = useState(null);
   const [userReady, setUserReady] = useState(false);
   const [invoices, setInvoices] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("ALL");
   const [viewing, setViewing] = useState(null);
   const [expanded, setExpanded] = useState({});
 
-  /* Share flow: the row whose Send was tapped, whether a download is in
-     flight, and the downloaded PDF once it is ready for the share sheet. */
   const [shareBusyId, setShareBusyId] = useState(null);
   const [pdf, setPdf] = useState(null);
 
   const resolvedUnitId = currentUser?.unitId;
+
+  const debouncedSearch = useDebouncedValue(search, DEBOUNCE_MS);
+
+  /* Latest-wins guard for async responses. */
+  const reqId = useRef(0);
 
   const toggleRow = useCallback((id) => {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -179,44 +178,59 @@ export default function InvoiceList({
     };
   }, []);
 
-  const load = useCallback(async () => {
-    if (!userReady) return;
+  /* Run a search for `raw`. Short terms clear the list; a stale response (one
+     whose id is no longer the latest) is dropped before it can set state. */
+  const runSearch = useCallback(
+    async (raw) => {
+      const term = raw.trim();
 
-    /* The unit id scopes the request; the server handles everything else. */
-    if (!resolvedUnitId) {
-      setError("No unit assigned to this user.");
-      setInvoices([]);
+      if (term.length < MIN_CHARS) {
+        reqId.current += 1; // invalidate any in-flight request
+        setInvoices([]);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+
+      if (!resolvedUnitId) {
+        setError("No unit assigned to this user.");
+        setLoading(false);
+        return;
+      }
+
+      const id = ++reqId.current;
+      setLoading(true);
+      setError(null);
+
+      const response = await searchInvoice(term, resolvedUnitId, MAX_RECORDS);
+      if (id !== reqId.current) return; // a newer search superseded this one
+
+      if (response?.status === "SUCCESS") {
+        setInvoices(response.payload || []);
+      } else if (response?.status === "NOT_FOUND") {
+        setInvoices([]);
+      } else {
+        setInvoices([]);
+        setError(response?.message || "Could not search invoices.");
+      }
       setLoading(false);
-      setRefreshing(false);
-      return;
-    }
+    },
+    [resolvedUnitId],
+  );
 
-    setError(null);
-
-    const response = await fetchInvoicesByUnit(resolvedUnitId);
-
-    if (response?.status === "SUCCESS") {
-      /* Render exactly what the server sent — no ownership filter here. */
-      setInvoices(response.payload || []);
-    } else if (response?.status === "NOT_FOUND") {
-      setInvoices([]);
-    } else {
-      setInvoices([]);
-      setError(response?.message || "Could not load invoices.");
-    }
-
-    setLoading(false);
-    setRefreshing(false);
-  }, [userReady, resolvedUnitId]);
-
+  /* Fire whenever the debounced term settles (and once the user is loaded). */
   useEffect(() => {
-    load();
-  }, [load]);
+    if (!userReady) return;
+    runSearch(debouncedSearch);
+  }, [debouncedSearch, userReady, runSearch]);
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    load();
-  }, [load]);
+  /* True from the first keystroke (while the debounce timer is still counting)
+     through to the response landing — so the spinner shows instantly, not only
+     once the request goes out. */
+  const busy =
+    loading ||
+    (search.trim() !== debouncedSearch.trim() &&
+      search.trim().length >= MIN_CHARS);
 
   const numbered = useMemo(
     () =>
@@ -226,47 +240,29 @@ export default function InvoiceList({
     [invoices],
   );
 
-  const visible = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return numbered
-      .filter((inv) => (status === "ALL" ? true : inv.paymentStatus === status))
-      .filter((inv) => {
-        if (!term) return true;
-        return (
-          String(inv.invoiceId).includes(term) ||
-          String(inv.customerNumber || "").includes(term) ||
-          (inv.customerName || "").toLowerCase().includes(term) ||
-          (inv.unitName || "").toLowerCase().includes(term) ||
-          (inv.assignedUserName || "").toLowerCase().includes(term)
-        );
-      });
-  }, [numbered, search, status]);
+  /* Status chips refine the returned results client-side. */
+  const visible = useMemo(
+    () =>
+      numbered.filter((inv) =>
+        status === "ALL" ? true : inv.paymentStatus === status,
+      ),
+    [numbered, status],
+  );
 
-  /* View's onSaved fires after a payment (or Tally sync) is recorded. It sends
-     the refreshed InvoiceDto on success, or the bare flag `true` if the
-     refetch failed — in which case we reload the whole list so it isn't left
-     showing stale figures. The viewer stays open either way; View manages its
-     own dismissal through onClose. */
   const handleSaved = useCallback(
     (saved) => {
       if (!saved || saved === true) {
-        load();
+        runSearch(debouncedSearch);
         return;
       }
-
       setInvoices((prev) =>
         prev.map((inv) => (inv.invoiceId === saved.invoiceId ? saved : inv)),
       );
-
       onUpdate?.(saved);
     },
-    [load, onUpdate],
+    [runSearch, debouncedSearch, onUpdate],
   );
 
-  /* ── share ────────────────────────────────────────────────────────────
-     Tapping Send downloads the invoice PDF and, on success, hands it to
-     PdfShareSheet. A failed download surfaces an inline error. A parent-
-     supplied `onSend` takes over entirely if present. */
   const openShare = useCallback(
     async (item) => {
       if (onSend) {
@@ -356,7 +352,7 @@ export default function InvoiceList({
 
   const actionButtons = useCallback(
     (item) => {
-      const busy = shareBusyId === item.invoiceId;
+      const rowBusy = shareBusyId === item.invoiceId;
       return (
         <View style={styles.actionCell}>
           <Pressable
@@ -370,9 +366,9 @@ export default function InvoiceList({
             style={styles.actionBtn}
             hitSlop={6}
             onPress={() => openShare(item)}
-            disabled={busy}
+            disabled={rowBusy}
           >
-            {busy ? (
+            {rowBusy ? (
               <ActivityIndicator size="small" color={C.GREEN} />
             ) : (
               <Ionicons name="send-outline" size={15} color={C.GREEN} />
@@ -384,7 +380,7 @@ export default function InvoiceList({
     [styles, C, openShare, shareBusyId],
   );
 
-  /* ── columns: always sum to the measured width ───────────────────────── */
+  /* ── columns ─────────────────────────────────────────────────────────── */
   const columns = useMemo(() => {
     if (isCardMode) return [];
 
@@ -406,12 +402,7 @@ export default function InvoiceList({
       showMobile && { key: "mobile", label: "Mobile no", w: 120 },
       { key: "amount", label: "Total", w: dense ? 96 : 112, align: "right" },
       { key: "status", label: "Status", w: dense ? 108 : 124 },
-      {
-        key: "action",
-        label: "Actions",
-        w: dense ? 84 : 96,
-        align: "center",
-      },
+      { key: "action", label: "Actions", w: dense ? 84 : 96, align: "center" },
     ].filter(Boolean);
 
     const fixed = defs.reduce((sum, c) => sum + (c.w || 0), 0);
@@ -509,11 +500,7 @@ export default function InvoiceList({
     const stats = [
       { label: "Regular plants", value: String(regular) },
       { label: "Special plants", value: String(special) },
-      {
-        label: "Total items",
-        value: String(regular + special),
-        accent: true,
-      },
+      { label: "Total items", value: String(regular + special), accent: true },
       { label: "Deposited", text: formatAmount(item.paymentDeposited) },
       { label: "Remaining", text: formatAmount(item.remainingPayment) },
       { label: "Transport", text: formatAmount(item.transportationCost) },
@@ -569,10 +556,9 @@ export default function InvoiceList({
     );
   };
 
-  /* ── rows ────────────────────────────────────────────────────────────── */
+  /* ── rows / cards ────────────────────────────────────────────────────── */
   const renderRow = ({ item }) => {
     const open = !!expanded[item.invoiceId];
-
     return (
       <Fragment>
         <Pressable
@@ -597,7 +583,7 @@ export default function InvoiceList({
   const renderCard = ({ item }) => {
     const open = !!expanded[item.invoiceId];
     const plants = (item.regularPlants || 0) + (item.specialPlants || 0);
-    const busy = shareBusyId === item.invoiceId;
+    const rowBusy = shareBusyId === item.invoiceId;
 
     return (
       <Pressable
@@ -688,9 +674,9 @@ export default function InvoiceList({
           <Pressable
             style={styles.cardActionBtn}
             onPress={() => openShare(item)}
-            disabled={busy}
+            disabled={rowBusy}
           >
-            {busy ? (
+            {rowBusy ? (
               <ActivityIndicator size="small" color={C.GREEN} />
             ) : (
               <Ionicons name="send-outline" size={15} color={C.GREEN} />
@@ -704,44 +690,74 @@ export default function InvoiceList({
     );
   };
 
-  /* `invoices` is now exactly what the server returned, so a non-empty
-     `invoices` with an empty `visible` can only mean the search box or a
-     status chip is hiding rows — which is what "Nothing matches this view"
-     tells the operator. */
+  /* Empty area does quadruple duty: searching / prompt / error / no-match. */
   const listEmpty = () => {
-    if (loading) return null;
-    const filtered = invoices.length > 0;
+    if (busy) {
+      return (
+        <View style={styles.loadingWrap}>
+          <ActivityIndicator size="large" color={C.NAVY} />
+          <Text style={styles.loadingText}>Searching invoices…</Text>
+        </View>
+      );
+    }
+
+    const term = debouncedSearch.trim();
+
+    if (term.length < MIN_CHARS) {
+      return (
+        <View style={styles.emptyWrap}>
+          <View style={styles.emptyIcon}>
+            <Ionicons name="search-outline" size={28} color={C.PLACEHOLDER} />
+          </View>
+          <Text style={styles.emptyTitle}>Search for an invoice</Text>
+          <Text style={styles.emptyText}>
+            Type a customer name, invoice ID, mobile number or sales person to
+            find invoices in your unit.
+          </Text>
+        </View>
+      );
+    }
+
+    if (error) {
+      return (
+        <View style={styles.emptyWrap}>
+          <View style={styles.emptyIcon}>
+            <Ionicons
+              name="cloud-offline-outline"
+              size={28}
+              color={C.PLACEHOLDER}
+            />
+          </View>
+          <Text style={styles.emptyTitle}>Search failed</Text>
+          <Text style={styles.emptyText}>{error}</Text>
+          <Pressable
+            style={styles.emptyAction}
+            onPress={() => runSearch(debouncedSearch)}
+          >
+            <Text style={styles.emptyActionText}>TRY AGAIN</Text>
+          </Pressable>
+        </View>
+      );
+    }
 
     return (
       <View style={styles.emptyWrap}>
         <View style={styles.emptyIcon}>
-          <Ionicons
-            name={error ? "cloud-offline-outline" : "receipt-outline"}
-            size={28}
-            color={C.PLACEHOLDER}
-          />
+          <Ionicons name="receipt-outline" size={28} color={C.PLACEHOLDER} />
         </View>
-        <Text style={styles.emptyTitle}>
-          {error
-            ? "Invoices didn't load"
-            : filtered
-              ? "Nothing matches this view"
-              : "No invoices yet"}
-        </Text>
+        <Text style={styles.emptyTitle}>No invoices found</Text>
         <Text style={styles.emptyText}>
-          {error ||
-            (filtered
-              ? "Clear the search box or pick another status to see more."
-              : "Generated invoices will appear here.")}
+          Nothing matches “{term}”. Check the spelling or try a different term.
         </Text>
-        {error ? (
-          <Pressable style={styles.emptyAction} onPress={load}>
-            <Text style={styles.emptyActionText}>TRY AGAIN</Text>
-          </Pressable>
-        ) : null}
       </View>
     );
   };
+
+  const resultLabel = busy
+    ? "Searching…"
+    : `${visible.length}${
+        visible.length !== invoices.length ? ` of ${invoices.length}` : ""
+      } shown`;
 
   return (
     <View style={styles.screen}>
@@ -761,8 +777,13 @@ export default function InvoiceList({
               placeholder="Search customer, invoice ID, mobile or sales person"
               placeholderTextColor={C.PLACEHOLDER}
               returnKeyType="search"
+              autoFocus
+              autoCorrect={false}
+              onSubmitEditing={() => runSearch(search)} // search now, skip debounce
             />
-            {search.length > 0 ? (
+            {busy ? (
+              <ActivityIndicator size="small" color={C.NAVY} />
+            ) : search.length > 0 ? (
               <Pressable onPress={() => setSearch("")} hitSlop={8}>
                 <Ionicons
                   name="close-circle"
@@ -793,9 +814,7 @@ export default function InvoiceList({
                 </Pressable>
               );
             })}
-            <Text style={styles.resultCount}>
-              {visible.length} of {invoices.length} shown
-            </Text>
+            <Text style={styles.resultCount}>{resultLabel}</Text>
           </View>
         </View>
 
@@ -807,35 +826,19 @@ export default function InvoiceList({
             setAvail((prev) => (Math.abs(prev - w) > 2 ? w : prev));
           }}
         >
-          {loading ? (
-            <View style={styles.loadingWrap}>
-              <ActivityIndicator size="large" color={C.NAVY} />
-              <Text style={styles.loadingText}>Loading invoices…</Text>
-            </View>
-          ) : (
-            <>
-              {!isCardMode && visible.length > 0 ? tableHead : null}
-              <FlatList
-                data={visible}
-                keyExtractor={(item) => String(item.invoiceId)}
-                renderItem={isCardMode ? renderCard : renderRow}
-                extraData={{ expanded, columns, shareBusyId }}
-                ListEmptyComponent={listEmpty}
-                contentContainerStyle={
-                  isCardMode ? styles.cardList : styles.listContent
-                }
-                showsVerticalScrollIndicator={false}
-                refreshControl={
-                  <RefreshControl
-                    refreshing={refreshing}
-                    onRefresh={onRefresh}
-                    tintColor={C.NAVY}
-                    colors={[C.NAVY]}
-                  />
-                }
-              />
-            </>
-          )}
+          {!isCardMode && visible.length > 0 ? tableHead : null}
+          <FlatList
+            data={visible}
+            keyExtractor={(item) => String(item.invoiceId)}
+            renderItem={isCardMode ? renderCard : renderRow}
+            extraData={{ expanded, columns, shareBusyId, busy }}
+            ListEmptyComponent={listEmpty}
+            contentContainerStyle={
+              isCardMode ? styles.cardList : styles.listContent
+            }
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          />
         </View>
       </View>
 

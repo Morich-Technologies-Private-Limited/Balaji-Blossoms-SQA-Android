@@ -3,6 +3,7 @@ import {
   INVOICE_CREATE_PAYMENT_URL, // GET /find?invoiceId=
   INVOICE_FIND_BY_UNIT_URL,
   INVOICE_FIND_URL,
+  INVOICE_SEARCH_URL,
   INVOICE_SEND_TO_TALLY_URL,
 } from "../constants/apiConstants";
 import axiosClient from "./axiosClient";
@@ -51,6 +52,17 @@ export const sendInvoiceToTally = async (invoiceId) => {
   try {
     const response = await axiosClient.post(INVOICE_SEND_TO_TALLY_URL, null, {
       params: { invoiceId },
+    });
+    return response.data;
+  } catch (error) {
+    return handleApiError(error);
+  }
+};
+
+export const searchInvoice = async (searchKey, unitId, maxRecord = 20) => {
+  try {
+    const response = await axiosClient.get(INVOICE_SEARCH_URL, {
+      params: { searchKey, unitId, maxRecord },
     });
     return response.data;
   } catch (error) {

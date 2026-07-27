@@ -120,9 +120,10 @@ const levelOf = (item) =>
   LEVEL_META[item.level] || { label: item.level || "—", tint: "#94A3B8" };
 
 /* ── share chooser ─────────────────────────────────────────────────────
-   A small sheet offered when the operator taps Send on a row. It only picks
-   *what* to share — Quotation or Collector Sheet — and hands the choice back;
-   the download and the actual share are driven by the parent. */
+   A small sheet offered when the operator taps Send on a row, or automatically
+   after a level change. It only picks *what* to share — Quotation or Collector
+   Sheet — and hands the choice back; the download and the actual share are
+   driven by the parent. */
 function ShareKindModal({ styles, quotationLine, busyKind, onPick, onClose }) {
   const C = styles.colors;
 
@@ -226,13 +227,14 @@ function ShareKindModal({ styles, quotationLine, busyKind, onPick, onClose }) {
  * Android back, or a finalizing action) the edited quotation is refetched so
  * the row always reflects the server's latest copy.
  *
- * The Edit screen distinguishes a plain in-place save (which should leave the
- * editor open so the operator can keep working) from a finalizing action —
- * moving to the loading shade or generating the invoice — which closes it. It
- * signals this in the second argument to `onSaved` as `{ keepOpen }`, and
- * `handleSaved` only dismisses the modal when `keepOpen` is false.
+ * Auto-share on level change: the editor is opened against a known level
+ * (DRAFT / DELIVERY_SHADE / INVOICE_GENERATED). When it closes we refetch the
+ * quotation, and if the level has moved on (e.g. moved to the loading shade or
+ * turned into an invoice), we automatically open the Share chooser for that
+ * quotation so the operator can hand over the fresh document. No level change,
+ * no popup — a plain close is silent.
  *
- * Send opens a small chooser: the operator shares either the Quotation PDF or
+ * Send opens the same chooser: the operator shares either the Quotation PDF or
  * the Collector Sheet PDF. The chosen PDF is downloaded and handed to the
  * shared PdfShareSheet. If a parent passes `onSend`, that takes over instead.
  */
@@ -266,8 +268,9 @@ function QuotationViewList(
   const [editing, setEditing] = useState(null);
   const [expanded, setExpanded] = useState({});
 
-  /* Share flow: the row whose Send was tapped, which kind is downloading, and
-     the downloaded PDF once it is ready to hand to the share sheet. */
+  /* Share flow: the row whose Send was tapped (or which just changed level),
+     which kind is downloading, and the downloaded PDF once it is ready to hand
+     to the share sheet. */
   const [shareTarget, setShareTarget] = useState(null);
   const [shareBusyKind, setShareBusyKind] = useState(null);
   const [pdf, setPdf] = useState(null);
@@ -385,88 +388,12 @@ function QuotationViewList(
     else load();
   };
 
-  /* Edit's onSaved fires for every successful write. The second argument tells
-     us the intent:
-       • a plain save sends { keepOpen: true }  → refresh the row, leave the
-         editor open so the operator can keep working (they close it manually);
-       • move-to-shade / generate-invoice send { keepOpen: false } → refresh
-         and dismiss the editor.
-     Older callers with no meta object are treated as "close", preserving the
-     previous behaviour. */
-  const handleSaved = useCallback(
-    (saved, meta) => {
-      const keepOpen = meta?.keepOpen === true;
-
-      if (!keepOpen) {
-        setEditing(null);
-      }
-
-      if (!saved || saved === true) {
-        // No echo (or a bare success flag) from the server: refetch the list.
-        load();
-        return;
-      }
-
-      setQuotations((prev) =>
-        prev.map((q) => (q.quotationId === saved.quotationId ? saved : q)),
-      );
-
-      /* Keep the open editor bound to the freshly saved quotation so, if it
-         stays open, it is working against the server's latest copy. */
-      if (keepOpen) {
-        setEditing((current) =>
-          current && current.quotationId === saved.quotationId
-            ? saved
-            : current,
-        );
-      }
-
-      onUpdate?.(saved);
-    },
-    [load, onUpdate],
-  );
-
-  /* ── refetch on editor close ──────────────────────────────────────────
-     Re-pull the single quotation from the server whenever the editor is
-     dismissed, whatever the cause (X button, Android back, or a finalizing
-     save). Runs once per close via the was-editing latch. */
-  const refreshQuotation = useCallback(async (quotationId) => {
-    if (quotationId == null) return;
-    const response = await getQuotation(quotationId);
-    if (response?.status === "SUCCESS" && response.payload) {
-      setQuotations((prev) =>
-        prev.map((q) =>
-          q.quotationId === response.payload.quotationId ? response.payload : q,
-        ),
-      );
-    } else if (response?.status === "NOT_FOUND") {
-      // Gone on the server — drop it from the list.
-      setQuotations((prev) =>
-        prev.filter((q) => q.quotationId !== quotationId),
-      );
-    }
-  }, []);
-
-  const editingIdRef = useRef(null);
-  const wasEditingRef = useRef(false);
-  useEffect(() => {
-    if (editing) {
-      editingIdRef.current = editing.quotationId;
-      wasEditingRef.current = true;
-      return;
-    }
-    if (wasEditingRef.current) {
-      wasEditingRef.current = false;
-      refreshQuotation(editingIdRef.current);
-    }
-  }, [editing, refreshQuotation]);
-
   /* ── share ────────────────────────────────────────────────────────────
-     Tapping Send opens the kind chooser. Picking a kind downloads the matching
-     PDF and, on success, hands it to PdfShareSheet. The chooser closes once the
-     download resolves; a failed download surfaces an inline error and leaves
-     the chooser open to retry. A parent-supplied `onSend` takes over entirely
-     if present. */
+     Opening the chooser: either tapping Send on a row, or automatically after
+     a level change. Picking a kind downloads the matching PDF and, on success,
+     hands it to PdfShareSheet. The chooser closes once the download resolves; a
+     failed download surfaces an inline error and leaves the chooser open to
+     retry. A parent-supplied `onSend` takes over entirely if present. */
   const openShare = useCallback(
     (item) => {
       if (onSend) {
@@ -530,6 +457,102 @@ function QuotationViewList(
     },
     [shareTarget, shareBusyKind, closeShare],
   );
+
+  /* Edit's onSaved fires for every successful write. The second argument tells
+     us the intent:
+       • a plain save sends { keepOpen: true }  → refresh the row, leave the
+         editor open so the operator can keep working (they close it manually);
+       • move-to-shade / generate-invoice send { keepOpen: false } → refresh
+         and dismiss the editor.
+     Older callers with no meta object are treated as "close", preserving the
+     previous behaviour. The auto-share on level change is handled centrally on
+     editor close (see refreshQuotation), not here. */
+  const handleSaved = useCallback(
+    (saved, meta) => {
+      const keepOpen = meta?.keepOpen === true;
+
+      if (!keepOpen) {
+        setEditing(null);
+      }
+
+      if (!saved || saved === true) {
+        // No echo (or a bare success flag) from the server: refetch the list.
+        load();
+        return;
+      }
+
+      setQuotations((prev) =>
+        prev.map((q) => (q.quotationId === saved.quotationId ? saved : q)),
+      );
+
+      /* Keep the open editor bound to the freshly saved quotation so, if it
+         stays open, it is working against the server's latest copy. */
+      if (keepOpen) {
+        setEditing((current) =>
+          current && current.quotationId === saved.quotationId
+            ? saved
+            : current,
+        );
+      }
+
+      onUpdate?.(saved);
+    },
+    [load, onUpdate],
+  );
+
+  /* ── refetch on editor close ──────────────────────────────────────────
+     Re-pull the single quotation from the server whenever the editor is
+     dismissed, whatever the cause (X button, Android back, or a finalizing
+     save). Runs once per close via the was-editing latch.
+
+     If the level has moved on since the editor opened — the operator moved the
+     quotation to the loading shade or turned it into an invoice — automatically
+     open the Share chooser for the fresh copy, so the new document is one tap
+     from going out. A plain close with no level change stays silent. */
+  const refreshQuotation = useCallback(
+    async (quotationId, openedAtLevel) => {
+      if (quotationId == null) return;
+      const response = await getQuotation(quotationId);
+
+      if (response?.status === "SUCCESS" && response.payload) {
+        const fresh = response.payload;
+
+        setQuotations((prev) =>
+          prev.map((q) => (q.quotationId === fresh.quotationId ? fresh : q)),
+        );
+
+        if (
+          openedAtLevel != null &&
+          fresh.level != null &&
+          fresh.level !== openedAtLevel
+        ) {
+          openShare(fresh);
+        }
+      } else if (response?.status === "NOT_FOUND") {
+        // Gone on the server — drop it from the list.
+        setQuotations((prev) =>
+          prev.filter((q) => q.quotationId !== quotationId),
+        );
+      }
+    },
+    [openShare],
+  );
+
+  const editingIdRef = useRef(null);
+  const editingLevelRef = useRef(null);
+  const wasEditingRef = useRef(false);
+  useEffect(() => {
+    if (editing) {
+      editingIdRef.current = editing.quotationId;
+      editingLevelRef.current = editing.level;
+      wasEditingRef.current = true;
+      return;
+    }
+    if (wasEditingRef.current) {
+      wasEditingRef.current = false;
+      refreshQuotation(editingIdRef.current, editingLevelRef.current);
+    }
+  }, [editing, refreshQuotation]);
 
   /* ── shared bits ─────────────────────────────────────────────────────── */
 

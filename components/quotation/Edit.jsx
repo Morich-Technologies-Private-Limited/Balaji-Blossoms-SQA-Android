@@ -21,7 +21,7 @@ import { getQuotationAccess } from "../../api/getQuotationAccess";
 import { getSpecialPlantByBarcodeId } from "../../api/getSpecialPlant";
 import { searchPlants } from "../../api/plantApi";
 import {
-  generateInvoice,
+  convertToInvoice,
   moveToLoadingShade,
 } from "../../api/quotationActions.js";
 import { updateQuotationPlants } from "../../api/updateQuotation";
@@ -2241,14 +2241,7 @@ function EditInner({ quotation, onClose, onSaved }) {
     setNotice(null);
     setBusy("invoice");
 
-    const response = await generateInvoice(quotation.quotationId, userId, {
-      plantList: lines.map((line) => ({
-        plantId: line.plantId,
-        unitId: line.unitId,
-        quantityDelivered: toCount(line.quantity),
-        selectedByCustomer: line.selectedByCustomer,
-      })),
-    });
+    const response = await convertToInvoice(quotation.quotationId);
 
     if (response?.status !== "SUCCESS") {
       setBusy(null);
@@ -2256,23 +2249,12 @@ function EditInner({ quotation, onClose, onSaved }) {
       return;
     }
 
-    if (response.payload) rehydrate(response.payload);
-    onSaved?.(response.payload || {}, { source: "invoice", keepOpen: false });
+    setLevel("INVOICE_GENERATED");
+    onSaved?.({}, { source: "invoice", keepOpen: true });
     setNotice("Invoice generated.");
-
-    await openPdf("invoice", "Invoice generated");
+    setPdf({ kind: "invoice", title: "Invoice", file: response.payload });
     setBusy(null);
-  }, [
-    working,
-    dirty,
-    handleSave,
-    quotation,
-    userId,
-    lines,
-    onSaved,
-    openPdf,
-    rehydrate,
-  ]);
+  }, [working, dirty, handleSave, quotation, onSaved]);
 
   const saveHint = blockingReason
     ? blockingReason
