@@ -344,7 +344,7 @@ const lineFromReservation = (reservation, isDraft) => {
     size: reservation.size,
     plantType: reservation.plantType,
     seedling,
-    price: priceOf(reservation),
+    price: listPriceOf(reservation),
     listPrice: listPriceOf(reservation),
     traySize: reservation.traySize ?? null,
     unitId: reservation.unitId ?? null,
@@ -1626,7 +1626,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             size: plant.size,
             plantType: plant.plantType,
             seedling,
-            price: priceOf(plant),
+            price: listPriceOf(plant),
             listPrice: listPriceOf(plant),
             traySize: preferred?.traySize ?? null,
             unitId: preferred?.unitId ?? null,
@@ -1711,7 +1711,7 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       updateLine(line.key, {
         inventoryList: match?.inventoryList || [],
-        ...(match && !line.price ? { price: priceOf(match) } : null),
+        ...(match && !line.price ? { price: listPriceOf(match) } : null),
       });
       setPicker((prev) =>
         prev && prev.key === line.key ? { ...prev, loading: false } : prev,
@@ -2212,22 +2212,16 @@ function EditInner({ quotation, onClose, onSaved }) {
       return;
     }
 
-    if (response.payload) rehydrate(response.payload);
-    onSaved?.(response.payload || {}, { source: "move", keepOpen: false });
+    setLevel("DELIVERY_SHADE");
+    onSaved?.({}, { source: "move", keepOpen: true });
     setNotice("Moved to the loading shade.");
-
-    await openPdf("shade", "Moved to loading shade");
+    setPdf({
+      kind: "shade",
+      title: "Moved to loading shade",
+      file: response.payload,
+    });
     setBusy(null);
-  }, [
-    working,
-    dirty,
-    handleSave,
-    quotation,
-    userId,
-    onSaved,
-    openPdf,
-    rehydrate,
-  ]);
+  }, [working, dirty, handleSave, quotation, userId, onSaved]);
 
   const runInvoice = useCallback(async () => {
     if (working) return;

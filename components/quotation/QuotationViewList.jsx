@@ -124,15 +124,24 @@ const levelOf = (item) =>
    after a level change. It only picks *what* to share — Quotation or Collector
    Sheet — and hands the choice back; the download and the actual share are
    driven by the parent. */
-function ShareKindModal({ styles, quotationLine, busyKind, onPick, onClose }) {
+function ShareKindModal({
+  styles,
+  quotationLine,
+  isInvoice,
+  busyKind,
+  onPick,
+  onClose,
+}) {
   const C = styles.colors;
 
   const options = [
     {
       key: "quotation",
       icon: "document-text-outline",
-      title: "Quotation",
-      subtitle: "The customer-facing quotation PDF",
+      title: isInvoice ? "Invoice" : "Quotation",
+      subtitle: isInvoice
+        ? "The customer-facing invoice PDF"
+        : "The customer-facing quotation PDF",
     },
     {
       key: "collector",
@@ -438,17 +447,21 @@ function QuotationViewList(
       }
 
       const isCollector = kind === "collector";
+      const isInvoice = shareTarget.level === "INVOICE_GENERATED";
+      const docLabel = isCollector
+        ? "Collector sheet"
+        : isInvoice
+          ? "Invoice"
+          : "Quotation";
       const quotationLine = `QTN-${id}${
         shareTarget.customerName ? ` · ${shareTarget.customerName}` : ""
       }`;
 
       setPdf({
         kind,
-        title: isCollector ? "Collector sheet" : "Quotation",
+        title: docLabel,
         subtitle: quotationLine,
-        message: `${
-          isCollector ? "Collector sheet" : "Quotation"
-        } for ${quotationLine}`,
+        message: `${docLabel} for ${quotationLine}`,
         file: response.payload,
       });
 
@@ -503,54 +516,36 @@ function QuotationViewList(
   /* ── refetch on editor close ──────────────────────────────────────────
      Re-pull the single quotation from the server whenever the editor is
      dismissed, whatever the cause (X button, Android back, or a finalizing
-     save). Runs once per close via the was-editing latch.
+     save). Runs once per close via the was-editing latch. */
+  const refreshQuotation = useCallback(async (quotationId) => {
+    if (quotationId == null) return;
+    const response = await getQuotation(quotationId);
 
-     If the level has moved on since the editor opened — the operator moved the
-     quotation to the loading shade or turned it into an invoice — automatically
-     open the Share chooser for the fresh copy, so the new document is one tap
-     from going out. A plain close with no level change stays silent. */
-  const refreshQuotation = useCallback(
-    async (quotationId, openedAtLevel) => {
-      if (quotationId == null) return;
-      const response = await getQuotation(quotationId);
+    if (response?.status === "SUCCESS" && response.payload) {
+      const fresh = response.payload;
 
-      if (response?.status === "SUCCESS" && response.payload) {
-        const fresh = response.payload;
-
-        setQuotations((prev) =>
-          prev.map((q) => (q.quotationId === fresh.quotationId ? fresh : q)),
-        );
-
-        if (
-          openedAtLevel != null &&
-          fresh.level != null &&
-          fresh.level !== openedAtLevel
-        ) {
-          openShare(fresh);
-        }
-      } else if (response?.status === "NOT_FOUND") {
-        // Gone on the server — drop it from the list.
-        setQuotations((prev) =>
-          prev.filter((q) => q.quotationId !== quotationId),
-        );
-      }
-    },
-    [openShare],
-  );
+      setQuotations((prev) =>
+        prev.map((q) => (q.quotationId === fresh.quotationId ? fresh : q)),
+      );
+    } else if (response?.status === "NOT_FOUND") {
+      // Gone on the server — drop it from the list.
+      setQuotations((prev) =>
+        prev.filter((q) => q.quotationId !== quotationId),
+      );
+    }
+  }, []);
 
   const editingIdRef = useRef(null);
-  const editingLevelRef = useRef(null);
   const wasEditingRef = useRef(false);
   useEffect(() => {
     if (editing) {
       editingIdRef.current = editing.quotationId;
-      editingLevelRef.current = editing.level;
       wasEditingRef.current = true;
       return;
     }
     if (wasEditingRef.current) {
       wasEditingRef.current = false;
-      refreshQuotation(editingIdRef.current, editingLevelRef.current);
+      refreshQuotation(editingIdRef.current);
     }
   }, [editing, refreshQuotation]);
 
@@ -1058,6 +1053,7 @@ function QuotationViewList(
         <ShareKindModal
           styles={styles}
           quotationLine={shareLine}
+          isInvoice={shareTarget.level === "INVOICE_GENERATED"}
           busyKind={shareBusyKind}
           onPick={pickShareKind}
           onClose={closeShare}
