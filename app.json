@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "sqa-app",
+    "name": "Sales App",
     "slug": "sqa-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -20,7 +20,7 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "package": "com.anonymous.sqaapp"
+      "package": "com.balajiblossoms.sqaapp"
     },
     "web": {
       "output": "static",
