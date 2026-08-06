@@ -3879,170 +3879,397 @@ function EditInner({ quotation, onClose, onSaved }) {
             </View>
           ) : null}
 
-          <View style={styles.footerRow}>
-            <View style={styles.metricStrip}>
-              <View style={styles.metric}>
-                <Text style={styles.metricLabel}>Plant types</Text>
-                <Text style={styles.metricValue}>
-                  {formatNumber(totals.rows)}
-                </Text>
-              </View>
-
-              <View style={styles.metric}>
-                <Text style={styles.metricLabel}>Quantity</Text>
-                <Text style={styles.metricValue}>
-                  {formatNumber(totals.quantity)}
-                </Text>
-                <Text style={styles.metricUnit}>plants</Text>
-              </View>
-
-              <View style={styles.metric}>
-                <Text style={styles.metricLabel}>Packing</Text>
-                <Text style={[styles.metricValue, styles.metricWarm]}>
-                  {formatAmount(totals.packing)}
-                </Text>
-              </View>
-
-              {totals.special > 0 ? (
+          {large ? (
+            <View style={styles.footerRow}>
+              <View style={styles.metricStrip}>
                 <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Special</Text>
+                  <Text style={styles.metricLabel}>Plant types</Text>
+                  <Text style={styles.metricValue}>
+                    {formatNumber(totals.rows)}
+                  </Text>
+                </View>
+
+                <View style={styles.metric}>
+                  <Text style={styles.metricLabel}>Quantity</Text>
+                  <Text style={styles.metricValue}>
+                    {formatNumber(totals.quantity)}
+                  </Text>
+                  <Text style={styles.metricUnit}>plants</Text>
+                </View>
+
+                <View style={styles.metric}>
+                  <Text style={styles.metricLabel}>Packing</Text>
                   <Text style={[styles.metricValue, styles.metricWarm]}>
-                    {formatAmount(totals.special)}
+                    {formatAmount(totals.packing)}
                   </Text>
                 </View>
-              ) : null}
 
-              {totals.transport > 0 ? (
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Transport</Text>
-                  <Text style={[styles.metricValue, styles.metricWarm]}>
-                    {formatAmount(totals.transport)}
+                {totals.special > 0 ? (
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Special</Text>
+                    <Text style={[styles.metricValue, styles.metricWarm]}>
+                      {formatAmount(totals.special)}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {totals.transport > 0 ? (
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Transport</Text>
+                    <Text style={[styles.metricValue, styles.metricWarm]}>
+                      {formatAmount(totals.transport)}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {totals.discount > 0 ? (
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Discount</Text>
+                    <Text style={[styles.metricValue, styles.metricDiscount]}>
+                      −{formatAmount(totals.discount)}
+                    </Text>
+                  </View>
+                ) : null}
+
+                {totals.advance > 0 ? (
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Advance</Text>
+                    <Text style={[styles.metricValue, styles.metricDiscount]}>
+                      {formatAmount(totals.advance)}
+                    </Text>
+                    <Text style={styles.metricUnit}>received</Text>
+                  </View>
+                ) : null}
+
+                <View style={[styles.metric, styles.metricGrand]}>
+                  <Text style={styles.metricGrandLabel}>Grand total</Text>
+                  <Text style={styles.metricGrandValue}>
+                    {formatAmount(totals.grand)}
                   </Text>
                 </View>
-              ) : null}
 
-              {totals.discount > 0 ? (
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Discount</Text>
-                  <Text style={[styles.metricValue, styles.metricDiscount]}>
-                    −{formatAmount(totals.discount)}
-                  </Text>
-                </View>
-              ) : null}
-
-              {totals.advance > 0 ? (
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Advance</Text>
-                  <Text style={[styles.metricValue, styles.metricDiscount]}>
-                    {formatAmount(totals.advance)}
-                  </Text>
-                  <Text style={styles.metricUnit}>received</Text>
-                </View>
-              ) : null}
-
-              <View style={[styles.metric, styles.metricGrand]}>
-                <Text style={styles.metricGrandLabel}>Grand total</Text>
-                <Text style={styles.metricGrandValue}>
-                  {formatAmount(totals.grand)}
-                </Text>
+                {totals.advance > 0 ? (
+                  <View style={[styles.metric, styles.metricRemaining]}>
+                    <Text style={styles.metricRemainingLabel}>Remaining</Text>
+                    <Text style={styles.metricRemainingValue}>
+                      {formatAmount(totals.remaining)}
+                    </Text>
+                  </View>
+                ) : null}
               </View>
 
-              {totals.advance > 0 ? (
-                <View style={[styles.metric, styles.metricRemaining]}>
-                  <Text style={styles.metricRemainingLabel}>Remaining</Text>
-                  <Text style={styles.metricRemainingValue}>
-                    {formatAmount(totals.remaining)}
-                  </Text>
-                </View>
-              ) : null}
-            </View>
-
-            <View style={styles.actionRow}>
-              {canEditLines || canEditTotals || dirty ? (
-                <Pressable
-                  style={({ hovered, pressed }) => [
-                    styles.ghostButton,
-                    (hovered || pressed) && canSave && styles.ghostButtonHover,
-                    !canSave && styles.ghostButtonDisabled,
-                  ]}
-                  onPress={handleSave}
-                  disabled={!canSave}
-                >
-                  {saving ? (
-                    <ActivityIndicator color={C.NAVY} />
-                  ) : (
-                    <Ionicons
-                      name="save-outline"
-                      size={18}
-                      color={canSave ? C.NAVY : "#9CA9B8"}
-                    />
-                  )}
-                  <Text
-                    style={[
-                      styles.ghostTitle,
-                      !canSave && styles.ghostTitleDisabled,
+              <View style={styles.actionRow}>
+                {canEditLines || canEditTotals || dirty ? (
+                  <Pressable
+                    style={({ hovered, pressed }) => [
+                      styles.ghostButton,
+                      (hovered || pressed) &&
+                        canSave &&
+                        styles.ghostButtonHover,
+                      !canSave && styles.ghostButtonDisabled,
                     ]}
+                    onPress={handleSave}
+                    disabled={!canSave}
                   >
-                    {saving ? "SAVING…" : "SAVE CHANGES"}
-                  </Text>
-                </Pressable>
-              ) : null}
+                    {saving ? (
+                      <ActivityIndicator color={C.NAVY} />
+                    ) : (
+                      <Ionicons
+                        name="save-outline"
+                        size={18}
+                        color={canSave ? C.NAVY : "#9CA9B8"}
+                      />
+                    )}
+                    <Text
+                      style={[
+                        styles.ghostTitle,
+                        !canSave && styles.ghostTitleDisabled,
+                      ]}
+                    >
+                      {saving ? "SAVING…" : "SAVE CHANGES"}
+                    </Text>
+                  </Pressable>
+                ) : null}
 
-              {canEdit && isDraft ? (
-                <Pressable
-                  style={({ hovered, pressed }) => [
-                    styles.primaryButton,
-                    (hovered || pressed) &&
-                      !working &&
-                      !dirty &&
-                      styles.primaryButtonHover,
-                    (working || dirty) && styles.primaryButtonDisabled,
-                  ]}
-                  onPress={runMove}
-                  disabled={working || dirty}
-                >
-                  {busy === "shade" ? (
-                    <ActivityIndicator color="#FFFFFF" />
-                  ) : (
-                    <Ionicons name="arrow-forward" size={19} color="#FFFFFF" />
-                  )}
-                  <Text style={styles.primaryTitle}>
-                    {busy === "shade" ? "MOVING…" : "MOVE TO LOADING SHADE"}
-                  </Text>
-                </Pressable>
-              ) : null}
+                {canEdit && isDraft ? (
+                  <Pressable
+                    style={({ hovered, pressed }) => [
+                      styles.primaryButton,
+                      (hovered || pressed) &&
+                        !working &&
+                        !dirty &&
+                        styles.primaryButtonHover,
+                      (working || dirty) && styles.primaryButtonDisabled,
+                    ]}
+                    onPress={runMove}
+                    disabled={working || dirty}
+                  >
+                    {busy === "shade" ? (
+                      <ActivityIndicator color="#FFFFFF" />
+                    ) : (
+                      <Ionicons
+                        name="arrow-forward"
+                        size={19}
+                        color="#FFFFFF"
+                      />
+                    )}
+                    <Text style={styles.primaryTitle}>
+                      {busy === "shade" ? "MOVING…" : "MOVE TO LOADING SHADE"}
+                    </Text>
+                  </Pressable>
+                ) : null}
 
-              {showChecks ? (
-                <Pressable
-                  style={({ hovered, pressed }) => [
-                    styles.primaryButton,
-                    styles.invoiceButton,
-                    (hovered || pressed) &&
-                      allChecked &&
-                      !dirty &&
-                      styles.invoiceButtonHover,
-                    (!allChecked || working || dirty) &&
-                      styles.primaryButtonDisabled,
-                  ]}
-                  onPress={runInvoice}
-                  disabled={!allChecked || working || dirty}
-                >
-                  {busy === "invoice" ? (
-                    <ActivityIndicator color="#FFFFFF" />
-                  ) : (
-                    <Ionicons
-                      name="receipt-outline"
-                      size={19}
-                      color="#FFFFFF"
-                    />
-                  )}
-                  <Text style={styles.primaryTitle}>
-                    {busy === "invoice" ? "GENERATING…" : "GENERATE INVOICE"}
-                  </Text>
-                </Pressable>
-              ) : null}
+                {showChecks ? (
+                  <Pressable
+                    style={({ hovered, pressed }) => [
+                      styles.primaryButton,
+                      styles.invoiceButton,
+                      (hovered || pressed) &&
+                        allChecked &&
+                        !dirty &&
+                        styles.invoiceButtonHover,
+                      (!allChecked || working || dirty) &&
+                        styles.primaryButtonDisabled,
+                    ]}
+                    onPress={runInvoice}
+                    disabled={!allChecked || working || dirty}
+                  >
+                    {busy === "invoice" ? (
+                      <ActivityIndicator color="#FFFFFF" />
+                    ) : (
+                      <Ionicons
+                        name="receipt-outline"
+                        size={19}
+                        color="#FFFFFF"
+                      />
+                    )}
+                    <Text style={styles.primaryTitle}>
+                      {busy === "invoice" ? "GENERATING…" : "GENERATE INVOICE"}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
             </View>
-          </View>
+          ) : (
+            (() => {
+              /* Portrait: metrics + buttons share one fixed 4-column grid so
+                 the footer stays two rows tall instead of stacking every
+                 metric and every button on its own row. */
+              const gridMetrics = [
+                {
+                  key: "types",
+                  label: "Plant types",
+                  value: formatNumber(totals.rows),
+                },
+                {
+                  key: "qty",
+                  label: "Quantity",
+                  value: formatNumber(totals.quantity),
+                  unit: "plants",
+                },
+                {
+                  key: "packing",
+                  label: "Packing",
+                  value: formatAmount(totals.packing),
+                  tone: "warm",
+                },
+                ...(totals.special > 0
+                  ? [
+                      {
+                        key: "special",
+                        label: "Special",
+                        value: formatAmount(totals.special),
+                        tone: "warm",
+                      },
+                    ]
+                  : []),
+                ...(totals.transport > 0
+                  ? [
+                      {
+                        key: "transport",
+                        label: "Transport",
+                        value: formatAmount(totals.transport),
+                        tone: "warm",
+                      },
+                    ]
+                  : []),
+                ...(totals.discount > 0
+                  ? [
+                      {
+                        key: "discount",
+                        label: "Discount",
+                        value: `−${formatAmount(totals.discount)}`,
+                        tone: "discount",
+                      },
+                    ]
+                  : []),
+                ...(totals.advance > 0
+                  ? [
+                      {
+                        key: "advance",
+                        label: "Advance",
+                        value: formatAmount(totals.advance),
+                        unit: "received",
+                        tone: "discount",
+                      },
+                    ]
+                  : []),
+                {
+                  key: "grand",
+                  label: "Grand total",
+                  value: formatAmount(totals.grand),
+                  tone: "grand",
+                },
+                ...(totals.advance > 0
+                  ? [
+                      {
+                        key: "remaining",
+                        label: "Remaining",
+                        value: formatAmount(totals.remaining),
+                        tone: "remaining",
+                      },
+                    ]
+                  : []),
+              ];
+
+              const gridButtons = [];
+              if (canEditLines || canEditTotals || dirty) {
+                gridButtons.push({
+                  key: "save",
+                  kind: "ghost",
+                  disabled: !canSave,
+                  loading: saving,
+                  onPress: handleSave,
+                  icon: "save-outline",
+                  label: saving ? "SAVING…" : "SAVE",
+                });
+              }
+              if (canEdit && isDraft) {
+                gridButtons.push({
+                  key: "move",
+                  kind: "primary",
+                  disabled: working || dirty,
+                  loading: busy === "shade",
+                  onPress: runMove,
+                  icon: "arrow-forward",
+                  label: busy === "shade" ? "MOVING…" : "MOVE SHADE",
+                });
+              }
+              if (showChecks) {
+                gridButtons.push({
+                  key: "invoice",
+                  kind: "invoice",
+                  disabled: !allChecked || working || dirty,
+                  loading: busy === "invoice",
+                  onPress: runInvoice,
+                  icon: "receipt-outline",
+                  label: busy === "invoice" ? "GENERATING…" : "INVOICE",
+                });
+              }
+
+              const gridCells = [
+                ...gridMetrics.map((m) => ({ type: "metric", ...m })),
+                ...gridButtons.map((b) => ({ type: "button", ...b })),
+              ];
+
+              return (
+                <View style={styles.metricGridBox}>
+                  {gridCells.map((cell, index) => (
+                    <View
+                      key={cell.key}
+                      style={[
+                        styles.metricGridCell,
+                        index % 4 === 3 && { borderRightWidth: 0 },
+                        index < 4 && { borderTopWidth: 0 },
+                        cell.type === "button" && { padding: 0 },
+                      ]}
+                    >
+                      {cell.type === "metric" ? (
+                        <>
+                          <Text
+                            style={styles.metricGridLabel}
+                            numberOfLines={1}
+                          >
+                            {cell.label}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.metricGridValue,
+                              cell.tone === "warm" && styles.metricWarm,
+                              cell.tone === "discount" &&
+                                styles.metricDiscount,
+                              cell.tone === "grand" &&
+                                styles.metricGridValueGrand,
+                              cell.tone === "remaining" &&
+                                styles.metricGridValueRemaining,
+                            ]}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                          >
+                            {cell.value}
+                          </Text>
+                          {cell.unit ? (
+                            <Text style={styles.metricGridUnit}>
+                              {cell.unit}
+                            </Text>
+                          ) : null}
+                        </>
+                      ) : (
+                        <Pressable
+                          style={({ hovered, pressed }) => [
+                            styles.metricGridBtn,
+                            cell.kind === "ghost" && styles.metricGridBtnGhost,
+                            cell.kind === "primary" &&
+                              styles.metricGridBtnPrimary,
+                            cell.kind === "invoice" &&
+                              styles.metricGridBtnInvoice,
+                            cell.disabled && styles.metricGridBtnDisabled,
+                          ]}
+                          onPress={cell.onPress}
+                          disabled={cell.disabled}
+                        >
+                          {cell.loading ? (
+                            <ActivityIndicator
+                              color={cell.kind === "ghost" ? C.NAVY : "#FFFFFF"}
+                              size="small"
+                            />
+                          ) : (
+                            <Ionicons
+                              name={cell.icon}
+                              size={15}
+                              color={
+                                cell.disabled
+                                  ? "#9CA9B8"
+                                  : cell.kind === "ghost"
+                                    ? C.NAVY
+                                    : "#FFFFFF"
+                              }
+                            />
+                          )}
+                          <Text
+                            style={[
+                              styles.metricGridBtnLabel,
+                              {
+                                color: cell.disabled
+                                  ? "#9CA9B8"
+                                  : cell.kind === "ghost"
+                                    ? C.NAVY
+                                    : "#FFFFFF",
+                              },
+                            ]}
+                            numberOfLines={1}
+                            adjustsFontSizeToFit
+                          >
+                            {cell.label}
+                          </Text>
+                        </Pressable>
+                      )}
+                    </View>
+                  ))}
+                </View>
+              );
+            })()
+          )}
 
           {saveHint ? <Text style={styles.saveHint}>{saveHint}</Text> : null}
         </View>

@@ -1123,6 +1123,74 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       textAlign: large ? "right" : "center",
     },
 
+    /* ── compact portrait grid ────────────────────────────────────────
+       Below the `large` breakpoint the metrics and the action buttons are
+       laid out as one fixed 4-column grid instead of a tall stack, so the
+       whole footer reads as two rows (see reference photo) no matter how
+       many optional totals (special / transport / discount / advance) are
+       showing. */
+    metricGridBox: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      borderRadius: 11,
+      backgroundColor: FILL,
+      borderWidth: 1,
+      borderColor: BORDER,
+      overflow: "hidden",
+    },
+    metricGridCell: {
+      width: "25%",
+      minHeight: 56,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingVertical: 8,
+      paddingHorizontal: 4,
+      borderRightWidth: 1,
+      borderRightColor: BORDER,
+      borderTopWidth: 1,
+      borderTopColor: BORDER,
+    },
+    metricGridLabel: {
+      fontSize: 8,
+      fontWeight: "800",
+      letterSpacing: 0.2,
+      color: MUTED,
+      textTransform: "uppercase",
+      textAlign: "center",
+    },
+    metricGridValue: {
+      fontSize: 12,
+      fontWeight: "800",
+      letterSpacing: -0.2,
+      color: TEXT,
+      marginTop: 2,
+      textAlign: "center",
+    },
+    metricGridValueGrand: { fontSize: 13, color: GREEN },
+    metricGridValueRemaining: { color: ORANGE },
+    metricGridUnit: { fontSize: 7.5, color: FAINT, textAlign: "center" },
+    metricGridBtn: {
+      width: "100%",
+      height: "100%",
+      minHeight: 56,
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 3,
+      paddingHorizontal: 4,
+      paddingVertical: 6,
+    },
+    metricGridBtnGhost: { backgroundColor: SURFACE },
+    metricGridBtnPrimary: { backgroundColor: NAVY },
+    metricGridBtnInvoice: { backgroundColor: GREEN },
+    metricGridBtnDisabled: { backgroundColor: "#DDE3EA" },
+    metricGridBtnLabel: {
+      fontSize: 8.5,
+      fontWeight: "800",
+      letterSpacing: 0.2,
+      textAlign: "center",
+    },
+
     /* ── sheets ────────────────────────────────────────────────────── */
     sheetBackdrop: {
       flex: 1,
