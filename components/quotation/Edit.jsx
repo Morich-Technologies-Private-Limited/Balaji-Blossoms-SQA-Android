@@ -52,7 +52,11 @@ const CHOICE_OPTIONS = [
 ];
 
 /* Offered in the reason popups as one-tap fills. */
-const REASON_PRESETS = [];
+const REASON_PRESETS = [
+  "Plant variety not available",
+  "Changes made on customer request",
+  "Quantity not sufficient",
+];
 
 /* Breakpoints measured on the table container.
    Columns are dropped in reverse order of importance as space runs out, and
@@ -943,6 +947,21 @@ function FieldReasonModal({ styles, request, onSubmit, onCancel }) {
                     </Text>
                   </View>
                 </View>
+
+                <View style={styles.reasonChipRow}>
+                  {REASON_PRESETS.map((preset) => (
+                    <Pressable
+                      key={preset}
+                      style={({ hovered, pressed }) => [
+                        styles.reasonChip,
+                        (hovered || pressed) && styles.reasonChipHover,
+                      ]}
+                      onPress={() => setReason(preset)}
+                    >
+                      <Text style={styles.reasonChipText}>{preset}</Text>
+                    </Pressable>
+                  ))}
+                </View>
               </View>
             </ScrollView>
 
@@ -1360,6 +1379,11 @@ function EditInner({ quotation, onClose, onSaved }) {
   const [transportOpen, setTransportOpen] = useState(false);
   const [discountOpen, setDiscountOpen] = useState(false);
   const [advanceOpen, setAdvanceOpen] = useState(false);
+
+  /* The totals (plant types / quantity / packing / grand total / …) can be
+     tucked away to save space; the action buttons stay put either way since
+     they're how the screen is actually operated. */
+  const [summaryOpen, setSummaryOpen] = useState(true);
 
   /* Audit history, refreshed from every save response. Kept in state because
      the save response still carries it, but it is not rendered on this screen. */
@@ -2523,10 +2547,14 @@ function EditInner({ quotation, onClose, onSaved }) {
               placeholder="0"
               placeholderTextColor={C.FAINT}
             />
-            <Text style={styles.qtyUnit}>
-              {line.seedling ? "Trays" : "Plants"}
-            </Text>
           </View>
+
+          {/* Below the box, not inline beside the input — inline was wide
+             enough to spill past this column into the next field on narrow
+             cards. */}
+          <Text style={styles.qtyUnit} numberOfLines={1}>
+            {line.seedling ? "Trays" : "Plants"}
+          </Text>
 
           {derived}
 
@@ -3332,6 +3360,15 @@ function EditInner({ quotation, onClose, onSaved }) {
     quotation?.customerName ? ` · ${quotation.customerName}` : ""
   }`;
 
+  /* The customer name is what an operator actually needs to spot at a
+     glance, so it leads as the header title; "QTN-8 · Edit quotation" moves
+     down to the subtitle instead of pushing the name out of view. */
+  const modeLabel = canEditLines ? "Edit quotation" : "Check quotation";
+  const headerTitle = quotation?.customerName || modeLabel;
+  const headerSubtitle = quotation?.customerName
+    ? `QTN-${quotation?.quotationId} · ${modeLabel}`
+    : `QTN-${quotation?.quotationId}`;
+
   const tableHead = (
     <View style={styles.tableHead}>
       {columns.map((col) => (
@@ -3372,84 +3409,29 @@ function EditInner({ quotation, onClose, onSaved }) {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       <View style={styles.card}>
-        {/* ── header ── */}
+        {/* ── header ──
+           Two rows: the top row is just [back] [name] [doc] [close], so the
+           customer name gets almost the whole header width and is never
+           truncated. Everything else — QTN id, status pills, date — sits on
+           its own row underneath where it's free to wrap or ellipsize
+           without stealing space from the name. */}
         <View style={styles.header}>
-          <Pressable
-            style={({ hovered, pressed }) => [
-              styles.iconBtn,
-              hovered && styles.iconBtnHover,
-              pressed && styles.iconBtnPressed,
-            ]}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="Go back"
-            onPress={requestClose}
-          >
-            <Ionicons name="arrow-back" size={19} color={C.NAVY} />
-          </Pressable>
-
-          <View style={styles.headerTitles}>
-            <Text style={styles.title} numberOfLines={1}>
-              {canEditLines ? "Edit quotation" : "Check quotation"}
-            </Text>
-            <Text style={styles.subtitle} numberOfLines={1}>
-              {quotationLine}
-            </Text>
-          </View>
-
-          <View style={styles.headerMeta}>
-            {/* Read-only badge whenever access is not EDIT (and the check has
-                resolved), so the operator knows why the grid is locked. */}
-            {accessResolved && !canEdit ? (
-              <View
-                style={[
-                  styles.levelPill,
-                  {
-                    backgroundColor: "#94A3B814",
-                    borderColor: "#94A3B833",
-                  },
-                ]}
-              >
-                <Ionicons name="lock-closed" size={12} color="#64748B" />
-                <Text style={[styles.levelPillText, { color: "#64748B" }]}>
-                  READ ONLY
-                </Text>
-              </View>
-            ) : null}
-
-            {dirty ? (
-              <View style={styles.dirtyPill}>
-                <View style={styles.dirtyDot} />
-                <Text style={styles.dirtyText}>UNSAVED</Text>
-              </View>
-            ) : null}
-
-            <View
-              style={[
-                styles.levelPill,
-                {
-                  backgroundColor: `${levelMeta.tint}14`,
-                  borderColor: `${levelMeta.tint}33`,
-                },
+          <View style={styles.headerTopRow}>
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.iconBtn,
+                hovered && styles.iconBtnHover,
+                pressed && styles.iconBtnPressed,
               ]}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Go back"
+              onPress={requestClose}
             >
-              <View
-                style={[styles.levelDot, { backgroundColor: levelMeta.tint }]}
-              />
-              <Text style={[styles.levelPillText, { color: levelMeta.tint }]}>
-                {levelMeta.label}
-              </Text>
-            </View>
+              <Ionicons name="arrow-back" size={19} color={C.NAVY} />
+            </Pressable>
 
-            {large ? (
-              <>
-                <View style={styles.headerDivider} />
-                <View style={styles.dateWrap}>
-                  <Ionicons name="calendar-outline" size={16} color={C.NAVY} />
-                  <Text style={styles.dateText}>{quotationDate}</Text>
-                </View>
-              </>
-            ) : null}
+            <Text style={styles.title}>{headerTitle}</Text>
 
             <Pressable
               style={({ hovered, pressed }) => [
@@ -3473,20 +3455,77 @@ function EditInner({ quotation, onClose, onSaved }) {
                 />
               )}
             </Pressable>
+          </View>
 
-            <Pressable
-              style={({ hovered, pressed }) => [
-                styles.iconBtn,
-                hovered && styles.iconBtnHover,
-                pressed && styles.iconBtnPressed,
-              ]}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityLabel="Close"
-              onPress={requestClose}
-            >
-              <Ionicons name="close" size={19} color="#475569" />
-            </Pressable>
+          <View style={styles.headerMetaRow}>
+            <Text style={styles.subtitle} numberOfLines={1}>
+              {headerSubtitle}
+            </Text>
+
+            <View style={styles.headerMeta}>
+              {/* Read-only badge whenever access is not EDIT (and the check
+                  has resolved), so the operator knows why the grid is
+                  locked. */}
+              {accessResolved && !canEdit ? (
+                <View
+                  style={[
+                    styles.levelPill,
+                    {
+                      backgroundColor: "#94A3B814",
+                      borderColor: "#94A3B833",
+                    },
+                  ]}
+                >
+                  <Ionicons name="lock-closed" size={12} color="#64748B" />
+                  <Text style={[styles.levelPillText, { color: "#64748B" }]}>
+                    READ ONLY
+                  </Text>
+                </View>
+              ) : null}
+
+              {dirty ? (
+                <View style={styles.dirtyPill}>
+                  <View style={styles.dirtyDot} />
+                  <Text style={styles.dirtyText}>UNSAVED</Text>
+                </View>
+              ) : null}
+
+              <View
+                style={[
+                  styles.levelPill,
+                  {
+                    backgroundColor: `${levelMeta.tint}14`,
+                    borderColor: `${levelMeta.tint}33`,
+                  },
+                ]}
+              >
+                <View
+                  style={[
+                    styles.levelDot,
+                    { backgroundColor: levelMeta.tint },
+                  ]}
+                />
+                <Text
+                  style={[styles.levelPillText, { color: levelMeta.tint }]}
+                >
+                  {levelMeta.label}
+                </Text>
+              </View>
+
+              {large ? (
+                <>
+                  <View style={styles.headerDivider} />
+                  <View style={styles.dateWrap}>
+                    <Ionicons
+                      name="calendar-outline"
+                      size={16}
+                      color={C.NAVY}
+                    />
+                    <Text style={styles.dateText}>{quotationDate}</Text>
+                  </View>
+                </>
+              ) : null}
+            </View>
           </View>
         </View>
 
@@ -3879,84 +3918,111 @@ function EditInner({ quotation, onClose, onSaved }) {
             </View>
           ) : null}
 
-          {large ? (
+          <Pressable
+            style={({ hovered, pressed }) => [
+              styles.summaryToggle,
+              (hovered || pressed) && styles.summaryToggleHover,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={summaryOpen ? "Hide summary" : "Show summary"}
+            onPress={() => setSummaryOpen((prev) => !prev)}
+          >
+            <Ionicons
+              name={summaryOpen ? "chevron-up" : "chevron-down"}
+              size={14}
+              color={C.NAVY}
+            />
+            <Text style={styles.summaryToggleText}>
+              {summaryOpen ? "Hide summary" : "Show summary"}
+            </Text>
+          </Pressable>
+
+          {!isCardMode ? (
             <View style={styles.footerRow}>
-              <View style={styles.metricStrip}>
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Plant types</Text>
-                  <Text style={styles.metricValue}>
-                    {formatNumber(totals.rows)}
-                  </Text>
-                </View>
-
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Quantity</Text>
-                  <Text style={styles.metricValue}>
-                    {formatNumber(totals.quantity)}
-                  </Text>
-                  <Text style={styles.metricUnit}>plants</Text>
-                </View>
-
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Packing</Text>
-                  <Text style={[styles.metricValue, styles.metricWarm]}>
-                    {formatAmount(totals.packing)}
-                  </Text>
-                </View>
-
-                {totals.special > 0 ? (
+              {summaryOpen ? (
+                <View style={styles.metricStrip}>
                   <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Special</Text>
+                    <Text style={styles.metricLabel}>Plant types</Text>
+                    <Text style={styles.metricValue}>
+                      {formatNumber(totals.rows)}
+                    </Text>
+                  </View>
+
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Quantity</Text>
+                    <Text style={styles.metricValue}>
+                      {formatNumber(totals.quantity)}
+                    </Text>
+                    <Text style={styles.metricUnit}>plants</Text>
+                  </View>
+
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Packing</Text>
                     <Text style={[styles.metricValue, styles.metricWarm]}>
-                      {formatAmount(totals.special)}
+                      {formatAmount(totals.packing)}
                     </Text>
                   </View>
-                ) : null}
 
-                {totals.transport > 0 ? (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Transport</Text>
-                    <Text style={[styles.metricValue, styles.metricWarm]}>
-                      {formatAmount(totals.transport)}
+                  {totals.special > 0 ? (
+                    <View style={styles.metric}>
+                      <Text style={styles.metricLabel}>Special</Text>
+                      <Text style={[styles.metricValue, styles.metricWarm]}>
+                        {formatAmount(totals.special)}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {totals.transport > 0 ? (
+                    <View style={styles.metric}>
+                      <Text style={styles.metricLabel}>Transport</Text>
+                      <Text style={[styles.metricValue, styles.metricWarm]}>
+                        {formatAmount(totals.transport)}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {totals.discount > 0 ? (
+                    <View style={styles.metric}>
+                      <Text style={styles.metricLabel}>Discount</Text>
+                      <Text
+                        style={[styles.metricValue, styles.metricDiscount]}
+                      >
+                        −{formatAmount(totals.discount)}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {totals.advance > 0 ? (
+                    <View style={styles.metric}>
+                      <Text style={styles.metricLabel}>Advance</Text>
+                      <Text
+                        style={[styles.metricValue, styles.metricDiscount]}
+                      >
+                        {formatAmount(totals.advance)}
+                      </Text>
+                      <Text style={styles.metricUnit}>received</Text>
+                    </View>
+                  ) : null}
+
+                  <View style={[styles.metric, styles.metricGrand]}>
+                    <Text style={styles.metricGrandLabel}>Grand total</Text>
+                    <Text style={styles.metricGrandValue}>
+                      {formatAmount(totals.grand)}
                     </Text>
                   </View>
-                ) : null}
 
-                {totals.discount > 0 ? (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Discount</Text>
-                    <Text style={[styles.metricValue, styles.metricDiscount]}>
-                      −{formatAmount(totals.discount)}
-                    </Text>
-                  </View>
-                ) : null}
-
-                {totals.advance > 0 ? (
-                  <View style={styles.metric}>
-                    <Text style={styles.metricLabel}>Advance</Text>
-                    <Text style={[styles.metricValue, styles.metricDiscount]}>
-                      {formatAmount(totals.advance)}
-                    </Text>
-                    <Text style={styles.metricUnit}>received</Text>
-                  </View>
-                ) : null}
-
-                <View style={[styles.metric, styles.metricGrand]}>
-                  <Text style={styles.metricGrandLabel}>Grand total</Text>
-                  <Text style={styles.metricGrandValue}>
-                    {formatAmount(totals.grand)}
-                  </Text>
+                  {totals.advance > 0 ? (
+                    <View style={[styles.metric, styles.metricRemaining]}>
+                      <Text style={styles.metricRemainingLabel}>
+                        Remaining
+                      </Text>
+                      <Text style={styles.metricRemainingValue}>
+                        {formatAmount(totals.remaining)}
+                      </Text>
+                    </View>
+                  ) : null}
                 </View>
-
-                {totals.advance > 0 ? (
-                  <View style={[styles.metric, styles.metricRemaining]}>
-                    <Text style={styles.metricRemainingLabel}>Remaining</Text>
-                    <Text style={styles.metricRemainingValue}>
-                      {formatAmount(totals.remaining)}
-                    </Text>
-                  </View>
-                ) : null}
-              </View>
+              ) : null}
 
               <View style={styles.actionRow}>
                 {canEditLines || canEditTotals || dirty ? (
@@ -4168,102 +4234,127 @@ function EditInner({ quotation, onClose, onSaved }) {
               }
 
               const gridCells = [
-                ...gridMetrics.map((m) => ({ type: "metric", ...m })),
+                ...(summaryOpen
+                  ? gridMetrics.map((m) => ({ type: "metric", ...m }))
+                  : []),
                 ...gridButtons.map((b) => ({ type: "button", ...b })),
               ];
 
+              /* Explicit rows of at most 4 cells, each cell sharing its row's
+                 width equally (flex: 1). A short trailing row (e.g. just the
+                 two buttons) fills the row instead of leaving dead cells, and
+                 every cell's height is capped by metricGridCell's minHeight —
+                 nothing here can stretch to fill the screen. */
+              const gridRows = [];
+              for (let i = 0; i < gridCells.length; i += 4) {
+                gridRows.push(gridCells.slice(i, i + 4));
+              }
+
               return (
                 <View style={styles.metricGridBox}>
-                  {gridCells.map((cell, index) => (
+                  {gridRows.map((row, ri) => (
                     <View
-                      key={cell.key}
+                      key={ri}
                       style={[
-                        styles.metricGridCell,
-                        index % 4 === 3 && { borderRightWidth: 0 },
-                        index < 4 && { borderTopWidth: 0 },
-                        cell.type === "button" && { padding: 0 },
+                        styles.metricGridRow,
+                        ri > 0 && styles.metricGridRowDivider,
                       ]}
                     >
-                      {cell.type === "metric" ? (
-                        <>
-                          <Text
-                            style={styles.metricGridLabel}
-                            numberOfLines={1}
-                          >
-                            {cell.label}
-                          </Text>
-                          <Text
-                            style={[
-                              styles.metricGridValue,
-                              cell.tone === "warm" && styles.metricWarm,
-                              cell.tone === "discount" &&
-                                styles.metricDiscount,
-                              cell.tone === "grand" &&
-                                styles.metricGridValueGrand,
-                              cell.tone === "remaining" &&
-                                styles.metricGridValueRemaining,
-                            ]}
-                            numberOfLines={1}
-                            adjustsFontSizeToFit
-                          >
-                            {cell.value}
-                          </Text>
-                          {cell.unit ? (
-                            <Text style={styles.metricGridUnit}>
-                              {cell.unit}
-                            </Text>
-                          ) : null}
-                        </>
-                      ) : (
-                        <Pressable
-                          style={({ hovered, pressed }) => [
-                            styles.metricGridBtn,
-                            cell.kind === "ghost" && styles.metricGridBtnGhost,
-                            cell.kind === "primary" &&
-                              styles.metricGridBtnPrimary,
-                            cell.kind === "invoice" &&
-                              styles.metricGridBtnInvoice,
-                            cell.disabled && styles.metricGridBtnDisabled,
+                      {row.map((cell, ci) => (
+                        <View
+                          key={cell.key}
+                          style={[
+                            styles.metricGridCell,
+                            ci < row.length - 1 &&
+                              styles.metricGridCellDivider,
+                            cell.type === "button" && { padding: 0 },
                           ]}
-                          onPress={cell.onPress}
-                          disabled={cell.disabled}
                         >
-                          {cell.loading ? (
-                            <ActivityIndicator
-                              color={cell.kind === "ghost" ? C.NAVY : "#FFFFFF"}
-                              size="small"
-                            />
+                          {cell.type === "metric" ? (
+                            <>
+                              <Text
+                                style={styles.metricGridLabel}
+                                numberOfLines={1}
+                              >
+                                {cell.label}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.metricGridValue,
+                                  cell.tone === "warm" && styles.metricWarm,
+                                  cell.tone === "discount" &&
+                                    styles.metricDiscount,
+                                  cell.tone === "grand" &&
+                                    styles.metricGridValueGrand,
+                                  cell.tone === "remaining" &&
+                                    styles.metricGridValueRemaining,
+                                ]}
+                                numberOfLines={1}
+                                adjustsFontSizeToFit
+                              >
+                                {cell.value}
+                              </Text>
+                              {cell.unit ? (
+                                <Text style={styles.metricGridUnit}>
+                                  {cell.unit}
+                                </Text>
+                              ) : null}
+                            </>
                           ) : (
-                            <Ionicons
-                              name={cell.icon}
-                              size={15}
-                              color={
-                                cell.disabled
-                                  ? "#9CA9B8"
-                                  : cell.kind === "ghost"
-                                    ? C.NAVY
-                                    : "#FFFFFF"
-                              }
-                            />
+                            <Pressable
+                              style={({ hovered, pressed }) => [
+                                styles.metricGridBtn,
+                                cell.kind === "ghost" &&
+                                  styles.metricGridBtnGhost,
+                                cell.kind === "primary" &&
+                                  styles.metricGridBtnPrimary,
+                                cell.kind === "invoice" &&
+                                  styles.metricGridBtnInvoice,
+                                cell.disabled && styles.metricGridBtnDisabled,
+                              ]}
+                              onPress={cell.onPress}
+                              disabled={cell.disabled}
+                            >
+                              {cell.loading ? (
+                                <ActivityIndicator
+                                  color={
+                                    cell.kind === "ghost" ? C.NAVY : "#FFFFFF"
+                                  }
+                                  size="small"
+                                />
+                              ) : (
+                                <Ionicons
+                                  name={cell.icon}
+                                  size={15}
+                                  color={
+                                    cell.disabled
+                                      ? "#9CA9B8"
+                                      : cell.kind === "ghost"
+                                        ? C.NAVY
+                                        : "#FFFFFF"
+                                  }
+                                />
+                              )}
+                              <Text
+                                style={[
+                                  styles.metricGridBtnLabel,
+                                  {
+                                    color: cell.disabled
+                                      ? "#9CA9B8"
+                                      : cell.kind === "ghost"
+                                        ? C.NAVY
+                                        : "#FFFFFF",
+                                  },
+                                ]}
+                                numberOfLines={1}
+                                adjustsFontSizeToFit
+                              >
+                                {cell.label}
+                              </Text>
+                            </Pressable>
                           )}
-                          <Text
-                            style={[
-                              styles.metricGridBtnLabel,
-                              {
-                                color: cell.disabled
-                                  ? "#9CA9B8"
-                                  : cell.kind === "ghost"
-                                    ? C.NAVY
-                                    : "#FFFFFF",
-                              },
-                            ]}
-                            numberOfLines={1}
-                            adjustsFontSizeToFit
-                          >
-                            {cell.label}
-                          </Text>
-                        </Pressable>
-                      )}
+                        </View>
+                      ))}
                     </View>
                   ))}
                 </View>

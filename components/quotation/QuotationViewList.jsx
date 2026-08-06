@@ -57,6 +57,9 @@ const BP_MID = 780; // mobile no. moves into the panel
 const BP_COMPACT = 620; // sno moves into the panel
 // below BP_COMPACT the list renders as cards
 
+/* How close two taps on the same card must be (ms) to count as a double tap. */
+const DOUBLE_TAP_MS = 280;
+
 const formatDate = (value) => {
   if (!value) return "—";
   const date = new Date(value);
@@ -236,6 +239,10 @@ function ShareKindModal({
  * Android back, or a finalizing action) the edited quotation is refetched so
  * the row always reflects the server's latest copy.
  *
+ * Card interaction (phones): a single tap toggles the expand panel; a double
+ * tap opens the edit modal for that quotation. On the desktop table the row's
+ * Edit icon is used instead.
+ *
  * Auto-share on level change: the editor is opened against a known level
  * (DRAFT / DELIVERY_SHADE / INVOICE_GENERATED). When it closes we refetch the
  * quotation, and if the level has moved on (e.g. moved to the loading shade or
@@ -284,12 +291,37 @@ function QuotationViewList(
   const [shareBusyKind, setShareBusyKind] = useState(null);
   const [pdf, setPdf] = useState(null);
 
+  /* Tracks the last card tap so a second tap on the same card within
+     DOUBLE_TAP_MS is recognised as a double tap. */
+  const lastTapRef = useRef({ id: null, time: 0 });
+
   const resolvedUserId = currentUser?.emailId;
   const resolvedUnitId = currentUser?.unitId;
 
   const toggleRow = useCallback((id) => {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
+
+  /* Card press: single tap toggles the expand panel, double tap opens Edit.
+     The expand toggle still fires on the first tap of a double tap, so the
+     panel state flips and then the modal opens over it — kept intentionally
+     so single-tap expand stays instant with no debounce lag. */
+  const handleCardPress = useCallback(
+    (item) => {
+      const now = Date.now();
+      const { id, time } = lastTapRef.current;
+
+      if (id === item.quotationId && now - time < DOUBLE_TAP_MS) {
+        lastTapRef.current = { id: null, time: 0 };
+        setEditing(item);
+        return;
+      }
+
+      lastTapRef.current = { id: item.quotationId, time: now };
+      toggleRow(item.quotationId);
+    },
+    [toggleRow],
+  );
 
   /* The hosting screen owns the "New quotation" button in the page header and
      opens the create modal through this handle. */
@@ -803,7 +835,7 @@ function QuotationViewList(
 
     return (
       <Pressable
-        onPress={() => toggleRow(item.quotationId)}
+        onPress={() => handleCardPress(item)}
         style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
       >
         <View style={styles.cardTop}>
@@ -860,6 +892,9 @@ function QuotationViewList(
             </>
           ) : null}
         </View>
+
+        {/* Hint so the double-tap-to-edit gesture is discoverable. */}
+        <Text style={styles.cardHint}>Double-tap to edit</Text>
 
         {/* View button removed — cards now offer Edit and Send only. */}
         <View style={styles.cardActions}>
