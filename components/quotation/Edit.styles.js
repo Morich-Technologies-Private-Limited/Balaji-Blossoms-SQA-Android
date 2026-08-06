@@ -515,12 +515,6 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
     qtyUnit: { fontSize: 11.5, fontWeight: "600", color: FAINT },
     qtyHint: { fontSize: 10.5, color: FAINT, marginTop: 4 },
-    qtyHintWarn: {
-      fontSize: 10.5,
-      fontWeight: "700",
-      color: ALERT,
-      marginTop: 4,
-    },
     qtyHintMoved: {
       fontSize: 10.5,
       fontWeight: "700",
@@ -555,6 +549,40 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     chargeSuffix: { fontSize: 10.5, color: FAINT },
     chargeManualText: { color: ALERT },
 
+    /* a catalogue packing's rate is fixed — shown as a plain label (no box,
+       no border) instead of the editable charge box above */
+    chargeLabelRow: {
+      flexDirection: "row",
+      alignItems: "baseline",
+      justifyContent: "space-between",
+      height: 31,
+      paddingHorizontal: 2,
+    },
+    chargeLabelValue: { fontSize: 13.5, fontWeight: "700", color: "#334155" },
+
+    /* shown instead of the select+charge stack while a line is still at the
+       "No packing" default — tapping it opens the same packing picker */
+    addPackingBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      height: 38,
+      paddingHorizontal: 10,
+      borderRadius: 9,
+      backgroundColor: SURFACE,
+      borderWidth: 1.5,
+      borderColor: BORDER_STRONG,
+      borderStyle: "dashed",
+    },
+    addPackingBtnHover: { borderColor: NAVY, backgroundColor: NAVY_TINT },
+    addPackingText: {
+      fontSize: 12.5,
+      fontWeight: "800",
+      letterSpacing: 0.2,
+      color: NAVY,
+    },
+
     /* custom packing: free-text name field shown above the charge box */
     customNameBox: {
       flexDirection: "row",
@@ -581,42 +609,34 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       ...noOutline,
     },
 
-    /* ── selected by customer: a Yes / No dropdown ─────────────────── */
-    choiceSelect: {
-      width: "100%",
-      height: 38,
-      paddingHorizontal: 11,
+    /* ── selected by customer: an inline Yes / No radio pair ────────── */
+    radioRow: { flexDirection: "row", alignItems: "center", gap: 18 },
+    radioItem: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 7,
+      paddingVertical: 4,
+    },
+    radioItemHover: { opacity: 0.8 },
+    radioDot: {
+      width: 18,
+      height: 18,
       borderRadius: 9,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 6,
-      backgroundColor: SURFACE,
-      borderWidth: 1,
+      borderWidth: 1.5,
       borderColor: BORDER_STRONG,
-    },
-    choiceSelectYes: { backgroundColor: GREEN_SOFT, borderColor: GREEN_LINE },
-    choiceSelectNo: { backgroundColor: FILL, borderColor: BORDER_STRONG },
-    choiceSelectHover: { borderColor: NAVY },
-    choiceValueRow: { flexDirection: "row", alignItems: "center", gap: 6 },
-    choiceValueText: { fontSize: 13, fontWeight: "800", letterSpacing: 0.3 },
-    choiceValueYes: { color: GREEN_DEEP },
-    choiceValueNo: { color: MUTED },
-    /* read-only pill version */
-    choicePill: {
-      flexDirection: "row",
       alignItems: "center",
-      gap: 5,
-      paddingHorizontal: 10,
-      paddingVertical: 6,
-      borderRadius: 999,
-      borderWidth: 1,
+      justifyContent: "center",
+      backgroundColor: SURFACE,
     },
-    choiceOn: { backgroundColor: GREEN_SOFT, borderColor: GREEN_LINE },
-    choiceOff: { backgroundColor: FILL, borderColor: BORDER },
-    choiceText: { fontSize: 11.5, fontWeight: "800", letterSpacing: 0.3 },
-    choiceTextOn: { color: GREEN_DEEP },
-    choiceTextOff: { color: MUTED },
+    radioDotOn: { borderColor: NAVY },
+    radioDotInner: {
+      width: 9,
+      height: 9,
+      borderRadius: 4.5,
+      backgroundColor: NAVY,
+    },
+    radioLabel: { fontSize: 13, fontWeight: "600", color: MUTED },
+    radioLabelOn: { color: TEXT, fontWeight: "800" },
 
     /* tick box used for the invoice check */
     check: {
@@ -680,6 +700,24 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     lineIndexText: { fontSize: 12, fontWeight: "800", color: NAVY },
     fieldGrid: { flexDirection: "row", flexWrap: "wrap", gap: 11 },
     field: { flexGrow: 1, flexBasis: 150, minWidth: 140, gap: 6 },
+    /* Unit / Qty / Packing sit three-up on a plant card, matching the
+       reference layout; they wrap to fewer columns on very narrow screens. */
+    fieldTriple: { flexGrow: 1, flexBasis: "30%", minWidth: 92, gap: 6 },
+    /* "Selected by customer" always takes the full card width, on its own
+       row below a divider. */
+    fieldFull: { flexBasis: "100%", minWidth: "100%", gap: 6 },
+    fieldChoiceRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    fieldDivider: {
+      flexBasis: "100%",
+      minWidth: "100%",
+      height: 1,
+      backgroundColor: BORDER,
+      marginTop: 2,
+    },
     fieldLabel: {
       fontSize: 9.5,
       fontWeight: "800",
@@ -882,7 +920,9 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       ...(large ? null : shadow(0.06, 12, -4)),
     },
 
-    /* ── quotation adjustments (transport + discount triggers) ─────── */
+    /* ── quotation adjustments (transport + discount triggers) ───────
+       On narrow (card-mode) screens these sit two-to-a-row instead of
+       wrapping loosely, keeping the footer compact. */
     adjustBar: {
       flexDirection: "row",
       flexWrap: "wrap",
@@ -892,6 +932,9 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     adjustAddBtn: {
       flexDirection: "row",
       alignItems: "center",
+      justifyContent: isCardMode ? "center" : "flex-start",
+      flexGrow: isCardMode ? 1 : 0,
+      flexBasis: isCardMode ? "47%" : undefined,
       gap: 7,
       height: 34,
       paddingHorizontal: 12,
@@ -903,6 +946,7 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
     adjustAddBtnHover: { borderColor: NAVY, backgroundColor: NAVY_TINT },
     adjustAddText: {
+      flexShrink: 1,
       fontSize: 12.5,
       fontWeight: "800",
       letterSpacing: 0.2,
@@ -911,6 +955,9 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     adjustChip: {
       flexDirection: "row",
       alignItems: "center",
+      justifyContent: isCardMode ? "center" : "flex-start",
+      flexGrow: isCardMode ? 1 : 0,
+      flexBasis: isCardMode ? "47%" : undefined,
       gap: 7,
       height: 34,
       paddingHorizontal: 12,
@@ -920,7 +967,12 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       borderColor: "#B7D3EE",
     },
     adjustChipHover: { borderColor: NAVY },
-    adjustChipText: { fontSize: 12.5, fontWeight: "800", color: NAVY },
+    adjustChipText: {
+      flexShrink: 1,
+      fontSize: 12.5,
+      fontWeight: "800",
+      color: NAVY,
+    },
 
     moneyReadBar: {
       flexDirection: "row",
@@ -940,21 +992,29 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       alignItems: large ? "center" : "stretch",
       gap: 12,
     },
+    /* A consistent two-column grid, always — plant types / quantity / packing
+       / special / transport / discount / advance / grand total / remaining
+       all behave as identically-sized cells that wrap onto new rows, so the
+       strip reads as one aligned grid instead of a line that reflows
+       differently depending on how many optional totals are present. */
     metricStrip: {
       flex: large ? 1 : undefined,
       flexDirection: "row",
       flexWrap: "wrap",
-      alignItems: "center",
-      rowGap: 6,
-      columnGap: large ? 20 : 16,
-      paddingVertical: 9,
+      rowGap: 12,
+      columnGap: 14,
+      paddingVertical: 12,
       paddingHorizontal: 14,
       borderRadius: 11,
       backgroundColor: FILL,
       borderWidth: 1,
       borderColor: BORDER,
     },
-    metric: { minWidth: 58 },
+    metric: {
+      flexGrow: 1,
+      flexBasis: "40%",
+      minWidth: 110,
+    },
     metricLabel: {
       fontSize: 9,
       fontWeight: "800",
@@ -972,14 +1032,8 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     metricUnit: { fontSize: 9.5, color: FAINT, marginTop: 0 },
     metricWarm: { color: ORANGE },
     metricDiscount: { color: GREEN },
-    /* pushes the grand total / remaining to the right end of the band */
-    metricSpacer: { flexGrow: 1, minWidth: 8 },
-    metricGrand: {
-      alignItems: "flex-start",
-      paddingLeft: large ? 14 : 0,
-      borderLeftWidth: large ? 1 : 0,
-      borderLeftColor: BORDER,
-    },
+    /* grand total / remaining are the same grid cell, just with bolder text */
+    metricGrand: { alignItems: "flex-start" },
     metricGrandLabel: {
       fontSize: 9,
       fontWeight: "800",
@@ -994,14 +1048,8 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       color: GREEN,
       marginTop: 1,
     },
-    /* remaining-to-collect, shown beside the grand total once an advance is set */
-    metricRemaining: {
-      alignItems: "flex-start",
-      paddingLeft: large ? 14 : 0,
-      borderLeftWidth: large ? 1 : 0,
-      borderLeftColor: BORDER,
-      borderStyle: "dashed",
-    },
+    /* remaining-to-collect, shown once an advance is set — same grid cell */
+    metricRemaining: { alignItems: "flex-start" },
     metricRemainingLabel: {
       fontSize: 9,
       fontWeight: "800",
@@ -1134,7 +1182,6 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       justifyContent: "center",
       backgroundColor: FILL_DEEP,
     },
-    optionIconYes: { backgroundColor: GREEN_SOFT },
     optionIconCustom: { backgroundColor: ALERT_SOFT },
 
     loadingWrap: { padding: 32, alignItems: "center", gap: 12 },
@@ -1232,13 +1279,87 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       color: SURFACE,
     },
 
+    /* ── close confirmation (unsaved changes) ───────────────────────── */
+    confirmActions: {
+      gap: 10,
+      paddingHorizontal: 20,
+      paddingTop: 6,
+      paddingBottom: large ? 16 : 22,
+    },
+    confirmPrimaryBtn: {
+      height: 52,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      borderRadius: 12,
+      backgroundColor: NAVY,
+    },
+    confirmPrimaryText: {
+      fontSize: 13.5,
+      fontWeight: "800",
+      letterSpacing: 0.7,
+      color: SURFACE,
+    },
+    confirmDangerBtn: {
+      height: 52,
+      alignItems: "center",
+      justifyContent: "center",
+      borderRadius: 12,
+      backgroundColor: RED_SOFT,
+      borderWidth: 1.5,
+      borderColor: RED_LINE,
+    },
+    confirmDangerBtnHover: { backgroundColor: "#FBD5D5", borderColor: RED },
+    confirmDangerText: {
+      fontSize: 13.5,
+      fontWeight: "800",
+      letterSpacing: 0.7,
+      color: RED,
+    },
+    confirmGhostBtn: {
+      height: 42,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    confirmGhostText: { fontSize: 13, fontWeight: "700", color: MUTED },
+
+    /* Taller variants used only by the reason modals (FieldReasonModal /
+       DeleteReasonModal) — those buttons sit at the end of a long scrollable
+       form and read better with more tap-target height.
+       reasonActions stacks these in a column on narrow screens, where `flex`
+       would apply its 0% flex-basis to the main (vertical) axis and collapse
+       the explicit height — proportioned by the grow ratio instead of both
+       buttons sharing the same 56px. Use width:100% there instead, and only
+       let them share a row's width via `flex` when they're laid out in a row. */
+    reasonCancelBtn: {
+      ...(isCardMode ? { width: "100%" } : { flex: 1 }),
+      height: 56,
+      alignItems: "center",
+      justifyContent: "center",
+      borderRadius: 13,
+      backgroundColor: SURFACE,
+      borderWidth: 1.5,
+      borderColor: NAVY,
+    },
+    reasonApplyBtn: {
+      ...(isCardMode ? { width: "100%" } : { flex: 1.4 }),
+      height: 56,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      borderRadius: 13,
+      backgroundColor: NAVY,
+    },
+
     /* ── reason modal ──────────────────────────────────────────────────
        Wider than the other sheets and scrollable, because it carries the
        whole "values updated" summary above the text area. */
     reasonSheet: {
       width: "100%",
       maxWidth: large ? 620 : undefined,
-      maxHeight: large ? "86%" : "92%",
+      maxHeight: large ? "86%" : "84%",
       backgroundColor: SURFACE,
       borderTopLeftRadius: 20,
       borderTopRightRadius: 20,
@@ -1247,7 +1368,16 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       overflow: "hidden",
       ...shadow(0.2, 34, 14),
     },
+    /* Wraps the backdrop so the keyboard pushes the sheet up on iOS instead
+       of covering it — without this the action buttons can end up hidden
+       behind the keyboard on short screens. */
+    reasonKav: { flex: 1 },
+    /* Lets the scrollable body shrink to fit between the header and the
+       action row instead of overflowing past reasonSheet's maxHeight, which
+       otherwise clips CANCEL / SAVE REASON off the bottom on small screens. */
+    reasonScrollArea: { flexShrink: 1, minHeight: 0 },
     reasonHeader: {
+      flexShrink: 0,
       flexDirection: "row",
       alignItems: "center",
       gap: 12,
@@ -1407,6 +1537,7 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     reasonChipText: { fontSize: 12, fontWeight: "700", color: "#475569" },
 
     reasonActions: {
+      flexShrink: 0,
       flexDirection: isCardMode ? "column-reverse" : "row",
       gap: 10,
       paddingHorizontal: 22,

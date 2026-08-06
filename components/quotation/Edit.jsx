@@ -52,19 +52,12 @@ const CHOICE_OPTIONS = [
 ];
 
 /* Offered in the reason popups as one-tap fills. */
-const REASON_PRESETS = [
-  "Customer changed the order",
-  "Stock not available",
-  "Damaged in transit",
-  "Packing revised",
-  "Entered by mistake",
-];
+const REASON_PRESETS = [];
 
 /* Breakpoints measured on the table container.
    Columns are dropped in reverse order of importance as space runs out, and
    their values move into the plant cell or the quantity hint. */
 const BP_CALC = 1180; // dedicated seedling maths column
-const BP_CHOICE = 1040; // "selected by" column
 const BP_PRICE = 940; // unit price column
 const BP_SNO = 860; // serial number column
 const BP_CARD = 760; // below this the grid becomes editable cards
@@ -355,7 +348,7 @@ const lineFromReservation = (reservation, isDraft) => {
     reserved: seedling
       ? reservation.trayReserved
       : reservation.quantityReserved,
-    packingId: null,
+    packingId: reservation.packingId ?? null,
     packingName,
     packingCharge,
     packingManual: false,
@@ -857,134 +850,129 @@ function FieldReasonModal({ styles, request, onSubmit, onCancel }) {
 
   return (
     <Modal transparent animationType="fade" visible onRequestClose={onCancel}>
-      <Pressable style={styles.sheetBackdrop} onPress={onCancel}>
-        <Pressable style={styles.reasonSheet} onPress={() => {}}>
-          <View style={styles.reasonHeader}>
-            <View style={styles.reasonHeaderIcon}>
-              <Ionicons name="create-outline" size={20} color={C.ALERT} />
+      <KeyboardAvoidingView
+        style={styles.reasonKav}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <Pressable style={styles.sheetBackdrop} onPress={onCancel}>
+          <Pressable style={styles.reasonSheet} onPress={() => {}}>
+            <View style={styles.reasonHeader}>
+              <View style={styles.reasonHeaderIcon}>
+                <Ionicons name="create-outline" size={20} color={C.ALERT} />
+              </View>
+              <View style={styles.reasonHeaderText}>
+                <Text style={styles.reasonTitle}>Reason Required</Text>
+                <Text style={styles.reasonSubtitle}>
+                  {request?.plantName} · {meta.label} changed. Past draft, every
+                  change is recorded.
+                </Text>
+              </View>
             </View>
-            <View style={styles.reasonHeaderText}>
-              <Text style={styles.reasonTitle}>Reason Required</Text>
-              <Text style={styles.reasonSubtitle}>
-                {request?.plantName} · {meta.label} changed. Past draft, every
-                change is recorded.
-              </Text>
-            </View>
-          </View>
 
-          <ScrollView
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={styles.reasonBody}>
-              <View style={styles.reasonBlock}>
-                <View style={styles.reasonBlockHead}>
-                  <Ionicons name="leaf-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.reasonBlockLabel}>
-                    {request?.plantName}
-                  </Text>
-                </View>
+            <ScrollView
+              style={styles.reasonScrollArea}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <View style={styles.reasonBody}>
+                <View style={styles.reasonBlock}>
+                  <View style={styles.reasonBlockHead}>
+                    <Ionicons name="leaf-outline" size={15} color={C.NAVY} />
+                    <Text style={styles.reasonBlockLabel}>
+                      {request?.plantName}
+                    </Text>
+                  </View>
 
-                <View style={styles.changeList}>
-                  <View style={[styles.changeRow, styles.changeRowLast]}>
-                    <View style={[styles.changeIcon, styles.changeIconEdit]}>
-                      <Ionicons name={meta.icon} size={13} color={C.ALERT} />
-                    </View>
-                    <View style={styles.changeBody}>
-                      <Text style={styles.changeTitle}>
-                        {meta.label} changed
-                      </Text>
-                      {request?.from != null && request?.to != null ? (
-                        <View style={styles.changeFromTo}>
-                          <Text style={styles.changeFrom}>{request.from}</Text>
-                          <Ionicons
-                            name="arrow-forward"
-                            size={12}
-                            color={C.MUTED}
-                          />
-                          <Text style={styles.changeTo}>{request.to}</Text>
-                        </View>
-                      ) : null}
+                  <View style={styles.changeList}>
+                    <View style={[styles.changeRow, styles.changeRowLast]}>
+                      <View style={[styles.changeIcon, styles.changeIconEdit]}>
+                        <Ionicons name={meta.icon} size={13} color={C.ALERT} />
+                      </View>
+                      <View style={styles.changeBody}>
+                        <Text style={styles.changeTitle}>
+                          {meta.label} changed
+                        </Text>
+                        {request?.from != null && request?.to != null ? (
+                          <View style={styles.changeFromTo}>
+                            <Text style={styles.changeFrom}>
+                              {request.from}
+                            </Text>
+                            <Ionicons
+                              name="arrow-forward"
+                              size={12}
+                              color={C.MUTED}
+                            />
+                            <Text style={styles.changeTo}>{request.to}</Text>
+                          </View>
+                        ) : null}
+                      </View>
                     </View>
                   </View>
-                </View>
 
-                <TextInput
-                  style={[
-                    styles.reasonInputCompact,
-                    touched && invalid && styles.reasonInputLgError,
-                  ]}
-                  value={reason}
-                  onChangeText={setReason}
-                  onBlur={() => setTouched(true)}
-                  placeholder={`Why did ${meta.label.toLowerCase()} change?`}
-                  placeholderTextColor={C.FAINT}
-                  multiline
-                  autoFocus
-                  maxLength={300}
-                />
-
-                <View style={styles.reasonFootRow}>
-                  {touched && missing ? (
-                    <Text style={styles.reasonHelpError}>
-                      A reason is required.
-                    </Text>
-                  ) : touched && tooShort ? (
-                    <Text style={styles.reasonHelpError}>
-                      Add a little more detail.
-                    </Text>
-                  ) : (
-                    <Text style={styles.reasonHelp}>
-                      Saved against this quotation&apos;s audit history.
-                    </Text>
-                  )}
-                  <Text style={styles.reasonCounter}>{trimmed.length}/300</Text>
-                </View>
-              </View>
-
-              <View style={styles.reasonChipRow}>
-                {REASON_PRESETS.map((preset) => (
-                  <Pressable
-                    key={preset}
-                    style={({ hovered, pressed }) => [
-                      styles.reasonChip,
-                      (hovered || pressed) && styles.reasonChipHover,
+                  <TextInput
+                    style={[
+                      styles.reasonInputCompact,
+                      touched && invalid && styles.reasonInputLgError,
                     ]}
-                    onPress={() => setReason(preset)}
-                  >
-                    <Text style={styles.reasonChipText}>{preset}</Text>
-                  </Pressable>
-                ))}
+                    value={reason}
+                    onChangeText={setReason}
+                    onBlur={() => setTouched(true)}
+                    placeholder={`Why did ${meta.label.toLowerCase()} change?`}
+                    placeholderTextColor={C.FAINT}
+                    multiline
+                    autoFocus
+                    maxLength={300}
+                  />
+
+                  <View style={styles.reasonFootRow}>
+                    {touched && missing ? (
+                      <Text style={styles.reasonHelpError}>
+                        A reason is required.
+                      </Text>
+                    ) : touched && tooShort ? (
+                      <Text style={styles.reasonHelpError}>
+                        Add a little more detail.
+                      </Text>
+                    ) : (
+                      <Text style={styles.reasonHelp}>
+                        Saved against this quotation&apos;s audit history.
+                      </Text>
+                    )}
+                    <Text style={styles.reasonCounter}>
+                      {trimmed.length}/300
+                    </Text>
+                  </View>
+                </View>
               </View>
+            </ScrollView>
+
+            <View style={styles.reasonActions}>
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.reasonCancelBtn,
+                  (hovered || pressed) && styles.ghostButtonHover,
+                ]}
+                onPress={onCancel}
+              >
+                <Text style={styles.modalCancelText}>CANCEL</Text>
+              </Pressable>
+
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.reasonApplyBtn,
+                  (hovered || pressed) && !invalid && styles.primaryButtonHover,
+                  invalid && styles.primaryButtonDisabled,
+                ]}
+                onPress={submit}
+                disabled={invalid}
+              >
+                <Ionicons name="checkmark" size={17} color="#FFFFFF" />
+                <Text style={styles.modalApplyText}>SAVE REASON</Text>
+              </Pressable>
             </View>
-          </ScrollView>
-
-          <View style={styles.reasonActions}>
-            <Pressable
-              style={({ hovered, pressed }) => [
-                styles.modalCancel,
-                (hovered || pressed) && styles.ghostButtonHover,
-              ]}
-              onPress={onCancel}
-            >
-              <Text style={styles.modalCancelText}>CANCEL</Text>
-            </Pressable>
-
-            <Pressable
-              style={({ hovered, pressed }) => [
-                styles.modalApply,
-                (hovered || pressed) && !invalid && styles.primaryButtonHover,
-                invalid && styles.primaryButtonDisabled,
-              ]}
-              onPress={submit}
-              disabled={invalid}
-            >
-              <Ionicons name="checkmark" size={17} color="#FFFFFF" />
-              <Text style={styles.modalApplyText}>SAVE REASON</Text>
-            </Pressable>
-          </View>
+          </Pressable>
         </Pressable>
-      </Pressable>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -1024,99 +1012,185 @@ function DeleteReasonModal({
       visible
       onRequestClose={busy ? () => {} : onClose}
     >
-      <Pressable
-        style={styles.sheetBackdrop}
-        onPress={busy ? undefined : onClose}
+      <KeyboardAvoidingView
+        style={styles.reasonKav}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
-        <Pressable style={styles.reasonSheet} onPress={() => {}}>
-          <View style={styles.reasonHeader}>
-            <View style={styles.reasonHeaderIcon}>
-              <Ionicons name="trash-outline" size={20} color={C.ALERT} />
+        <Pressable
+          style={styles.sheetBackdrop}
+          onPress={busy ? undefined : onClose}
+        >
+          <Pressable style={styles.reasonSheet} onPress={() => {}}>
+            <View style={styles.reasonHeader}>
+              <View style={styles.reasonHeaderIcon}>
+                <Ionicons name="trash-outline" size={20} color={C.ALERT} />
+              </View>
+              <View style={styles.reasonHeaderText}>
+                <Text style={styles.reasonTitle}>Reason Required</Text>
+                <Text style={styles.reasonSubtitle}>{request?.summary}</Text>
+              </View>
             </View>
-            <View style={styles.reasonHeaderText}>
-              <Text style={styles.reasonTitle}>Reason Required</Text>
-              <Text style={styles.reasonSubtitle}>{request?.summary}</Text>
-            </View>
-          </View>
 
-          <ScrollView
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={styles.reasonBody}>
-              <View style={styles.reasonBlock}>
-                <View style={styles.reasonBlockHead}>
-                  <Ionicons name="leaf-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.reasonBlockLabel}>{request?.title}</Text>
-                </View>
+            <ScrollView
+              style={styles.reasonScrollArea}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <View style={styles.reasonBody}>
+                <View style={styles.reasonBlock}>
+                  <View style={styles.reasonBlockHead}>
+                    <Ionicons name="leaf-outline" size={15} color={C.NAVY} />
+                    <Text style={styles.reasonBlockLabel}>
+                      {request?.title}
+                    </Text>
+                  </View>
 
-                <View style={styles.changeList}>
-                  <View style={[styles.changeRow, styles.changeRowLast]}>
-                    <View style={[styles.changeIcon, styles.changeIconRemove]}>
-                      <Ionicons name="trash-outline" size={13} color={C.RED} />
+                  <View style={styles.changeList}>
+                    <View style={[styles.changeRow, styles.changeRowLast]}>
+                      <View
+                        style={[styles.changeIcon, styles.changeIconRemove]}
+                      >
+                        <Ionicons
+                          name="trash-outline"
+                          size={13}
+                          color={C.RED}
+                        />
+                      </View>
+                      <View style={styles.changeBody}>
+                        <Text style={styles.changeTitle}>Deleted</Text>
+                        {request?.detail ? (
+                          <Text style={styles.changeDetail}>
+                            {request.detail}
+                          </Text>
+                        ) : null}
+                      </View>
                     </View>
-                    <View style={styles.changeBody}>
-                      <Text style={styles.changeTitle}>Deleted</Text>
-                      {request?.detail ? (
-                        <Text style={styles.changeDetail}>
-                          {request.detail}
-                        </Text>
-                      ) : null}
-                    </View>
+                  </View>
+
+                  <TextInput
+                    style={[
+                      styles.reasonInputCompact,
+                      touched && invalid && styles.reasonInputLgError,
+                    ]}
+                    value={reason}
+                    onChangeText={setReason}
+                    onBlur={() => setTouched(true)}
+                    placeholder="Why is this plant being removed?"
+                    placeholderTextColor={C.FAINT}
+                    multiline
+                    autoFocus
+                    editable={!busy}
+                    maxLength={300}
+                  />
+
+                  <View style={styles.reasonFootRow}>
+                    {touched && missing ? (
+                      <Text style={styles.reasonHelpError}>
+                        A reason is required.
+                      </Text>
+                    ) : touched && tooShort ? (
+                      <Text style={styles.reasonHelpError}>
+                        Add a little more detail.
+                      </Text>
+                    ) : (
+                      <Text style={styles.reasonHelp}>
+                        Saved against this quotation&apos;s audit history.
+                      </Text>
+                    )}
+                    <Text style={styles.reasonCounter}>
+                      {trimmed.length}/300
+                    </Text>
                   </View>
                 </View>
 
-                <TextInput
-                  style={[
-                    styles.reasonInputCompact,
-                    touched && invalid && styles.reasonInputLgError,
-                  ]}
-                  value={reason}
-                  onChangeText={setReason}
-                  onBlur={() => setTouched(true)}
-                  placeholder="Why is this plant being removed?"
-                  placeholderTextColor={C.FAINT}
-                  multiline
-                  autoFocus
-                  editable={!busy}
-                  maxLength={300}
-                />
-
-                <View style={styles.reasonFootRow}>
-                  {touched && missing ? (
-                    <Text style={styles.reasonHelpError}>
-                      A reason is required.
-                    </Text>
-                  ) : touched && tooShort ? (
-                    <Text style={styles.reasonHelpError}>
-                      Add a little more detail.
-                    </Text>
-                  ) : (
-                    <Text style={styles.reasonHelp}>
-                      Saved against this quotation&apos;s audit history.
-                    </Text>
-                  )}
-                  <Text style={styles.reasonCounter}>{trimmed.length}/300</Text>
+                <View style={styles.reasonChipRow}>
+                  {REASON_PRESETS.map((preset) => (
+                    <Pressable
+                      key={preset}
+                      style={({ hovered, pressed }) => [
+                        styles.reasonChip,
+                        (hovered || pressed) && styles.reasonChipHover,
+                      ]}
+                      onPress={() => setReason(preset)}
+                      disabled={busy}
+                    >
+                      <Text style={styles.reasonChipText}>{preset}</Text>
+                    </Pressable>
+                  ))}
                 </View>
               </View>
+            </ScrollView>
 
-              <View style={styles.reasonChipRow}>
-                {REASON_PRESETS.map((preset) => (
-                  <Pressable
-                    key={preset}
-                    style={({ hovered, pressed }) => [
-                      styles.reasonChip,
-                      (hovered || pressed) && styles.reasonChipHover,
-                    ]}
-                    onPress={() => setReason(preset)}
-                    disabled={busy}
-                  >
-                    <Text style={styles.reasonChipText}>{preset}</Text>
-                  </Pressable>
-                ))}
+            {error ? (
+              <View style={styles.banner}>
+                <Ionicons
+                  name="alert-circle-outline"
+                  size={17}
+                  color={C.ALERT}
+                />
+                <Text style={styles.bannerText}>{error}</Text>
               </View>
+            ) : null}
+
+            <View style={styles.reasonActions}>
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.reasonCancelBtn,
+                  (hovered || pressed) && styles.ghostButtonHover,
+                ]}
+                onPress={onClose}
+                disabled={busy}
+              >
+                <Text style={styles.modalCancelText}>CANCEL</Text>
+              </Pressable>
+
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.reasonApplyBtn,
+                  (hovered || pressed) && !invalid && styles.primaryButtonHover,
+                  (invalid || busy) && styles.primaryButtonDisabled,
+                ]}
+                onPress={submit}
+                disabled={invalid || busy}
+              >
+                {busy ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Ionicons name="trash-outline" size={17} color="#FFFFFF" />
+                )}
+                <Text style={styles.modalApplyText}>
+                  {busy ? "SAVING…" : "DELETE & SAVE"}
+                </Text>
+              </Pressable>
             </View>
-          </ScrollView>
+          </Pressable>
+        </Pressable>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+/* ── close confirmation ──────────────────────────────────────────────
+   Gates the back / close buttons whenever there are unsaved changes, so
+   nothing is discarded by accident. */
+function CloseConfirmModal({ styles, busy, error, onSave, onDiscard, onCancel }) {
+  const C = styles.colors;
+
+  return (
+    <Modal
+      transparent
+      animationType="fade"
+      visible
+      onRequestClose={busy ? () => {} : onCancel}
+    >
+      <Pressable style={styles.sheetBackdrop} onPress={busy ? undefined : onCancel}>
+        <Pressable style={styles.sheet} onPress={() => {}}>
+          <View style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle}>Unsaved changes</Text>
+            <Text style={styles.sheetSubtitle}>
+              This quotation has changes that haven&apos;t been saved yet.
+            </Text>
+          </View>
 
           {error ? (
             <View style={styles.banner}>
@@ -1125,35 +1199,43 @@ function DeleteReasonModal({
             </View>
           ) : null}
 
-          <View style={styles.reasonActions}>
+          <View style={styles.confirmActions}>
             <Pressable
               style={({ hovered, pressed }) => [
-                styles.modalCancel,
-                (hovered || pressed) && styles.ghostButtonHover,
+                styles.confirmPrimaryBtn,
+                (hovered || pressed) && !busy && styles.primaryButtonHover,
+                busy && styles.primaryButtonDisabled,
               ]}
-              onPress={onClose}
+              onPress={onSave}
               disabled={busy}
-            >
-              <Text style={styles.modalCancelText}>CANCEL</Text>
-            </Pressable>
-
-            <Pressable
-              style={({ hovered, pressed }) => [
-                styles.modalApply,
-                (hovered || pressed) && !invalid && styles.primaryButtonHover,
-                (invalid || busy) && styles.primaryButtonDisabled,
-              ]}
-              onPress={submit}
-              disabled={invalid || busy}
             >
               {busy ? (
                 <ActivityIndicator color="#FFFFFF" />
               ) : (
-                <Ionicons name="trash-outline" size={17} color="#FFFFFF" />
+                <Ionicons name="save-outline" size={17} color="#FFFFFF" />
               )}
-              <Text style={styles.modalApplyText}>
-                {busy ? "SAVING…" : "DELETE & SAVE"}
+              <Text style={styles.confirmPrimaryText}>
+                {busy ? "SAVING…" : "SAVE & CLOSE"}
               </Text>
+            </Pressable>
+
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.confirmDangerBtn,
+                (hovered || pressed) && !busy && styles.confirmDangerBtnHover,
+              ]}
+              onPress={onDiscard}
+              disabled={busy}
+            >
+              <Text style={styles.confirmDangerText}>DISCARD CHANGES</Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.confirmGhostBtn}
+              onPress={onCancel}
+              disabled={busy}
+            >
+              <Text style={styles.confirmGhostText}>Keep editing</Text>
             </Pressable>
           </View>
         </Pressable>
@@ -1310,6 +1392,10 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   /* The delete reason modal is a gate in front of a pending delete. */
   const [pendingDelete, setPendingDelete] = useState(null);
+
+  /* Gates the back / close buttons: shown instead of closing immediately
+     whenever there are unsaved changes, so a save or a discard is explicit. */
+  const [confirmClose, setConfirmClose] = useState(false);
 
   /* The per-field reason popup. `fieldReasonRequest` describes the single field
      that just changed and is awaiting a reason. */
@@ -1724,10 +1810,6 @@ function EditInner({ quotation, onClose, onSaved }) {
     setPicker({ type: "packing", key });
   }, []);
 
-  const openChoicePicker = useCallback((key) => {
-    setPicker({ type: "choice", key });
-  }, []);
-
   const chooseUnit = useCallback(
     (line, inventory) => {
       updateLine(line.key, {
@@ -2018,6 +2100,7 @@ function EditInner({ quotation, onClose, onSaved }) {
           quantityReserved: toCount(line.quantity),
           unitId: line.unitId,
           unitName: line.unitName,
+          packingId: line.packingId ?? null,
           packingName: line.packingName,
           packingCharge: toMoney(line.packingCharge),
           selectedByCustomer: line.selectedByCustomer,
@@ -2103,6 +2186,30 @@ function EditInner({ quotation, onClose, onSaved }) {
 
     persist();
   }, [working, blockingReason, dirty, persist]);
+
+  /* Back / close. Unsaved changes are never discarded silently — gate the
+     actual close behind a confirmation that lets the operator save first. */
+  const requestClose = useCallback(() => {
+    if (working) return;
+    if (dirty) {
+      setConfirmClose(true);
+      return;
+    }
+    onClose?.();
+  }, [working, dirty, onClose]);
+
+  const discardAndClose = useCallback(() => {
+    setConfirmClose(false);
+    onClose?.();
+  }, [onClose]);
+
+  const saveAndClose = useCallback(async () => {
+    const result = await persist();
+    if (result) {
+      setConfirmClose(false);
+      onClose?.();
+    }
+  }, [persist, onClose]);
 
   /* Delete. Allowed in Draft and Delivery shade; past Draft it is reasoned via
      the delete reason modal. */
@@ -2373,8 +2480,6 @@ function EditInner({ quotation, onClose, onSaved }) {
       }
       const entered = toCount(line.quantity);
       const traySize = toCount(line.traySize);
-      const over =
-        line.available != null && !line.seedling && entered > line.available;
       const moved = quantityChanged(line) && !line.isNew;
 
       const derived =
@@ -2403,13 +2508,7 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       return (
         <View style={styles.cellFill}>
-          <View
-            style={[
-              styles.qtyBox,
-              moved && styles.qtyBoxDirty,
-              over && styles.qtyBoxWarn,
-            ]}
-          >
+          <View style={[styles.qtyBox, moved && styles.qtyBoxDirty]}>
             <TextInput
               style={styles.qtyInput}
               value={line.quantity}
@@ -2429,21 +2528,13 @@ function EditInner({ quotation, onClose, onSaved }) {
 
           {derived}
 
-          {over ? (
-            <Text style={styles.qtyHintWarn} numberOfLines={1}>
-              Only {formatNumber(line.available)} in stock
-            </Text>
-          ) : moved ? (
+          {moved ? (
             <Text style={styles.qtyHintMoved} numberOfLines={1}>
               Was {formatNumber(toCount(line.baseQuantity))}
             </Text>
           ) : line.reserved != null && !isDraft ? (
             <Text style={styles.qtyHint} numberOfLines={1}>
               Reserved {formatNumber(line.reserved)}
-            </Text>
-          ) : line.available != null ? (
-            <Text style={styles.qtyHint} numberOfLines={1}>
-              {formatNumber(line.available)} in stock
             </Text>
           ) : null}
         </View>
@@ -2481,6 +2572,33 @@ function EditInner({ quotation, onClose, onSaved }) {
       }
 
       const custom = isCustomPacking(line, packings);
+
+      /* Default state: no packing chosen yet. Keep the dropdown out of the
+         way and offer a single "Add packing" button instead — tapping it
+         opens the same picker (still auto-mapped by size, still the same
+         selection flow) that the dropdown would have. */
+      const isNoPacking =
+        !custom && norm(line.packingName) === norm(NO_PACKING.packingName);
+
+      if (isNoPacking) {
+        return (
+          <View style={styles.packStack}>
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.addPackingBtn,
+                (hovered || pressed) && styles.addPackingBtnHover,
+              ]}
+              onPress={() => openPackingPicker(line.key)}
+            >
+              <Ionicons name="add" size={14} color={C.NAVY} />
+              <Text style={styles.addPackingText} numberOfLines={1}>
+                Add packing
+              </Text>
+            </Pressable>
+          </View>
+        );
+      }
+
       const selectLabel = custom
         ? "Custom"
         : line.packingName || NO_PACKING.packingName;
@@ -2501,42 +2619,41 @@ function EditInner({ quotation, onClose, onSaved }) {
             <Ionicons name="chevron-down" size={14} color={C.MUTED} />
           </Pressable>
 
-          <View
-            style={[
-              styles.chargeBox,
-              line.packingManual && styles.chargeBoxManual,
-            ]}
-          >
-            <Text
-              style={[
-                styles.chargePrefix,
-                line.packingManual && styles.chargeManualText,
-              ]}
-            >
-              ₹
-            </Text>
-            <TextInput
-              style={[
-                styles.chargeInput,
-                line.packingManual && styles.chargeManualText,
-              ]}
-              value={line.packingCharge}
-              onChangeText={(value) =>
-                updateLine(line.key, {
-                  packingCharge: value.replace(/[^0-9.]/g, ""),
-                  packingManual: true,
-                })
-              }
-              onBlur={() => commitFieldEdit(line.key, "packing")}
-              keyboardType="decimal-pad"
-              selectTextOnFocus
-              placeholder="0"
-              placeholderTextColor={C.FAINT}
-            />
-            <Text style={styles.chargeSuffix}>
-              {line.seedling ? "/ tray" : "/ plant"}
-            </Text>
-          </View>
+          {line.packingManual ? (
+            <View style={[styles.chargeBox, styles.chargeBoxManual]}>
+              <Text style={[styles.chargePrefix, styles.chargeManualText]}>
+                ₹
+              </Text>
+              <TextInput
+                style={[styles.chargeInput, styles.chargeManualText]}
+                value={line.packingCharge}
+                onChangeText={(value) =>
+                  updateLine(line.key, {
+                    packingCharge: value.replace(/[^0-9.]/g, ""),
+                  })
+                }
+                onBlur={() => commitFieldEdit(line.key, "packing")}
+                keyboardType="decimal-pad"
+                selectTextOnFocus
+                placeholder="0"
+                placeholderTextColor={C.FAINT}
+              />
+              <Text style={styles.chargeSuffix}>
+                {line.seedling ? "/ tray" : "/ plant"}
+              </Text>
+            </View>
+          ) : (
+            /* A catalogue packing's rate is fixed — shown as a plain label,
+               not an editable field. */
+            <View style={styles.chargeLabelRow}>
+              <Text style={styles.chargeLabelValue} numberOfLines={1}>
+                {formatAmount(line.packingCharge)}
+              </Text>
+              <Text style={styles.chargeSuffix}>
+                {line.seedling ? "/ tray" : "/ plant"}
+              </Text>
+            </View>
+          )}
         </View>
       );
     },
@@ -2551,7 +2668,8 @@ function EditInner({ quotation, onClose, onSaved }) {
     ],
   );
 
-  /* Selected by customer: a Yes / No dropdown, disabled when read-only. */
+  /* Selected by customer: an inline Yes / No radio pair. Read-only lines show
+     the same radio look with the inactive dot dimmed and presses disabled. */
   const choiceField = useCallback(
     (line) => {
       if (line.isSpecial) {
@@ -2559,64 +2677,56 @@ function EditInner({ quotation, onClose, onSaved }) {
       }
 
       const on = !!line.selectedByCustomer;
-
-      if (!lineEditable(line)) {
-        return (
-          <View
-            style={[styles.choicePill, on ? styles.choiceOn : styles.choiceOff]}
-          >
-            <Ionicons
-              name={on ? "checkmark-circle" : "remove-circle-outline"}
-              size={12}
-              color={on ? C.GREEN_DEEP : C.MUTED}
-            />
-            <Text
-              style={[
-                styles.choiceText,
-                on ? styles.choiceTextOn : styles.choiceTextOff,
-              ]}
-              numberOfLines={1}
-            >
-              {on ? "Yes" : "No"}
-            </Text>
-          </View>
-        );
-      }
+      const editable = lineEditable(line);
 
       return (
-        <Pressable
-          style={({ hovered, pressed }) => [
-            styles.choiceSelect,
-            on ? styles.choiceSelectYes : styles.choiceSelectNo,
-            (hovered || pressed) && styles.choiceSelectHover,
-          ]}
-          accessibilityRole="button"
-          accessibilityLabel={`${line.plantName} selected by customer: ${
-            on ? "Yes" : "No"
-          }`}
-          onPress={() => openChoicePicker(line.key)}
-        >
-          <View style={styles.choiceValueRow}>
-            <Ionicons
-              name={on ? "checkmark-circle" : "remove-circle-outline"}
-              size={14}
-              color={on ? C.GREEN_DEEP : C.MUTED}
-            />
-            <Text
-              style={[
-                styles.choiceValueText,
-                on ? styles.choiceValueYes : styles.choiceValueNo,
-              ]}
-              numberOfLines={1}
-            >
-              {on ? "Yes" : "No"}
-            </Text>
-          </View>
-          <Ionicons name="chevron-down" size={14} color={C.MUTED} />
-        </Pressable>
+        <View style={styles.radioRow}>
+          {CHOICE_OPTIONS.map((option) => {
+            const active = option.value === on;
+            const dot = (
+              <View style={[styles.radioDot, active && styles.radioDotOn]}>
+                {active ? <View style={styles.radioDotInner} /> : null}
+              </View>
+            );
+            const label = (
+              <Text
+                style={[styles.radioLabel, active && styles.radioLabelOn]}
+                numberOfLines={1}
+              >
+                {option.label}
+              </Text>
+            );
+
+            if (!editable) {
+              return (
+                <View key={option.label} style={styles.radioItem}>
+                  {dot}
+                  {label}
+                </View>
+              );
+            }
+
+            return (
+              <Pressable
+                key={option.label}
+                style={({ hovered, pressed }) => [
+                  styles.radioItem,
+                  (hovered || pressed) && styles.radioItemHover,
+                ]}
+                accessibilityRole="radio"
+                accessibilityState={{ checked: active }}
+                accessibilityLabel={`${line.plantName} selected by customer: ${option.label}`}
+                onPress={() => chooseChoice(line, option)}
+              >
+                {dot}
+                {label}
+              </Pressable>
+            );
+          })}
+        </View>
       );
     },
-    [styles, C, lineEditable, openChoicePicker],
+    [styles, lineEditable, chooseChoice],
   );
 
   const deleteButton = useCallback(
@@ -2693,7 +2803,6 @@ function EditInner({ quotation, onClose, onSaved }) {
     const inner = space - styles.gutter * 2 - 2; // shell border
     const dense = space < 1000;
     const showCalc = space >= BP_CALC;
-    const showChoice = space >= BP_CHOICE;
     const showPrice = space >= BP_PRICE;
     const showSno = space >= BP_SNO;
 
@@ -2704,7 +2813,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       qty: dense ? 138 : 156,
       calc: 172,
       packing: dense ? 150 : 168,
-      choice: dense ? 108 : 120,
+      choice: dense ? 118 : 132,
       amount: dense ? 104 : 118,
       action: showChecks && canEditLines ? 80 : 56,
     };
@@ -2745,13 +2854,6 @@ function EditInner({ quotation, onClose, onSaved }) {
                 <View style={styles.metaTag}>
                   <Text style={styles.metaTagText}>
                     {formatAmount(effectivePriceOf(line))} / plant
-                  </Text>
-                </View>
-              ) : null}
-              {!line.isSpecial && !showChoice ? (
-                <View style={styles.metaTag}>
-                  <Text style={styles.metaTagText}>
-                    Customer: {line.selectedByCustomer ? "Yes" : "No"}
                   </Text>
                 </View>
               ) : null}
@@ -2838,7 +2940,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         align: "center",
         render: packingField,
       },
-      showChoice && {
+      {
         key: "choice",
         label: "Selected by",
         sublabel: "customer",
@@ -2989,21 +3091,24 @@ function EditInner({ quotation, onClose, onSaved }) {
           </View>
         ) : (
           <View style={styles.fieldGrid}>
-            <View style={styles.field}>
+            <View style={styles.fieldTriple}>
               <Text style={styles.fieldLabel}>Unit</Text>
               {unitSelect(item)}
             </View>
-            <View style={styles.field}>
+            <View style={styles.fieldTriple}>
               <Text style={styles.fieldLabel}>
                 {isDraft ? "Reserved qty" : "Delivered qty"}
               </Text>
               {qtyField(item, { showDerived: true })}
             </View>
-            <View style={styles.field}>
+            <View style={styles.fieldTriple}>
               <Text style={styles.fieldLabel}>Packing</Text>
               {packingField(item)}
             </View>
-            <View style={styles.field}>
+
+            <View style={styles.fieldDivider} />
+
+            <View style={[styles.fieldFull, styles.fieldChoiceRow]}>
               <Text style={styles.fieldLabel}>Selected by customer</Text>
               {choiceField(item)}
             </View>
@@ -3040,20 +3145,19 @@ function EditInner({ quotation, onClose, onSaved }) {
     if (!picker || !activeLine) return null;
 
     const unitMode = picker.type === "unit";
-    const choiceMode = picker.type === "choice";
     const packingMode = picker.type === "packing";
 
     const options = unitMode
       ? activeLine.inventoryList || []
-      : choiceMode
-        ? CHOICE_OPTIONS
-        : [NO_PACKING, ...packings, CUSTOM_PACKING];
+      : [
+          NO_PACKING,
+          ...packings,
+          /* Custom packing (hand-typed charge) is only offered for seedling
+             plants — other plant types must use a catalogue packing. */
+          ...(activeLine.seedling ? [CUSTOM_PACKING] : []),
+        ];
 
-    const title = unitMode
-      ? "Select unit"
-      : choiceMode
-        ? "Selected by customer"
-        : "Select packing";
+    const title = unitMode ? "Select unit" : "Select packing";
 
     const activeCustom = packingMode && isCustomPacking(activeLine, packings);
 
@@ -3096,18 +3200,14 @@ function EditInner({ quotation, onClose, onSaved }) {
 
                   const active = unitMode
                     ? option.unitId === activeLine.unitId
-                    : choiceMode
-                      ? option.value === !!activeLine.selectedByCustomer
-                      : isCustomOption
-                        ? activeCustom
-                        : !activeCustom &&
-                          packingLabel(option) === activeLine.packingName;
+                    : isCustomOption
+                      ? activeCustom
+                      : !activeCustom &&
+                        packingLabel(option) === activeLine.packingName;
 
                   const optionKey = unitMode
                     ? `unit-${option.unitId}`
-                    : choiceMode
-                      ? `choice-${option.label}`
-                      : `packing-${option.packingId ?? "none"}`;
+                    : `packing-${option.packingId ?? "none"}`;
 
                   return (
                     <Pressable
@@ -3120,42 +3220,10 @@ function EditInner({ quotation, onClose, onSaved }) {
                       onPress={() =>
                         unitMode
                           ? chooseUnit(activeLine, option)
-                          : choiceMode
-                            ? chooseChoice(activeLine, option)
-                            : choosePacking(activeLine, option)
+                          : choosePacking(activeLine, option)
                       }
                     >
-                      {choiceMode ? (
-                        <View style={styles.optionLead}>
-                          <View
-                            style={[
-                              styles.optionIcon,
-                              option.value && styles.optionIconYes,
-                            ]}
-                          >
-                            <Ionicons
-                              name={
-                                option.value
-                                  ? "checkmark-circle"
-                                  : "remove-circle-outline"
-                              }
-                              size={16}
-                              color={option.value ? C.GREEN_DEEP : C.MUTED}
-                            />
-                          </View>
-                          <View style={styles.fill}>
-                            <Text
-                              style={[
-                                styles.optionText,
-                                active && styles.optionTextActive,
-                              ]}
-                            >
-                              {option.label}
-                            </Text>
-                            <Text style={styles.optionMeta}>{option.hint}</Text>
-                          </View>
-                        </View>
-                      ) : isCustomOption ? (
+                      {isCustomOption ? (
                         <View style={styles.optionLead}>
                           <View
                             style={[
@@ -3292,7 +3360,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="Go back"
-            onPress={onClose}
+            onPress={requestClose}
           >
             <Ionicons name="arrow-back" size={19} color={C.NAVY} />
           </Pressable>
@@ -3392,7 +3460,7 @@ function EditInner({ quotation, onClose, onSaved }) {
               hitSlop={8}
               accessibilityRole="button"
               accessibilityLabel="Close"
-              onPress={onClose}
+              onPress={requestClose}
             >
               <Ionicons name="close" size={19} color="#475569" />
             </Pressable>
@@ -3619,7 +3687,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                   onPress={() => setTransportOpen(true)}
                 >
                   <Ionicons name="car-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.adjustChipText}>
+                  <Text style={styles.adjustChipText} numberOfLines={1}>
                     Transport {formatAmount(transportEntered)}
                   </Text>
                   <Ionicons name="create-outline" size={14} color={C.MUTED} />
@@ -3635,7 +3703,9 @@ function EditInner({ quotation, onClose, onSaved }) {
                   onPress={() => setTransportOpen(true)}
                 >
                   <Ionicons name="car-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.adjustAddText}>Add transport cost</Text>
+                  <Text style={styles.adjustAddText} numberOfLines={1}>
+                    Add transport cost
+                  </Text>
                   <Ionicons name="add" size={16} color={C.NAVY} />
                 </Pressable>
               )}
@@ -3651,7 +3721,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                   onPress={() => setDiscountOpen(true)}
                 >
                   <Ionicons name="pricetag-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.adjustChipText}>
+                  <Text style={styles.adjustChipText} numberOfLines={1}>
                     Discount −{formatAmount(discountEntered)}
                   </Text>
                   <Ionicons name="create-outline" size={14} color={C.MUTED} />
@@ -3667,7 +3737,9 @@ function EditInner({ quotation, onClose, onSaved }) {
                   onPress={() => setDiscountOpen(true)}
                 >
                   <Ionicons name="pricetag-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.adjustAddText}>Add discount</Text>
+                  <Text style={styles.adjustAddText} numberOfLines={1}>
+                    Add discount
+                  </Text>
                   <Ionicons name="add" size={16} color={C.NAVY} />
                 </Pressable>
               )}
@@ -3683,7 +3755,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                   onPress={() => setSpecialOpen(true)}
                 >
                   <Ionicons name="barcode-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.adjustChipText}>
+                  <Text style={styles.adjustChipText} numberOfLines={1}>
                     Special plants · {specials.length}
                   </Text>
                   <Ionicons name="add" size={16} color={C.NAVY} />
@@ -3699,7 +3771,9 @@ function EditInner({ quotation, onClose, onSaved }) {
                   onPress={() => setSpecialOpen(true)}
                 >
                   <Ionicons name="barcode-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.adjustAddText}>Add special plant</Text>
+                  <Text style={styles.adjustAddText} numberOfLines={1}>
+                    Add special plant
+                  </Text>
                   <Ionicons name="add" size={16} color={C.NAVY} />
                 </Pressable>
               )}
@@ -3709,7 +3783,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                    the date it was collected, but don't allow an edit. */
                 <View style={[styles.adjustChip, styles.adjustChipLocked]}>
                   <Ionicons name="lock-closed" size={13} color={C.MUTED} />
-                  <Text style={styles.adjustChipText}>
+                  <Text style={styles.adjustChipText} numberOfLines={1}>
                     Advance {formatAmount(advanceEntered)}
                     {quotation?.advancePaymentDate
                       ? ` · ${formatDate(quotation.advancePaymentDate)}`
@@ -3727,7 +3801,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                   onPress={() => setAdvanceOpen(true)}
                 >
                   <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.adjustChipText}>
+                  <Text style={styles.adjustChipText} numberOfLines={1}>
                     Advance {formatAmount(advanceEntered)}
                   </Text>
                   <Ionicons name="create-outline" size={14} color={C.MUTED} />
@@ -3743,7 +3817,9 @@ function EditInner({ quotation, onClose, onSaved }) {
                   onPress={() => setAdvanceOpen(true)}
                 >
                   <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
-                  <Text style={styles.adjustAddText}>Advance payment</Text>
+                  <Text style={styles.adjustAddText} numberOfLines={1}>
+                    Advance payment
+                  </Text>
                   <Ionicons name="add" size={16} color={C.NAVY} />
                 </Pressable>
               ) : null}
@@ -3841,9 +3917,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                 </View>
               ) : null}
 
-              <View style={styles.metricSpacer} />
-
-              <View style={styles.metricGrand}>
+              <View style={[styles.metric, styles.metricGrand]}>
                 <Text style={styles.metricGrandLabel}>Grand total</Text>
                 <Text style={styles.metricGrandValue}>
                   {formatAmount(totals.grand)}
@@ -3851,7 +3925,7 @@ function EditInner({ quotation, onClose, onSaved }) {
               </View>
 
               {totals.advance > 0 ? (
-                <View style={styles.metricRemaining}>
+                <View style={[styles.metric, styles.metricRemaining]}>
                   <Text style={styles.metricRemainingLabel}>Remaining</Text>
                   <Text style={styles.metricRemainingValue}>
                     {formatAmount(totals.remaining)}
@@ -4011,6 +4085,18 @@ function EditInner({ quotation, onClose, onSaved }) {
           error={error}
           onSubmit={submitDelete}
           onClose={() => setPendingDelete(null)}
+        />
+      ) : null}
+
+      {/* Back / close with unsaved changes: save or discard, explicitly. */}
+      {confirmClose ? (
+        <CloseConfirmModal
+          styles={styles}
+          busy={saving}
+          error={error}
+          onSave={saveAndClose}
+          onDiscard={discardAndClose}
+          onCancel={() => setConfirmClose(false)}
         />
       ) : null}
 
