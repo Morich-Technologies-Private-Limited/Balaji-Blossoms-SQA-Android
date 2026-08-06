@@ -1697,10 +1697,12 @@ function EditInner({ quotation, onClose, onSaved }) {
           );
         }
 
-        const packing = packingForSize(plant.size, packings);
         const seedling = isSeedling(plant.plantType);
-        const packingName = packingLabel(packing);
-        const packingCharge = String(packing?.price ?? 0);
+        /* New rows always start at "No packing" — the operator picks one
+           explicitly via the "Add packing" button rather than having a size
+           match silently pre-selected for them. */
+        const packingName = NO_PACKING.packingName;
+        const packingCharge = String(NO_PACKING.price);
 
         return [
           ...prev,
@@ -1721,7 +1723,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             inventoryList: inventory,
             quantity: "1",
             reserved: null,
-            packingId: packing?.packingId ?? null,
+            packingId: null,
             packingName,
             packingCharge,
             packingManual: false,
@@ -1744,7 +1746,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       setTerm("");
       setResults([]);
     },
-    [packings, quotation?.unitId],
+    [quotation?.unitId],
   );
 
   /* ── special plants (barcode) ────────────────────────────────────── */
@@ -2574,9 +2576,12 @@ function EditInner({ quotation, onClose, onSaved }) {
       const custom = isCustomPacking(line, packings);
 
       /* Default state: no packing chosen yet. Keep the dropdown out of the
-         way and offer a single "Add packing" button instead — tapping it
-         opens the same picker (still auto-mapped by size, still the same
-         selection flow) that the dropdown would have. */
+         way and offer a single "Add packing" button instead. Tapping it
+         auto-maps the packing that matches this plant's size, the same way a
+         freshly-added plant used to be pre-filled — the dropdown then appears
+         so the operator can change it if the auto-mapped guess is wrong. With
+         no size match there's nothing to auto-fill, so it just opens the
+         picker instead. */
       const isNoPacking =
         !custom && norm(line.packingName) === norm(NO_PACKING.packingName);
 
@@ -2588,7 +2593,21 @@ function EditInner({ quotation, onClose, onSaved }) {
                 styles.addPackingBtn,
                 (hovered || pressed) && styles.addPackingBtnHover,
               ]}
-              onPress={() => openPackingPicker(line.key)}
+              onPress={() => {
+                const matched = packingForSize(line.size, packings);
+                if (!matched) {
+                  openPackingPicker(line.key);
+                  return;
+                }
+                updateLine(line.key, {
+                  packingId: matched.packingId ?? null,
+                  packingName: packingLabel(matched),
+                  packingCharge: String(matched.price ?? 0),
+                  packingManual: false,
+                  packingCustom: false,
+                });
+                setTimeout(() => commitFieldEdit(line.key, "packing"), 0);
+              }}
             >
               <Ionicons name="add" size={14} color={C.NAVY} />
               <Text style={styles.addPackingText} numberOfLines={1}>
@@ -2671,7 +2690,7 @@ function EditInner({ quotation, onClose, onSaved }) {
   /* Selected by customer: an inline Yes / No radio pair. Read-only lines show
      the same radio look with the inactive dot dimmed and presses disabled. */
   const choiceField = useCallback(
-    (line) => {
+    (line, { stacked } = {}) => {
       if (line.isSpecial) {
         return <Text style={styles.dashText}>—</Text>;
       }
@@ -2680,7 +2699,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       const editable = lineEditable(line);
 
       return (
-        <View style={styles.radioRow}>
+        <View style={stacked ? styles.radioColumn : styles.radioRow}>
           {CHOICE_OPTIONS.map((option) => {
             const active = option.value === on;
             const dot = (
@@ -2813,7 +2832,8 @@ function EditInner({ quotation, onClose, onSaved }) {
       qty: dense ? 138 : 156,
       calc: 172,
       packing: dense ? 150 : 168,
-      choice: dense ? 118 : 132,
+      /* single stacked column — narrower than a side-by-side radio pair */
+      choice: dense ? 66 : 74,
       amount: dense ? 104 : 118,
       action: showChecks && canEditLines ? 80 : 56,
     };
@@ -2946,7 +2966,10 @@ function EditInner({ quotation, onClose, onSaved }) {
         sublabel: "customer",
         size: w.choice,
         align: "center",
-        render: choiceField,
+        /* Stacked into one narrow column here so the table never needs to
+           scroll sideways to fit it; the card layout keeps the roomier
+           side-by-side radios (see renderCard). */
+        render: (line) => choiceField(line, { stacked: true }),
       },
       {
         key: "amount",
@@ -3037,15 +3060,20 @@ function EditInner({ quotation, onClose, onSaved }) {
           </View>
 
           <View style={styles.fill}>
-            <Text style={styles.plantName} numberOfLines={1}>
-              {item.isSpecial ? item.plantName : plantTitleWithSize(item)}
-            </Text>
-            <Text style={styles.plantSub} numberOfLines={1}>
-              {item.isSpecial
-                ? item.barcodeId || "Special plant"
-                : item.plantSubtitle}
-            </Text>
-            <View style={styles.metaRow}>
+            {/* Name, subtitle, price and any tag all flow in one row to keep
+               each card compact — several cards should fit on one screen. */}
+            <View style={styles.cardHeaderRow}>
+              <Text
+                style={[styles.plantName, styles.plantNameInline]}
+                numberOfLines={1}
+              >
+                {item.isSpecial ? item.plantName : plantTitleWithSize(item)}
+              </Text>
+              <Text style={styles.plantSubInline} numberOfLines={1}>
+                {item.isSpecial
+                  ? item.barcodeId || "Special plant"
+                  : item.plantSubtitle}
+              </Text>
               {item.isSpecial ? (
                 <View style={styles.specialTag}>
                   <Ionicons name="pricetag" size={9} color={C.NAVY} />
@@ -3072,6 +3100,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </Text>
                 </View>
               ) : null}
+              {/* Line total sits at the end of the header row, after every
+                 tag, instead of its own footer band lower in the card. */}
+              <Text style={styles.cardHeaderAmount} numberOfLines={1}>
+                {formatAmount(item.isSpecial ? item.price : lineAmount(item))}
+              </Text>
             </View>
           </View>
 
@@ -3091,36 +3124,26 @@ function EditInner({ quotation, onClose, onSaved }) {
           </View>
         ) : (
           <View style={styles.fieldGrid}>
-            <View style={styles.fieldTriple}>
+            <View style={styles.fieldQuad}>
               <Text style={styles.fieldLabel}>Unit</Text>
               {unitSelect(item)}
             </View>
-            <View style={styles.fieldTriple}>
+            <View style={styles.fieldQuad}>
               <Text style={styles.fieldLabel}>
                 {isDraft ? "Reserved qty" : "Delivered qty"}
               </Text>
               {qtyField(item, { showDerived: true })}
             </View>
-            <View style={styles.fieldTriple}>
+            <View style={styles.fieldQuad}>
               <Text style={styles.fieldLabel}>Packing</Text>
               {packingField(item)}
             </View>
-
-            <View style={styles.fieldDivider} />
-
-            <View style={[styles.fieldFull, styles.fieldChoiceRow]}>
-              <Text style={styles.fieldLabel}>Selected by customer</Text>
-              {choiceField(item)}
+            <View style={styles.fieldQuadTight}>
+              <Text style={styles.fieldLabel}>Customer</Text>
+              {choiceField(item, { stacked: true })}
             </View>
           </View>
         )}
-
-        <View style={styles.lineFooter}>
-          <Text style={styles.lineTotalLabel}>Line amount</Text>
-          <Text style={styles.lineTotal}>
-            {formatAmount(item.isSpecial ? item.price : lineAmount(item))}
-          </Text>
-        </View>
       </View>
     ),
     [

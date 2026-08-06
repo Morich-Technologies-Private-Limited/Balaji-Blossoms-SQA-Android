@@ -611,6 +611,9 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
 
     /* ── selected by customer: an inline Yes / No radio pair ────────── */
     radioRow: { flexDirection: "row", alignItems: "center", gap: 18 },
+    /* single-column stack used in the table so the choice cell stays narrow
+       and the grid never has to scroll sideways to fit it */
+    radioColumn: { flexDirection: "column", alignItems: "flex-start", gap: 2 },
     radioItem: {
       flexDirection: "row",
       alignItems: "center",
@@ -673,75 +676,73 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       gap: 7,
     },
 
-    /* ── row card (narrow screens) ─────────────────────────────────── */
-    cardList: { padding: 12, gap: 11, flexGrow: 1 },
+    /* ── row card (narrow screens) ─────────────────────────────────────
+       Kept deliberately tight — several cards should fit on one screen. */
+    cardList: { padding: 9, gap: 7, flexGrow: 1 },
     lineCard: {
-      borderRadius: 14,
+      borderRadius: 13,
       borderWidth: 1,
       borderColor: BORDER,
       backgroundColor: SURFACE,
-      padding: 14,
-      gap: 12,
+      padding: 9,
+      gap: 7,
       ...shadow(0.05, 6, 2),
     },
     lineCardChecked: { borderColor: GREEN_LINE, backgroundColor: "#FBFEFC" },
     lineCardDirty: { borderColor: ALERT_LINE, backgroundColor: "#FFFBF7" },
     lineCardSpecial: { borderColor: "#B7D3EE", backgroundColor: "#F6FAFF" },
     lineIndexSpecial: { backgroundColor: NAVY_TINT },
-    lineCardTop: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+    lineCardTop: { flexDirection: "row", alignItems: "center", gap: 8 },
     lineIndex: {
-      width: 26,
-      height: 26,
-      borderRadius: 8,
+      width: 22,
+      height: 22,
+      borderRadius: 7,
       backgroundColor: NAVY_TINT,
       alignItems: "center",
       justifyContent: "center",
     },
-    lineIndexText: { fontSize: 12, fontWeight: "800", color: NAVY },
-    fieldGrid: { flexDirection: "row", flexWrap: "wrap", gap: 11 },
-    field: { flexGrow: 1, flexBasis: 150, minWidth: 140, gap: 6 },
-    /* Unit / Qty / Packing sit three-up on a plant card, matching the
-       reference layout; they wrap to fewer columns on very narrow screens. */
-    fieldTriple: { flexGrow: 1, flexBasis: "30%", minWidth: 92, gap: 6 },
-    /* "Selected by customer" always takes the full card width, on its own
-       row below a divider. */
-    fieldFull: { flexBasis: "100%", minWidth: "100%", gap: 6 },
-    fieldChoiceRow: {
+    lineIndexText: { fontSize: 11, fontWeight: "800", color: NAVY },
+    /* Name, subtitle, price and tag flow together in one wrapping row
+       instead of three stacked lines. */
+    cardHeaderRow: {
       flexDirection: "row",
+      flexWrap: "wrap",
       alignItems: "center",
-      justifyContent: "space-between",
+      gap: 6,
     },
-    fieldDivider: {
-      flexBasis: "100%",
-      minWidth: "100%",
-      height: 1,
-      backgroundColor: BORDER,
-      marginTop: 2,
+    plantNameInline: { maxWidth: "58%", flexShrink: 1 },
+    plantSubInline: { fontSize: 11, color: "#8A97A8" },
+    /* line total, tucked onto the end of the header row instead of its own
+       footer band lower in the card */
+    cardHeaderAmount: {
+      marginLeft: "auto",
+      fontSize: 15,
+      fontWeight: "800",
+      color: GREEN,
+    },
+    fieldGrid: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
+    field: { flexGrow: 1, flexBasis: 150, minWidth: 140, gap: 4 },
+    /* Unit / Qty / Packing / Selected-by-customer sit four-up in one row on
+       a plant card; they wrap to fewer columns on very narrow screens. */
+    fieldQuad: { flexGrow: 1, flexBasis: "22%", minWidth: 76, gap: 4 },
+    /* The customer radios are content-width, not a stretchy input — letting
+       them flexGrow like the others just leaves dead space to their right,
+       so they stay compact and any extra row width goes to Unit/Qty/Packing
+       instead. */
+    fieldQuadTight: {
+      flexGrow: 0,
+      flexShrink: 0,
+      flexBasis: "auto",
+      minWidth: 76,
+      gap: 4,
     },
     fieldLabel: {
-      fontSize: 9.5,
+      fontSize: 9,
       fontWeight: "800",
       letterSpacing: 0.5,
       color: MUTED,
       textTransform: "uppercase",
     },
-    lineFooter: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 10,
-      paddingTop: 11,
-      borderTopWidth: 1,
-      borderTopColor: BORDER,
-    },
-    lineTotalLabel: {
-      fontSize: 9.5,
-      fontWeight: "800",
-      letterSpacing: 0.5,
-      color: MUTED,
-      textTransform: "uppercase",
-    },
-    lineTotal: { fontSize: 17, fontWeight: "800", color: GREEN },
 
     /* ── empty state ───────────────────────────────────────────────── */
     emptyWrap: {
