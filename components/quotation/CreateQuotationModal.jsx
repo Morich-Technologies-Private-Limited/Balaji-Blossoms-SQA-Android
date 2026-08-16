@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -14,12 +14,19 @@ import {
 } from "react-native";
 
 import { createQuotation } from "../../api/createQuotation";
+import { getCompanies } from "../../api/getCompanies.js";
 import { searchCustomers } from "../../api/searchCustomers.js";
 import { getCurrentUser } from "../../utility/secureStorage";
 import makeStyles from "./CreateQuotationModal.styles.js";
 
 const SEARCH_DEBOUNCE = 350;
 const MIN_QUERY = 2;
+
+/* CompanyDto.isDefault is declared as `private boolean isDefault`, so Lombok's
+   getter is isDefault() and Jackson may serialise it as "default". Accept both
+   spellings so the picker still highlights the right company either way. */
+const isDefaultCompany = (company) =>
+  company?.isDefault === true || company?.default === true;
 
 /* The detail rows shown once a customer is picked. Each pulls a field off the
    CustomerDto; empty values are rendered as an em dash. `full: true` rows span
@@ -45,8 +52,9 @@ const DETAIL_FIELDS = [
  * Create-quotation popup.
  *
  * Flow: search customers by name / mobile / GST → pick one from the dropdown →
- * review the full customer details → create. The quotation is created against
- * the selected customer's id and the signed-in user.
+ * review the full customer details → pick the issuing company → create. The
+ * quotation is created against the selected customer, company, and the
+ * signed-in user.
  *
  * Props
  *  - visible    boolean
@@ -80,6 +88,12 @@ export default function CreateQuotationModal({
   const [dropdownOpen, setDropdownOpen] = useState(false);
 
   const [selected, setSelected] = useState(null);
+
+  const [companies, setCompanies] = useState([]);
+  const [companiesLoading, setCompaniesLoading] = useState(false);
+  const [companiesError, setCompaniesError] = useState(null);
+  const [companyId, setCompanyId] = useState(null);
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -89,9 +103,33 @@ export default function CreateQuotationModal({
      result is allowed to land. */
   const reqIdRef = useRef(0);
   const debounceRef = useRef(null);
+  /* Same idea for the company list, which can be reloaded via retry. */
+  const companyReqRef = useRef(0);
 
-  /* Reset everything each time the modal is opened, and load the stored user
-     as a fallback for userId. */
+  const loadCompanies = useCallback(async () => {
+    const myReq = ++companyReqRef.current;
+    setCompaniesLoading(true);
+    setCompaniesError(null);
+
+    const response = await getCompanies();
+    if (myReq !== companyReqRef.current) return;
+
+    if (response?.status === "SUCCESS" || response?.status === "NOT_FOUND") {
+      const list = response.payload || [];
+      setCompanies(list);
+      setCompanyId(
+        (prev) =>
+          prev ?? (list.find(isDefaultCompany) || list[0])?.companyId ?? null,
+      );
+    } else {
+      setCompanies([]);
+      setCompaniesError(response?.message || "Couldn't load companies.");
+    }
+    setCompaniesLoading(false);
+  }, []);
+
+  /* Reset everything each time the modal is opened, load the stored user as a
+     fallback for userId, and fetch the company list. */
   useEffect(() => {
     if (!visible) return;
     setQuery("");
@@ -100,6 +138,9 @@ export default function CreateQuotationModal({
     setSearchError(null);
     setDropdownOpen(false);
     setSelected(null);
+    setCompanies([]);
+    setCompanyId(null);
+    setCompaniesError(null);
     setSubmitting(false);
     setError(null);
 
@@ -108,11 +149,15 @@ export default function CreateQuotationModal({
       const user = await getCurrentUser();
       if (alive) setStoredUser(user);
     })();
+
+    loadCompanies();
+
     return () => {
       alive = false;
+      companyReqRef.current++;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [visible]);
+  }, [visible, loadCompanies]);
 
   /* Debounced search. Runs whenever the query changes and no customer is
      selected. A query shorter than MIN_QUERY clears the list without a call. */
@@ -172,11 +217,17 @@ export default function CreateQuotationModal({
     setError(null);
   };
 
-  const canSubmit = !!selected && !!userId && !submitting;
+  const pickCompany = (id) => {
+    setCompanyId(id);
+    setError(null);
+  };
+
+  const canSubmit = !!selected && !!userId && companyId != null && !submitting;
 
   const handleSubmit = async () => {
     if (!canSubmit) {
       if (!selected) setError("Search and select a customer first.");
+      else if (companyId == null) setError("Select a company first.");
       else if (!userId) setError("No signed-in user found. Sign in again.");
       return;
     }
@@ -184,7 +235,11 @@ export default function CreateQuotationModal({
     setSubmitting(true);
     setError(null);
 
-    const response = await createQuotation(selected.customerId, userId);
+    const response = await createQuotation(
+      selected.customerId,
+      userId,
+      companyId,
+    );
 
     setSubmitting(false);
 
@@ -439,6 +494,86 @@ export default function CreateQuotationModal({
                       ))}
                     </View>
                   </View>
+                </View>
+              )}
+
+              {/* ── company ── */}
+              <Text style={[styles.sectionLabel, { marginTop: 20 }]}>
+                Company
+              </Text>
+
+              {companiesLoading ? (
+                <View style={styles.readonlyRow}>
+                  <ActivityIndicator size="small" color={C.NAVY} />
+                  <Text style={styles.readonlyText}>Loading companies…</Text>
+                </View>
+              ) : companiesError ? (
+                <Pressable style={styles.readonlyRow} onPress={loadCompanies}>
+                  <Ionicons
+                    name="refresh-outline"
+                    size={styles.iconSize}
+                    color={C.ORANGE}
+                  />
+                  <Text
+                    style={[styles.readonlyText, styles.retryText]}
+                    numberOfLines={2}
+                  >
+                    {companiesError} Tap to retry.
+                  </Text>
+                </Pressable>
+              ) : companies.length === 0 ? (
+                <View style={styles.readonlyRow}>
+                  <Ionicons
+                    name="business-outline"
+                    size={styles.iconSize}
+                    color={C.PLACEHOLDER}
+                  />
+                  <Text style={styles.readonlyText}>
+                    No companies configured.
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.chipRow}>
+                  {companies.map((company) => {
+                    const active = company.companyId === companyId;
+                    return (
+                      <Pressable
+                        key={company.companyId}
+                        onPress={() => pickCompany(company.companyId)}
+                        style={({ hovered, pressed }) => [
+                          styles.chip,
+                          !active && (hovered || pressed) && styles.chipHover,
+                          active && styles.chipActive,
+                        ]}
+                      >
+                        <Ionicons
+                          name={active ? "checkmark-circle" : "ellipse-outline"}
+                          size={17}
+                          color={active ? "#FFFFFF" : C.PLACEHOLDER}
+                        />
+                        <Text
+                          numberOfLines={1}
+                          style={[
+                            styles.chipText,
+                            active && styles.chipTextActive,
+                          ]}
+                        >
+                          {company.companyName ||
+                            `Company ${company.companyId}`}
+                        </Text>
+                        {isDefaultCompany(company) ? (
+                          <Text
+                            style={[
+                              styles.chipBadge,
+                              active && styles.chipBadgeActive,
+                            ]}
+                          >
+                            DEFAULT
+                          </Text>
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
                 </View>
               )}
 

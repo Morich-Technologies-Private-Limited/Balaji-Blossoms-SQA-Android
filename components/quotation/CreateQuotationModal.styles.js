@@ -325,7 +325,7 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
       color: TEXT,
     },
 
-    /* ── assigned-to ── */
+    /* ── assigned-to / read-only rows ── */
     readonlyRow: {
       minHeight: controlHeight,
       borderRadius: 14,
@@ -342,6 +342,62 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
       flex: 1,
       fontSize: 14.5,
       color: MUTED,
+    },
+    retryText: {
+      color: ORANGE,
+    },
+
+    /* ── company picker ── */
+    chipRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 10,
+    },
+    chip: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      minHeight: 46,
+      flexGrow: 1,
+      flexBasis: large ? "30%" : "46%",
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: BORDER,
+      backgroundColor: INPUT_FILL,
+    },
+    chipHover: {
+      borderColor: NAVY,
+      backgroundColor: SURFACE,
+    },
+    chipActive: {
+      borderColor: NAVY,
+      backgroundColor: NAVY,
+    },
+    chipText: {
+      flexShrink: 1,
+      fontSize: 14,
+      fontWeight: "700",
+      color: TEXT,
+    },
+    chipTextActive: {
+      color: "#FFFFFF",
+    },
+    chipBadge: {
+      fontSize: 9.5,
+      fontWeight: "800",
+      letterSpacing: 0.6,
+      color: NAVY,
+      backgroundColor: NAVY_TINT,
+      paddingHorizontal: 6,
+      paddingVertical: 3,
+      borderRadius: 999,
+      overflow: "hidden",
+    },
+    chipBadgeActive: {
+      color: NAVY_DARK,
+      backgroundColor: "#FFFFFF",
     },
 
     /* ── error ── */
@@ -403,7 +459,17 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
   });
 
   styles.iconSize = isDesktop ? 22 : 20;
-  styles.colors = { NAVY, NAVY_DARK, ORANGE, MUTED, PLACEHOLDER, TEXT, BORDER };
+  styles.colors = {
+    NAVY,
+    NAVY_TINT,
+    NAVY_DARK,
+    ORANGE,
+    SURFACE,
+    MUTED,
+    PLACEHOLDER,
+    TEXT,
+    BORDER,
+  };
 
   return styles;
 };

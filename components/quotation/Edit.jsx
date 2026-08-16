@@ -1192,7 +1192,14 @@ function DeleteReasonModal({
 /* ── close confirmation ──────────────────────────────────────────────
    Gates the back / close buttons whenever there are unsaved changes, so
    nothing is discarded by accident. */
-function CloseConfirmModal({ styles, busy, error, onSave, onDiscard, onCancel }) {
+function CloseConfirmModal({
+  styles,
+  busy,
+  error,
+  onSave,
+  onDiscard,
+  onCancel,
+}) {
   const C = styles.colors;
 
   return (
@@ -1202,7 +1209,10 @@ function CloseConfirmModal({ styles, busy, error, onSave, onDiscard, onCancel })
       visible
       onRequestClose={busy ? () => {} : onCancel}
     >
-      <Pressable style={styles.sheetBackdrop} onPress={busy ? undefined : onCancel}>
+      <Pressable
+        style={styles.sheetBackdrop}
+        onPress={busy ? undefined : onCancel}
+      >
         <Pressable style={styles.sheet} onPress={() => {}}>
           <View style={styles.sheetHeader}>
             <Text style={styles.sheetTitle}>Unsaved changes</Text>
@@ -3500,14 +3510,9 @@ function EditInner({ quotation, onClose, onSaved }) {
                 ]}
               >
                 <View
-                  style={[
-                    styles.levelDot,
-                    { backgroundColor: levelMeta.tint },
-                  ]}
+                  style={[styles.levelDot, { backgroundColor: levelMeta.tint }]}
                 />
-                <Text
-                  style={[styles.levelPillText, { color: levelMeta.tint }]}
-                >
+                <Text style={[styles.levelPillText, { color: levelMeta.tint }]}>
                   {levelMeta.label}
                 </Text>
               </View>
@@ -3984,9 +3989,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                   {totals.discount > 0 ? (
                     <View style={styles.metric}>
                       <Text style={styles.metricLabel}>Discount</Text>
-                      <Text
-                        style={[styles.metricValue, styles.metricDiscount]}
-                      >
+                      <Text style={[styles.metricValue, styles.metricDiscount]}>
                         −{formatAmount(totals.discount)}
                       </Text>
                     </View>
@@ -3995,9 +3998,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                   {totals.advance > 0 ? (
                     <View style={styles.metric}>
                       <Text style={styles.metricLabel}>Advance</Text>
-                      <Text
-                        style={[styles.metricValue, styles.metricDiscount]}
-                      >
+                      <Text style={[styles.metricValue, styles.metricDiscount]}>
                         {formatAmount(totals.advance)}
                       </Text>
                       <Text style={styles.metricUnit}>received</Text>
@@ -4013,9 +4014,7 @@ function EditInner({ quotation, onClose, onSaved }) {
 
                   {totals.advance > 0 ? (
                     <View style={[styles.metric, styles.metricRemaining]}>
-                      <Text style={styles.metricRemainingLabel}>
-                        Remaining
-                      </Text>
+                      <Text style={styles.metricRemainingLabel}>Remaining</Text>
                       <Text style={styles.metricRemainingValue}>
                         {formatAmount(totals.remaining)}
                       </Text>
@@ -4265,8 +4264,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                           key={cell.key}
                           style={[
                             styles.metricGridCell,
-                            ci < row.length - 1 &&
-                              styles.metricGridCellDivider,
+                            ci < row.length - 1 && styles.metricGridCellDivider,
                             cell.type === "button" && { padding: 0 },
                           ]}
                         >
