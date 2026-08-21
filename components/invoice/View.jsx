@@ -102,6 +102,7 @@ export default function View({ invoice, onClose, onError }) {
   );
 
   const id = invoice?.invoiceId;
+  const displayId = invoice?.displayInvoiceId ?? id;
   const remaining = Number(invoice?.remainingPayment || 0);
   const settled = remaining <= 0;
 
@@ -141,7 +142,7 @@ export default function View({ invoice, onClose, onError }) {
     setBusy(null);
     if (!file) return;
 
-    const line = `INV-${id}${
+    const line = `INV-${displayId}${
       invoice?.customerName ? ` · ${invoice.customerName}` : ""
     }`;
     setPdf({
@@ -150,7 +151,7 @@ export default function View({ invoice, onClose, onError }) {
       message: `Invoice for ${line}`,
       file,
     });
-  }, [busy, getPdfBytes, id, invoice]);
+  }, [busy, getPdfBytes, displayId, invoice]);
 
   /* ── header ───────────────────────────────────────────────────────────── */
   const statusMeta = statusOf(invoice);
@@ -166,7 +167,7 @@ export default function View({ invoice, onClose, onError }) {
           {invoice?.customerName || "Unnamed customer"}
         </Text>
         <RNView style={styles.headerMeta}>
-          <Text style={styles.headerSub}>INV-{id}</Text>
+          <Text style={styles.headerSub}>INV-{displayId}</Text>
           <Text style={styles.headerDot}>·</Text>
           <Text style={styles.headerSub}>{formatDate(invoice?.createdAt)}</Text>
         </RNView>
@@ -230,6 +231,7 @@ export default function View({ invoice, onClose, onError }) {
           text: invoice?.assignedUserName || "Unassigned",
         },
         { label: "Unit", text: invoice?.unitName || "—" },
+        { label: "Company ID", text: String(invoice?.companyId ?? "—") },
         { label: "Mobile", text: invoice?.customerNumber || "—" },
         { label: "Regular", text: String(invoice?.regularPlants ?? 0) },
         { label: "Special", text: String(invoice?.specialPlants ?? 0) },

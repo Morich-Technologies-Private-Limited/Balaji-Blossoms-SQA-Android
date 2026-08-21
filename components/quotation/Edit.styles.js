@@ -1008,6 +1008,44 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     moneyReadItem: { flexDirection: "row", alignItems: "center", gap: 6 },
     moneyReadText: { fontSize: 13, fontWeight: "600", color: "#334155" },
 
+    /* Advance ledger table: Name / Amount / Collection date / Mode. */
+    advanceTable: {
+      borderWidth: 1,
+      borderColor: BORDER,
+      borderRadius: 10,
+      overflow: "hidden",
+    },
+    advanceTableRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      borderTopWidth: 1,
+      borderTopColor: BORDER,
+      gap: 6,
+    },
+    advanceTableRowHead: {
+      borderTopWidth: 0,
+      backgroundColor: FILL,
+    },
+    advanceTableCellName: { flex: 1.3 },
+    advanceTableCellAmount: { flex: 1 },
+    advanceTableCellDate: { flex: 1 },
+    advanceTableCellMode: { flex: 0.9 },
+    advanceTableHeadText: {
+      fontSize: 10.5,
+      fontWeight: "700",
+      color: MUTED,
+      textTransform: "uppercase",
+      letterSpacing: 0.3,
+    },
+    advanceTableCellText: {
+      fontSize: 12.5,
+      fontWeight: "600",
+      color: TEXT,
+    },
+    advanceTableCellMuted: { color: FAINT, fontWeight: "500" },
+
     /* On large screens the metric strip and the buttons share one row.
        The metric strip itself lays its items out horizontally so the whole
        footer stays a slim band (see reference image 2). */
@@ -1660,6 +1698,8 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
     reasonChipHover: { borderColor: NAVY, backgroundColor: NAVY_TINT },
     reasonChipText: { fontSize: 12, fontWeight: "700", color: "#475569" },
+    reasonChipActive: { borderColor: NAVY, backgroundColor: NAVY_TINT },
+    reasonChipTextActive: { color: NAVY },
 
     reasonActions: {
       flexShrink: 0,

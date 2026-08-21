@@ -40,13 +40,13 @@ import makeStyles from "./QuotationViewList.styles";
 const LEVELS = [
   { key: "ALL", label: "All" },
   { key: "DRAFT", label: "Draft" },
-  { key: "DELIVERY_SHADE", label: "Delivery shade" },
+  { key: "DELIVERY_SHADE", label: "Loading shade" },
   { key: "INVOICE_GENERATED", label: "Invoiced" },
 ];
 
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
-  DELIVERY_SHADE: { label: "Delivery shade", tint: "#0F4776" },
+  DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Invoiced", tint: "#5B8E2E" },
 };
 

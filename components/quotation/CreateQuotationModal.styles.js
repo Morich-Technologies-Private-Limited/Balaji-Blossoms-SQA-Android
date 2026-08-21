@@ -347,44 +347,61 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
       color: ORANGE,
     },
 
-    /* ── company picker ── */
-    chipRow: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 10,
-    },
-    chip: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 8,
-      minHeight: 46,
-      flexGrow: 1,
-      flexBasis: large ? "30%" : "46%",
-      paddingHorizontal: 14,
-      paddingVertical: 10,
+    /* ── company picker (dropdown) ── */
+    selectTrigger: {
+      minHeight: controlHeight,
       borderRadius: 14,
+      backgroundColor: INPUT_FILL,
       borderWidth: 1,
       borderColor: BORDER,
-      backgroundColor: INPUT_FILL,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
     },
-    chipHover: {
+    selectTriggerHover: {
       borderColor: NAVY,
       backgroundColor: SURFACE,
     },
-    chipActive: {
+    selectTriggerOpen: {
       borderColor: NAVY,
-      backgroundColor: NAVY,
+      backgroundColor: SURFACE,
     },
-    chipText: {
-      flexShrink: 1,
-      fontSize: 14,
+    selectValue: {
+      flex: 1,
+      fontSize: isDesktop ? 16 : 15,
       fontWeight: "700",
       color: TEXT,
     },
-    chipTextActive: {
-      color: "#FFFFFF",
+    selectPlaceholder: {
+      fontWeight: "400",
+      color: PLACEHOLDER,
     },
-    chipBadge: {
+    companyScroll: {
+      maxHeight: 220,
+    },
+    companyOption: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      minHeight: 48,
+      paddingVertical: 11,
+      paddingHorizontal: 14,
+      borderBottomWidth: 1,
+      borderBottomColor: GRID,
+    },
+    companyOptionText: {
+      flex: 1,
+      fontSize: 14.5,
+      fontWeight: "600",
+      color: TEXT,
+    },
+    companyOptionTextActive: {
+      fontWeight: "800",
+      color: NAVY_DARK,
+    },
+    companyBadge: {
       fontSize: 9.5,
       fontWeight: "800",
       letterSpacing: 0.6,
@@ -394,10 +411,6 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
       paddingVertical: 3,
       borderRadius: 999,
       overflow: "hidden",
-    },
-    chipBadgeActive: {
-      color: NAVY_DARK,
-      backgroundColor: "#FFFFFF",
     },
 
     /* ── error ── */

@@ -16,7 +16,10 @@ export const GET_OFFER_URL = `${API_BASE_URL}/quotation/getOffer`;
 export const SEARCH_PLANTS_URL = `${API_BASE_URL}/plants/searchPlants`;
 export const SPECIAL_PLANT_BY_BARCODE_URL = `${API_BASE_URL}/plants/getSpecialPlantByBarcodeId`;
 export const PACKING_LIST_URL = `${API_BASE_URL}/info/packingList`;
-export const FIND_COMPANY_URL = `${QUOTATION_BASE}/info/find/company`;
+export const FIND_COMPANY_URL = `${API_BASE_URL}/info/find/company`;
+export const FIND_ALL_STATES_URL = `${API_BASE_URL}/info/findAllStates`;
+export const FIND_CITIES_BY_STATE_URL = `${API_BASE_URL}/info/findCitiesByStates`;
+
 export const CREATE_CUSTOMER_URL = `${API_BASE_URL}/customer/create`;
 export const CUSTOMER_SEARCH_URL = `${API_BASE_URL}/customer/search`;
 

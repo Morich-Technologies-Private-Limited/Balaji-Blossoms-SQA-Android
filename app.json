@@ -8,22 +8,26 @@
     "scheme": "sqaapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+
     "ios": {
       "supportsTablet": true
     },
+
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "backgroundImage": "./assets/images/app_logo.png"
+        "backgroundColor": "#061B3A",
+        "foregroundImage": "./assets/images/foreground.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.balajiblossoms.sqaapp"
     },
+
     "web": {
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
+
     "plugins": [
       "expo-router",
       [
@@ -40,6 +44,7 @@
       ],
       "expo-secure-store"
     ],
+
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true

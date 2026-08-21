@@ -27,12 +27,12 @@ import {
 import { updateQuotationPlants } from "../../api/updateQuotation";
 
 import PdfShareSheet from "../../utility/PdfShareSheet";
-import { getCurrentUser } from "../../utility/secureStorage";
+import { getCurrentRole, getCurrentUser } from "../../utility/secureStorage";
 import makeStyles from "./Edit.styles";
 
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
-  DELIVERY_SHADE: { label: "Delivery shade", tint: "#0F4776" },
+  DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Invoiced", tint: "#16A34A" },
 };
 
@@ -50,6 +50,21 @@ const CHOICE_OPTIONS = [
   { value: false, label: "No", hint: "Added by the nursery" },
   { value: true, label: "Yes", hint: "The customer asked for it" },
 ];
+
+/* Advance payments are collected as CASH, UPI or CHEQUE. */
+const TRANSACTION_MODES = [
+  { value: "CASH", label: "Cash" },
+  { value: "UPI", label: "UPI" },
+  { value: "CHEQUE", label: "Cheque" },
+  { value: "CARD", label: "Card" },
+  { value: "BANK_TRANSFER", label: "Bank transfer" },
+  { value: "DD", label: "DD" },
+];
+
+const transactionModeLabel = (value) =>
+  TRANSACTION_MODES.find((option) => option.value === value)?.label ||
+  value ||
+  "";
 
 /* Offered in the reason popups as one-tap fills. */
 const REASON_PRESETS = [
@@ -173,10 +188,10 @@ const specialFromRecord = (record) => ({
 });
 
 /** Jackson serialises `isSelectedByCustomer` both ways depending on config.
-    Unlike before, an absent value now means NO — new rows are the nursery's
-    until somebody says otherwise. */
+    An absent value means YES — rows are the customer's pick until somebody
+    says otherwise. */
 const chosenByCustomer = (source) =>
-  source?.selectedByCustomer ?? source?.isSelectedByCustomer ?? false;
+  source?.selectedByCustomer ?? source?.isSelectedByCustomer ?? true;
 
 const subtitleOf = (source, seedling) =>
   source?.botanicalName ||
@@ -302,18 +317,25 @@ const signatureOf = (lines) =>
 /** The whole saveable document: the lines, the special plants, plus the
     quotation-level money fields. Used for change tracking so a discount, a
     transport edit, an advance payment, or a scanned special plant alone still
-    counts as dirty. */
+    counts as dirty.
+
+    `advance` / `advanceMode` describe only the acting user's own row in the
+    advance ledger — every collector's row is tracked and saved separately,
+    so nobody's edit can be a no-op that silently drops someone else's row. */
 const stateSignatureOf = (
   lines,
   discount,
   remark,
   transport,
   advance,
+  advanceMode,
   specials,
 ) =>
   `${signatureOf(lines)}|${toMoney(discount)}|${String(
     remark ?? "",
-  ).trim()}|${toMoney(transport)}|${toMoney(advance)}|${(specials || [])
+  ).trim()}|${toMoney(transport)}|${toMoney(advance)}|${advanceMode || ""}|${(
+    specials || []
+  )
     .map((special) => special.barcodeId)
     .sort()
     .join(",")}`;
@@ -500,15 +522,29 @@ function TransportModal({ styles, initialTransport, onApply, onClose }) {
 }
 
 /* ── advance payment modal ───────────────────────────────────────────
-   One field: an advance already collected from the customer. It reduces the
-   remaining payable, but never the grand total itself. */
-function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
+   The advance is a ledger, one row per collector, and this modal only ever
+   edits the row belonging to the person currently signed in — nobody can
+   touch a colleague's collection. `otherTotal` is what everyone else has
+   already collected, shown for context and folded into the grand-total cap. */
+function AdvanceModal({
+  styles,
+  grand,
+  otherTotal,
+  entries,
+  initialAdvance,
+  initialMode,
+  collectorName,
+  onApply,
+  onClose,
+}) {
   const C = styles.colors;
   const [advance, setAdvance] = useState(initialAdvance);
+  const [mode, setMode] = useState(initialMode || "CASH");
 
   const value = toMoney(advance);
-  const overTotal = value > grand;
-  const remaining = Math.max(0, grand - value);
+  const combined = otherTotal + value;
+  const overTotal = combined > grand;
+  const remaining = Math.max(0, grand - combined);
 
   return (
     <Modal transparent animationType="fade" visible onRequestClose={onClose}>
@@ -517,11 +553,100 @@ function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
           <View style={styles.sheetHeader}>
             <Text style={styles.sheetTitle}>Advance payment</Text>
             <Text style={styles.sheetSubtitle}>
-              Amount already collected from the customer
+              Your collection as {collectorName || "the signed-in user"}
             </Text>
           </View>
 
           <View style={styles.adjustBody}>
+            {entries && entries.length > 0 ? (
+              <View style={styles.adjustField}>
+                <View style={styles.moneyHead}>
+                  <Ionicons name="people-outline" size={15} color={C.MUTED} />
+                  <Text style={styles.moneyLabel}>Advance ledger</Text>
+                </View>
+                <View style={styles.advanceTable}>
+                  <View
+                    style={[styles.advanceTableRow, styles.advanceTableRowHead]}
+                  >
+                    <Text
+                      style={[
+                        styles.advanceTableHeadText,
+                        styles.advanceTableCellName,
+                      ]}
+                    >
+                      Name
+                    </Text>
+                    <Text
+                      style={[
+                        styles.advanceTableHeadText,
+                        styles.advanceTableCellAmount,
+                      ]}
+                    >
+                      Amount
+                    </Text>
+                    <Text
+                      style={[
+                        styles.advanceTableHeadText,
+                        styles.advanceTableCellDate,
+                      ]}
+                    >
+                      Collection date
+                    </Text>
+                    <Text
+                      style={[
+                        styles.advanceTableHeadText,
+                        styles.advanceTableCellMode,
+                      ]}
+                    >
+                      Mode
+                    </Text>
+                  </View>
+                  {entries.map((row) => (
+                    <View key={row.key} style={styles.advanceTableRow}>
+                      <Text
+                        style={[
+                          styles.advanceTableCellText,
+                          styles.advanceTableCellName,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {row.name}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.advanceTableCellText,
+                          styles.advanceTableCellAmount,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {formatAmount(row.amount)}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.advanceTableCellText,
+                          styles.advanceTableCellDate,
+                          !row.date && styles.advanceTableCellMuted,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {row.date ? formatDate(row.date) : "—"}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.advanceTableCellText,
+                          styles.advanceTableCellMode,
+                          !row.mode && styles.advanceTableCellMuted,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {row.mode || "—"}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            ) : null}
+
             <View style={styles.adjustField}>
               <View style={styles.moneyHead}>
                 <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
@@ -546,7 +671,7 @@ function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
 
               {overTotal ? (
                 <Text style={styles.adjustError}>
-                  The advance is more than the grand total (
+                  The combined advance is more than the grand total (
                   {formatAmount(grand)}).
                 </Text>
               ) : (
@@ -557,6 +682,42 @@ function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
                   </Text>
                 </View>
               )}
+            </View>
+
+            <View style={styles.adjustField}>
+              <View style={styles.moneyHead}>
+                <Ionicons name="card-outline" size={15} color={C.NAVY} />
+                <Text style={styles.moneyLabel}>Collected via</Text>
+              </View>
+              <View style={styles.reasonChipRow}>
+                {TRANSACTION_MODES.map((option) => {
+                  const active = option.value === mode;
+                  return (
+                    <Pressable
+                      key={option.value}
+                      style={({ hovered, pressed }) => [
+                        styles.reasonChip,
+                        active && styles.reasonChipActive,
+                        (hovered || pressed) &&
+                          !active &&
+                          styles.reasonChipHover,
+                      ]}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: active }}
+                      onPress={() => setMode(option.value)}
+                    >
+                      <Text
+                        style={[
+                          styles.reasonChipText,
+                          active && styles.reasonChipTextActive,
+                        ]}
+                      >
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
             </View>
           </View>
 
@@ -577,7 +738,7 @@ function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
                 (hovered || pressed) && !overTotal && styles.primaryButtonHover,
                 overTotal && styles.primaryButtonDisabled,
               ]}
-              onPress={() => onApply(value > 0 ? String(value) : "")}
+              onPress={() => onApply(value > 0 ? String(value) : "", mode)}
               disabled={overTotal}
             >
               <Text style={styles.modalApplyText}>APPLY</Text>
@@ -1287,7 +1448,7 @@ function CloseConfirmModal({
  * at save. Deletes past Draft are gated by their own reason modal. Once
  * invoiced — or when access is READ — the screen is read-only.
  *
- * `selectedByCustomer` is a Yes / No dropdown. New rows default to No.
+ * `selectedByCustomer` is a Yes / No dropdown. New rows default to Yes.
  *
  * Saving is deliberately inert: SAVE CHANGES, MOVE TO LOADING SHADE and
  * GENERATE INVOICE all call `updateQuotationPlants` and stop. The modal never
@@ -1318,10 +1479,18 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   /* Access control. Starts READ so the screen is locked until the check
      resolves; only an explicit EDIT grant unlocks editing. `accessResolved`
-     avoids a flash of an editable grid before the answer lands. */
+     avoids a flash of an editable grid before the answer lands.
+
+     A SALES-role user gets EDIT on every quotation, not just their own — the
+     sales team works each other's quotations (add/remove plants, quantities,
+     move to shade, add their own advance payment). That does not extend to
+     someone else's already-collected advance row: that lock is keyed to the
+     collecting user's email, not the access level, so it holds regardless
+     of role. */
   const [access, setAccess] = useState("READ");
   const [accessResolved, setAccessResolved] = useState(false);
-  const canEdit = access === "EDIT";
+  const [role, setRole] = useState(null);
+  const canEdit = access === "EDIT" || role === "SALES";
 
   const isDraft = level === "DRAFT";
   const isDelivery = level === "DELIVERY_SHADE";
@@ -1334,16 +1503,6 @@ function EditInner({ quotation, onClose, onSaved }) {
   const showChecks = canEdit && isDelivery; // tick boxes live in the action column
   /* Draft is not history. Nothing before this point is audited or reasoned. */
   const auditActive = !isDraft;
-
-  /* The advance is only editable in Draft, and even then only in two cases:
-     nothing has been collected yet (advancePayment == 0), or it was collected
-     today and is still same-day editable (advancePaymentDate is today). Once
-     the quotation leaves Draft, or an advance was taken on an earlier day, it
-     is locked. */
-  const advanceUnlocked =
-    toMoney(quotation?.advancePayment) === 0 ||
-    isToday(quotation?.advancePaymentDate);
-  const canEditAdvance = canEditTotals && isDraft && advanceUnlocked;
 
   const levelMeta = LEVEL_META[level] || {
     label: level || "—",
@@ -1382,10 +1541,16 @@ function EditInner({ quotation, onClose, onSaved }) {
     const value = toMoney(quotation?.transportationCost);
     return value > 0 ? String(value) : "";
   });
-  const [advance, setAdvance] = useState(() => {
-    const value = toMoney(quotation?.advancePayment);
-    return value > 0 ? String(value) : "";
-  });
+  /* The advance is a ledger, one row per collector (emailId, collectorName,
+     amount, collectionDate, transactionMode). `advance` / `advanceMode` hold
+     only the signed-in user's own draft row — which row that is depends on
+     `userId`, resolved asynchronously in the bootstrap effect below, so both
+     start empty and are hydrated (along with the baseline) once it resolves. */
+  const [advanceLedger, setAdvanceLedger] = useState(
+    () => quotation?.advancePaymentList || [],
+  );
+  const [advance, setAdvance] = useState("");
+  const [advanceMode, setAdvanceMode] = useState("CASH");
   const [transportOpen, setTransportOpen] = useState(false);
   const [discountOpen, setDiscountOpen] = useState(false);
   const [advanceOpen, setAdvanceOpen] = useState(false);
@@ -1401,13 +1566,17 @@ function EditInner({ quotation, onClose, onSaved }) {
     (quotation?.invoiceUpdateDetailList || []).map(auditFromRecord),
   );
 
+  /* Corrected once the signed-in user's own advance row is known — see the
+     bootstrap effect. Until then `advance`/`advanceMode` are still at their
+     empty defaults, so this matches and nothing reads as falsely dirty. */
   const baselineRef = useRef(
     stateSignatureOf(
       initialLines,
       quotation?.additionalDiscount,
       quotation?.additionalDiscountRemark,
       quotation?.transportationCost,
-      quotation?.advancePayment,
+      "",
+      "CASH",
       initialSpecials,
     ),
   );
@@ -1422,7 +1591,50 @@ function EditInner({ quotation, onClose, onSaved }) {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [userId, setUserId] = useState(null);
+  const [userName, setUserName] = useState(null);
   const [pdf, setPdf] = useState(null);
+
+  /* My own row in the advance ledger, and what everyone else has collected.
+     A row is only editable by the collector it belongs to, and only while
+     it's still same-day editable — never collected yet, or collected earlier
+     today. A row collected on an earlier day is locked, mirroring the
+     backend's rule. */
+  const myAdvanceEntry = useMemo(
+    () =>
+      advanceLedger.find((row) => norm(row?.emailId) === norm(userId)) || null,
+    [advanceLedger, userId],
+  );
+  const otherAdvanceTotal = useMemo(
+    () =>
+      advanceLedger
+        .filter((row) => norm(row?.emailId) !== norm(userId))
+        .reduce((sum, row) => sum + toMoney(row?.amount), 0),
+    [advanceLedger, userId],
+  );
+  const advanceUnlocked =
+    !myAdvanceEntry || isSameDay(myAdvanceEntry.collectionDate, new Date());
+  const canEditAdvance = canEditTotals && isDraft && advanceUnlocked;
+
+  /* One line per collector, for "who collected what" display. */
+  const advanceBreakdown = useMemo(
+    () =>
+      advanceLedger
+        .filter((row) => toMoney(row?.amount) > 0)
+        .map((row, index) => {
+          const mine = norm(row?.emailId) === norm(userId);
+          return {
+            key: row?.emailId || `advance-row-${index}`,
+            mine,
+            name: mine
+              ? "You"
+              : row?.collectorName || row?.emailId || "Unknown",
+            amount: toMoney(row?.amount),
+            date: row?.collectionDate || null,
+            mode: transactionModeLabel(row?.transactionMode),
+          };
+        }),
+    [advanceLedger, userId],
+  );
 
   /* The delete reason modal is a gate in front of a pending delete. */
   const [pendingDelete, setPendingDelete] = useState(null);
@@ -1437,20 +1649,22 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const searchTimer = useRef(null);
   const searchRef = useRef(null);
+  const bodyScrollRef = useRef(null);
 
   /* ── access check ─────────────────────────────────────────────────
      Runs once on open. Any non-EDIT answer (including an error or a missing
-     payload) leaves access at READ, so the safe default is read-only. */
+     payload) leaves access at READ, so the safe default is read-only — the
+     SALES-role override in `canEdit` above still applies on top of this. */
   useEffect(() => {
     let alive = true;
     (async () => {
       const id = quotation?.quotationId;
-      if (id == null) {
-        if (alive) setAccessResolved(true);
-        return;
-      }
-      const response = await getQuotationAccess(id);
+      const [response, currentRole] = await Promise.all([
+        id == null ? Promise.resolve(null) : getQuotationAccess(id),
+        getCurrentRole(),
+      ]);
       if (!alive) return;
+      setRole(currentRole || null);
       const granted =
         response?.status === "SUCCESS" ? response.payload?.accessLevel : null;
       setAccess(granted === "EDIT" ? "EDIT" : "READ");
@@ -1470,14 +1684,38 @@ function EditInner({ quotation, onClose, onSaved }) {
         fetchPackingList(),
       ]);
       if (!alive) return;
-      setUserId(user?.emailId || null);
+      const email = user?.emailId || null;
+      setUserId(email);
+      setUserName(user?.name || null);
       if (packingResponse?.status === "SUCCESS") {
         setPackings(packingResponse.payload || []);
       }
+
+      /* Now that the signed-in user is known, pull their own row (if any)
+         out of the advance ledger and correct the baseline to match, so the
+         screen doesn't read as dirty before anything has actually changed. */
+      const mine = (quotation?.advancePaymentList || []).find(
+        (row) => norm(row?.emailId) === norm(email),
+      );
+      const mineAmount = toMoney(mine?.amount);
+      const mineText = mineAmount > 0 ? String(mineAmount) : "";
+      const mineMode = mine?.transactionMode || "CASH";
+      setAdvance(mineText);
+      setAdvanceMode(mineMode);
+      baselineRef.current = stateSignatureOf(
+        initialLines,
+        quotation?.additionalDiscount,
+        quotation?.additionalDiscountRemark,
+        quotation?.transportationCost,
+        mineText,
+        mineMode,
+        initialSpecials,
+      );
     })();
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* ── plant search ────────────────────────────────────────────────── */
@@ -1716,13 +1954,17 @@ function EditInner({ quotation, onClose, onSaved }) {
         inventory[0] ||
         null;
 
-      setLines((prev) => {
-        const existing = prev.find(
-          (line) =>
-            line.plantId === plant.plantId &&
-            line.unitId === (preferred?.unitId ?? null),
-        );
+      /* Checked against the live `lines` state (not `prev` inside the updater
+         below) so the caller can know, synchronously, whether this tap grew
+         the list or just bumped an existing row's quantity — that's what
+         decides whether there's anything new at the bottom to scroll to. */
+      const existing = lines.find(
+        (line) =>
+          line.plantId === plant.plantId &&
+          line.unitId === (preferred?.unitId ?? null),
+      );
 
+      setLines((prev) => {
         if (existing) {
           return prev.map((line) =>
             line.key === existing.key
@@ -1762,12 +2004,12 @@ function EditInner({ quotation, onClose, onSaved }) {
             packingCharge,
             packingManual: false,
             packingCustom: false,
-            /* new rows are the nursery's until told otherwise */
-            selectedByCustomer: false,
+            /* new rows are the customer's pick until told otherwise */
+            selectedByCustomer: true,
             baseQuantity: "0",
             basePackingName: packingName,
             basePackingCharge: packingCharge,
-            baseSelectedByCustomer: false,
+            baseSelectedByCustomer: true,
             baseUnitId: preferred?.unitId ?? null,
             baseUnitName: preferred?.unitName ?? null,
             fieldReasons: {},
@@ -1779,8 +2021,18 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       setTerm("");
       setResults([]);
+
+      /* A brand-new row lands at the bottom of the list — on the mobile card
+         layout, scroll it into view so the operator sees what they just
+         added instead of having to hunt for it. The delay gives the new
+         card a chance to actually lay out before we scroll to it. */
+      if (!existing && isCardMode) {
+        setTimeout(() => {
+          bodyScrollRef.current?.scrollToEnd({ animated: true });
+        }, 50);
+      }
     },
-    [quotation?.unitId],
+    [quotation?.unitId, lines, isCardMode],
   );
 
   /* ── special plants (barcode) ────────────────────────────────────── */
@@ -1924,7 +2176,7 @@ function EditInner({ quotation, onClose, onSaved }) {
     const beforeDiscount = subtotal + transportValue;
     const discountValue = Math.min(toMoney(discount), beforeDiscount);
     const grand = beforeDiscount - discountValue;
-    const advanceValue = Math.min(toMoney(advance), grand);
+    const advanceValue = Math.min(otherAdvanceTotal + toMoney(advance), grand);
 
     return {
       rows: lines.length,
@@ -1941,7 +2193,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       advance: advanceValue,
       remaining: Math.max(0, grand - advanceValue),
     };
-  }, [lines, specials, discount, transport, advance]);
+  }, [lines, specials, discount, transport, advance, otherAdvanceTotal]);
 
   /* ── change tracking ─────────────────────────────────────────────── */
   const dirty = useMemo(
@@ -1952,9 +2204,18 @@ function EditInner({ quotation, onClose, onSaved }) {
         discountRemark,
         transport,
         advance,
+        advanceMode,
         specials,
       ) !== baselineRef.current,
-    [lines, discount, discountRemark, transport, advance, specials],
+    [
+      lines,
+      discount,
+      discountRemark,
+      transport,
+      advance,
+      advanceMode,
+      specials,
+    ],
   );
 
   const changedLines = useMemo(() => lines.filter(lineChanged), [lines]);
@@ -1979,7 +2240,9 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const discountEntered = toMoney(discount);
   const transportEntered = toMoney(transport);
-  const advanceEntered = toMoney(advance);
+  /* The combined advance across every collector, capped at the grand total —
+     what the operator actually sees as "advance received". */
+  const advanceEntered = totals.advance;
   const discountRemarkMissing = discountEntered > 0 && !discountRemark.trim();
   const discountOverTotal = discountEntered > totals.beforeDiscount;
 
@@ -2017,8 +2280,9 @@ function EditInner({ quotation, onClose, onSaved }) {
     setDiscountOpen(false);
   }, []);
 
-  const applyAdvance = useCallback((value) => {
+  const applyAdvance = useCallback((value, mode) => {
     setAdvance(value);
+    setAdvanceMode(mode);
     setAdvanceOpen(false);
   }, []);
 
@@ -2069,13 +2333,21 @@ function EditInner({ quotation, onClose, onSaved }) {
       const nextRemark = payload.additionalDiscountRemark || "";
       const nextTransport = toMoney(payload.transportationCost);
       const nextTransportText = nextTransport > 0 ? String(nextTransport) : "";
-      const nextAdvance = toMoney(payload.advancePayment);
+
+      const nextLedger = payload.advancePaymentList || [];
+      const mine = nextLedger.find(
+        (row) => norm(row?.emailId) === norm(userId),
+      );
+      const nextAdvance = toMoney(mine?.amount);
       const nextAdvanceText = nextAdvance > 0 ? String(nextAdvance) : "";
+      const nextAdvanceMode = mine?.transactionMode || "CASH";
 
       setDiscount(nextDiscountText);
       setDiscountRemark(nextRemark);
       setTransport(nextTransportText);
+      setAdvanceLedger(nextLedger);
       setAdvance(nextAdvanceText);
+      setAdvanceMode(nextAdvanceMode);
 
       setAuditTrail(
         (payload.invoiceUpdateDetailList || []).map(auditFromRecord),
@@ -2090,10 +2362,11 @@ function EditInner({ quotation, onClose, onSaved }) {
         nextRemark,
         nextTransportText,
         nextAdvanceText,
+        nextAdvanceMode,
         nextSpecials,
       );
     },
-    [level],
+    [level, userId],
   );
 
   /* ── save ────────────────────────────────────────────────────────────
@@ -2149,7 +2422,20 @@ function EditInner({ quotation, onClose, onSaved }) {
         additionalDiscountRemark:
           discountAmount > 0 ? discountRemark.trim() : null,
         transportationCost: transportAmount,
-        advanceAmount,
+        /* The flat advanceAmount field is gone — the backend only reads the
+           ledger now. Only the signed-in user's own row is ever sent, so a
+           save can never touch a colleague's collected advance; resending an
+           unchanged amount is a no-op on the server. */
+        advanceTransactionList: userId
+          ? [
+              {
+                emailId: userId,
+                collectorName: userName || userId,
+                amount: advanceAmount,
+                transactionMode: advanceMode,
+              },
+            ]
+          : [],
         /* Delete reasons aren't tied to a surviving row, so they ride along at
            the document level when a removal triggered this save. */
         deleteReason: deleteReason || null,
@@ -2171,12 +2457,29 @@ function EditInner({ quotation, onClose, onSaved }) {
         } else {
           // No echo from the server: settle locally so the screen goes clean.
           setLines((prev) => prev.map(settleLine));
+          setAdvanceLedger((prev) => {
+            const others = prev.filter(
+              (row) => norm(row?.emailId) !== norm(userId),
+            );
+            if (advanceAmount <= 0) return others;
+            return [
+              ...others,
+              {
+                emailId: userId,
+                collectorName: userName || userId,
+                amount: advanceAmount,
+                collectionDate: new Date().toISOString(),
+                transactionMode: advanceMode,
+              },
+            ];
+          });
           baselineRef.current = stateSignatureOf(
             lines.map(settleLine),
             discount,
             discountRemark,
             transport,
             advance,
+            advanceMode,
             specials,
           );
         }
@@ -2195,11 +2498,13 @@ function EditInner({ quotation, onClose, onSaved }) {
       specials,
       quotation,
       userId,
+      userName,
       onSaved,
       discount,
       discountRemark,
       transport,
       advance,
+      advanceMode,
       auditActive,
       rehydrate,
     ],
@@ -3669,6 +3974,7 @@ function EditInner({ quotation, onClose, onSaved }) {
 
         {/* ── scrollable body ── */}
         <ScrollView
+          ref={bodyScrollRef}
           style={styles.bodyScroll}
           contentContainerStyle={styles.bodyContent}
           keyboardShouldPersistTaps="handled"
@@ -3846,14 +4152,16 @@ function EditInner({ quotation, onClose, onSaved }) {
               )}
 
               {advanceEntered > 0 && !canEditAdvance ? (
-                /* An advance taken on an earlier day is locked. Show it, with
-                   the date it was collected, but don't allow an edit. */
+                /* Either the quotation has left Draft, or the signed-in
+                   user's own row was collected on an earlier day. Show the
+                   total, with the date only when it's actually theirs to
+                   show, but don't allow an edit. */
                 <View style={[styles.adjustChip, styles.adjustChipLocked]}>
                   <Ionicons name="lock-closed" size={13} color={C.MUTED} />
                   <Text style={styles.adjustChipText} numberOfLines={1}>
                     Advance {formatAmount(advanceEntered)}
-                    {quotation?.advancePaymentDate
-                      ? ` · ${formatDate(quotation.advancePaymentDate)}`
+                    {myAdvanceEntry?.collectionDate
+                      ? ` · ${formatDate(myAdvanceEntry.collectionDate)}`
                       : ""}
                   </Text>
                 </View>
@@ -3920,6 +4228,26 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </Text>
                 </View>
               ) : null}
+            </View>
+          ) : null}
+
+          {/* Who collected the advance — every ledger row, however many
+              collectors, so it's always clear whose money is whose. */}
+          {advanceBreakdown.length > 0 ? (
+            <View style={styles.moneyReadBar}>
+              {advanceBreakdown.map((row) => (
+                <View key={row.key} style={styles.moneyReadItem}>
+                  <Ionicons
+                    name="person-circle-outline"
+                    size={14}
+                    color={C.NAVY}
+                  />
+                  <Text style={styles.moneyReadText}>
+                    {row.name} · {formatAmount(row.amount)}
+                    {row.mode ? ` · ${row.mode}` : ""}
+                  </Text>
+                </View>
+              ))}
             </View>
           ) : null}
 
@@ -4079,7 +4407,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                       />
                     )}
                     <Text style={styles.primaryTitle}>
-                      {busy === "shade" ? "MOVING…" : "MOVE TO LOADING SHADE"}
+                      {busy === "shade" ? "PROCESSING..." : "Process"}
                     </Text>
                   </Pressable>
                 ) : null}
@@ -4217,7 +4545,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                   loading: busy === "shade",
                   onPress: runMove,
                   icon: "arrow-forward",
-                  label: busy === "shade" ? "MOVING…" : "MOVE SHADE",
+                  label: busy === "shade" ? "PROCESSING..." : "Process",
                 });
               }
               if (showChecks) {
@@ -4399,7 +4727,11 @@ function EditInner({ quotation, onClose, onSaved }) {
         <AdvanceModal
           styles={styles}
           grand={totals.grand}
+          otherTotal={otherAdvanceTotal}
+          entries={advanceBreakdown}
           initialAdvance={advance}
+          initialMode={advanceMode}
+          collectorName={userName || userId}
           onApply={applyAdvance}
           onClose={() => setAdvanceOpen(false)}
         />

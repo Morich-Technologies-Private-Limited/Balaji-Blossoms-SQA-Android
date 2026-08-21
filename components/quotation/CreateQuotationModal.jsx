@@ -28,6 +28,9 @@ const MIN_QUERY = 2;
 const isDefaultCompany = (company) =>
   company?.isDefault === true || company?.default === true;
 
+const companyLabel = (company) =>
+  company?.companyName || `Company ${company?.companyId}`;
+
 /* The detail rows shown once a customer is picked. Each pulls a field off the
    CustomerDto; empty values are rendered as an em dash. `full: true` rows span
    the whole width (long values like address). */
@@ -93,6 +96,7 @@ export default function CreateQuotationModal({
   const [companiesLoading, setCompaniesLoading] = useState(false);
   const [companiesError, setCompaniesError] = useState(null);
   const [companyId, setCompanyId] = useState(null);
+  const [companyOpen, setCompanyOpen] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -140,6 +144,7 @@ export default function CreateQuotationModal({
     setSelected(null);
     setCompanies([]);
     setCompanyId(null);
+    setCompanyOpen(false);
     setCompaniesError(null);
     setSubmitting(false);
     setError(null);
@@ -219,8 +224,12 @@ export default function CreateQuotationModal({
 
   const pickCompany = (id) => {
     setCompanyId(id);
+    setCompanyOpen(false);
     setError(null);
   };
+
+  const selectedCompany =
+    companies.find((company) => company.companyId === companyId) || null;
 
   const canSubmit = !!selected && !!userId && companyId != null && !submitting;
 
@@ -533,47 +542,88 @@ export default function CreateQuotationModal({
                   </Text>
                 </View>
               ) : (
-                <View style={styles.chipRow}>
-                  {companies.map((company) => {
-                    const active = company.companyId === companyId;
-                    return (
-                      <Pressable
-                        key={company.companyId}
-                        onPress={() => pickCompany(company.companyId)}
-                        style={({ hovered, pressed }) => [
-                          styles.chip,
-                          !active && (hovered || pressed) && styles.chipHover,
-                          active && styles.chipActive,
-                        ]}
+                <View>
+                  <Pressable
+                    onPress={() => setCompanyOpen((open) => !open)}
+                    style={({ hovered, pressed }) => [
+                      styles.selectTrigger,
+                      (hovered || pressed) && styles.selectTriggerHover,
+                      companyOpen && styles.selectTriggerOpen,
+                    ]}
+                  >
+                    <Ionicons
+                      name="business-outline"
+                      size={styles.iconSize}
+                      color={C.PLACEHOLDER}
+                    />
+                    <Text
+                      numberOfLines={1}
+                      style={[
+                        styles.selectValue,
+                        !selectedCompany && styles.selectPlaceholder,
+                      ]}
+                    >
+                      {selectedCompany
+                        ? companyLabel(selectedCompany)
+                        : "Select a company"}
+                    </Text>
+                    {selectedCompany && isDefaultCompany(selectedCompany) ? (
+                      <Text style={styles.companyBadge}>DEFAULT</Text>
+                    ) : null}
+                    <Ionicons
+                      name={companyOpen ? "chevron-up" : "chevron-down"}
+                      size={styles.iconSize}
+                      color={C.PLACEHOLDER}
+                    />
+                  </Pressable>
+
+                  {companyOpen ? (
+                    <View style={styles.dropdown}>
+                      <ScrollView
+                        style={styles.companyScroll}
+                        keyboardShouldPersistTaps="handled"
+                        nestedScrollEnabled
                       >
-                        <Ionicons
-                          name={active ? "checkmark-circle" : "ellipse-outline"}
-                          size={17}
-                          color={active ? "#FFFFFF" : C.PLACEHOLDER}
-                        />
-                        <Text
-                          numberOfLines={1}
-                          style={[
-                            styles.chipText,
-                            active && styles.chipTextActive,
-                          ]}
-                        >
-                          {company.companyName ||
-                            `Company ${company.companyId}`}
-                        </Text>
-                        {isDefaultCompany(company) ? (
-                          <Text
-                            style={[
-                              styles.chipBadge,
-                              active && styles.chipBadgeActive,
-                            ]}
-                          >
-                            DEFAULT
-                          </Text>
-                        ) : null}
-                      </Pressable>
-                    );
-                  })}
+                        {companies.map((company, index) => {
+                          const active = company.companyId === companyId;
+                          return (
+                            <Pressable
+                              key={company.companyId}
+                              onPress={() => pickCompany(company.companyId)}
+                              style={({ hovered, pressed }) => [
+                                styles.companyOption,
+                                index === companies.length - 1 &&
+                                  styles.optionLast,
+                                (hovered || pressed) && styles.optionHover,
+                              ]}
+                            >
+                              <Ionicons
+                                name={
+                                  active
+                                    ? "checkmark-circle"
+                                    : "ellipse-outline"
+                                }
+                                size={18}
+                                color={active ? C.NAVY : C.PLACEHOLDER}
+                              />
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.companyOptionText,
+                                  active && styles.companyOptionTextActive,
+                                ]}
+                              >
+                                {companyLabel(company)}
+                              </Text>
+                              {isDefaultCompany(company) ? (
+                                <Text style={styles.companyBadge}>DEFAULT</Text>
+                              ) : null}
+                            </Pressable>
+                          );
+                        })}
+                      </ScrollView>
+                    </View>
+                  ) : null}
                 </View>
               )}
 
