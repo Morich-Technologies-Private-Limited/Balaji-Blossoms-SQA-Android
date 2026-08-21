@@ -60,7 +60,11 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
     },
     sheet: {
       width: "100%",
-      maxHeight: "100%",
+      /* sheetWrap is sized by its content, so a percentage maxHeight here has
+         nothing definite to resolve against. Shrinking is what actually keeps
+         the sheet inside sheetWrap's 90% cap. */
+      flexShrink: 1,
+      minHeight: 0,
       backgroundColor: SURFACE,
       borderRadius: 24,
       paddingTop: large ? 28 : 24,
@@ -116,8 +120,15 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
     },
 
     /* ── scrollable body ── */
+    /* flexShrink lets the body give way once the sheet hits its height cap —
+       without it the ScrollView keeps its full content height, overflows the
+       sheet, and everything past the cap (the rest of an open dropdown, the
+       CANCEL / CREATE row) is clipped by the sheet's overflow: hidden with no
+       way to scroll to it. */
     body: {
       flexGrow: 0,
+      flexShrink: 1,
+      minHeight: 0,
     },
     bodyContent: {
       paddingHorizontal: large ? 28 : 22,
