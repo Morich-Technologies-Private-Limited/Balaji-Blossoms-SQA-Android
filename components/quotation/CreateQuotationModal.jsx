@@ -54,8 +54,8 @@ const DETAIL_FIELDS = [
 /**
  * Create-quotation popup.
  *
- * Flow: search customers by name / mobile / GST → pick one from the dropdown →
- * review the full customer details → pick the issuing company → create. The
+ * Flow: pick the issuing company → search customers by name / mobile / GST →
+ * pick one from the dropdown → review the full customer details → create. The
  * quotation is created against the selected customer, company, and the
  * signed-in user.
  *
@@ -235,8 +235,8 @@ export default function CreateQuotationModal({
 
   const handleSubmit = async () => {
     if (!canSubmit) {
-      if (!selected) setError("Search and select a customer first.");
-      else if (companyId == null) setError("Select a company first.");
+      if (companyId == null) setError("Select a company first.");
+      else if (!selected) setError("Search and select a customer first.");
       else if (!userId) setError("No signed-in user found. Sign in again.");
       return;
     }
@@ -295,7 +295,7 @@ export default function CreateQuotationModal({
               <View style={styles.headerText}>
                 <Text style={styles.title}>New quotation</Text>
                 <Text style={styles.subtitle}>
-                  Find a customer, then start their draft.
+                  Pick a company, find a customer, then start their draft.
                 </Text>
               </View>
               <Pressable onPress={onClose} hitSlop={10} style={styles.closeBtn}>
@@ -307,11 +307,129 @@ export default function CreateQuotationModal({
               style={styles.body}
               contentContainerStyle={styles.bodyContent}
               keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}
             >
+              {/* ── company ── */}
+              <Text style={styles.sectionLabel}>Company</Text>
+
+              {companiesLoading ? (
+                <View style={styles.readonlyRow}>
+                  <ActivityIndicator size="small" color={C.NAVY} />
+                  <Text style={styles.readonlyText}>Loading companies…</Text>
+                </View>
+              ) : companiesError ? (
+                <Pressable style={styles.readonlyRow} onPress={loadCompanies}>
+                  <Ionicons
+                    name="refresh-outline"
+                    size={styles.iconSize}
+                    color={C.ORANGE}
+                  />
+                  <Text
+                    style={[styles.readonlyText, styles.retryText]}
+                    numberOfLines={2}
+                  >
+                    {companiesError} Tap to retry.
+                  </Text>
+                </Pressable>
+              ) : companies.length === 0 ? (
+                <View style={styles.readonlyRow}>
+                  <Ionicons
+                    name="business-outline"
+                    size={styles.iconSize}
+                    color={C.PLACEHOLDER}
+                  />
+                  <Text style={styles.readonlyText}>
+                    No companies configured.
+                  </Text>
+                </View>
+              ) : (
+                <View>
+                  <Pressable
+                    onPress={() => setCompanyOpen((open) => !open)}
+                    style={({ hovered, pressed }) => [
+                      styles.selectTrigger,
+                      (hovered || pressed) && styles.selectTriggerHover,
+                      companyOpen && styles.selectTriggerOpen,
+                    ]}
+                  >
+                    <Ionicons
+                      name="business-outline"
+                      size={styles.iconSize}
+                      color={C.PLACEHOLDER}
+                    />
+                    <Text
+                      numberOfLines={1}
+                      style={[
+                        styles.selectValue,
+                        !selectedCompany && styles.selectPlaceholder,
+                      ]}
+                    >
+                      {selectedCompany
+                        ? companyLabel(selectedCompany)
+                        : "Select a company"}
+                    </Text>
+                    {selectedCompany && isDefaultCompany(selectedCompany) ? (
+                      <Text style={styles.companyBadge}>DEFAULT</Text>
+                    ) : null}
+                    <Ionicons
+                      name={companyOpen ? "chevron-up" : "chevron-down"}
+                      size={styles.iconSize}
+                      color={C.PLACEHOLDER}
+                    />
+                  </Pressable>
+
+                  {companyOpen ? (
+                    <View style={styles.dropdown}>
+                      <ScrollView
+                        style={styles.companyScroll}
+                        keyboardShouldPersistTaps="handled"
+                        nestedScrollEnabled
+                      >
+                        {companies.map((company, index) => {
+                          const active = company.companyId === companyId;
+                          return (
+                            <Pressable
+                              key={company.companyId}
+                              onPress={() => pickCompany(company.companyId)}
+                              style={({ hovered, pressed }) => [
+                                styles.companyOption,
+                                index === companies.length - 1 &&
+                                  styles.optionLast,
+                                (hovered || pressed) && styles.optionHover,
+                              ]}
+                            >
+                              <Ionicons
+                                name={
+                                  active
+                                    ? "checkmark-circle"
+                                    : "ellipse-outline"
+                                }
+                                size={18}
+                                color={active ? C.NAVY : C.PLACEHOLDER}
+                              />
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.companyOptionText,
+                                  active && styles.companyOptionTextActive,
+                                ]}
+                              >
+                                {companyLabel(company)}
+                              </Text>
+                              {isDefaultCompany(company) ? (
+                                <Text style={styles.companyBadge}>DEFAULT</Text>
+                              ) : null}
+                            </Pressable>
+                          );
+                        })}
+                      </ScrollView>
+                    </View>
+                  ) : null}
+                </View>
+              )}
+
               {/* ── search + dropdown ── */}
               {!selected ? (
-                <View style={styles.searchBlock}>
+                <View style={[styles.searchBlock, { marginTop: 20 }]}>
                   <Text style={styles.sectionLabel}>Customer</Text>
 
                   <View
@@ -445,7 +563,7 @@ export default function CreateQuotationModal({
                 </View>
               ) : (
                 /* ── selected customer details ── */
-                <View style={styles.detailBlock}>
+                <View style={[styles.detailBlock, { marginTop: 20 }]}>
                   <View style={styles.sectionHeadRow}>
                     <Text style={styles.sectionLabel}>Selected customer</Text>
                     <Pressable
@@ -503,127 +621,6 @@ export default function CreateQuotationModal({
                       ))}
                     </View>
                   </View>
-                </View>
-              )}
-
-              {/* ── company ── */}
-              <Text style={[styles.sectionLabel, { marginTop: 20 }]}>
-                Company
-              </Text>
-
-              {companiesLoading ? (
-                <View style={styles.readonlyRow}>
-                  <ActivityIndicator size="small" color={C.NAVY} />
-                  <Text style={styles.readonlyText}>Loading companies…</Text>
-                </View>
-              ) : companiesError ? (
-                <Pressable style={styles.readonlyRow} onPress={loadCompanies}>
-                  <Ionicons
-                    name="refresh-outline"
-                    size={styles.iconSize}
-                    color={C.ORANGE}
-                  />
-                  <Text
-                    style={[styles.readonlyText, styles.retryText]}
-                    numberOfLines={2}
-                  >
-                    {companiesError} Tap to retry.
-                  </Text>
-                </Pressable>
-              ) : companies.length === 0 ? (
-                <View style={styles.readonlyRow}>
-                  <Ionicons
-                    name="business-outline"
-                    size={styles.iconSize}
-                    color={C.PLACEHOLDER}
-                  />
-                  <Text style={styles.readonlyText}>
-                    No companies configured.
-                  </Text>
-                </View>
-              ) : (
-                <View>
-                  <Pressable
-                    onPress={() => setCompanyOpen((open) => !open)}
-                    style={({ hovered, pressed }) => [
-                      styles.selectTrigger,
-                      (hovered || pressed) && styles.selectTriggerHover,
-                      companyOpen && styles.selectTriggerOpen,
-                    ]}
-                  >
-                    <Ionicons
-                      name="business-outline"
-                      size={styles.iconSize}
-                      color={C.PLACEHOLDER}
-                    />
-                    <Text
-                      numberOfLines={1}
-                      style={[
-                        styles.selectValue,
-                        !selectedCompany && styles.selectPlaceholder,
-                      ]}
-                    >
-                      {selectedCompany
-                        ? companyLabel(selectedCompany)
-                        : "Select a company"}
-                    </Text>
-                    {selectedCompany && isDefaultCompany(selectedCompany) ? (
-                      <Text style={styles.companyBadge}>DEFAULT</Text>
-                    ) : null}
-                    <Ionicons
-                      name={companyOpen ? "chevron-up" : "chevron-down"}
-                      size={styles.iconSize}
-                      color={C.PLACEHOLDER}
-                    />
-                  </Pressable>
-
-                  {companyOpen ? (
-                    <View style={styles.dropdown}>
-                      <ScrollView
-                        style={styles.companyScroll}
-                        keyboardShouldPersistTaps="handled"
-                        nestedScrollEnabled
-                      >
-                        {companies.map((company, index) => {
-                          const active = company.companyId === companyId;
-                          return (
-                            <Pressable
-                              key={company.companyId}
-                              onPress={() => pickCompany(company.companyId)}
-                              style={({ hovered, pressed }) => [
-                                styles.companyOption,
-                                index === companies.length - 1 &&
-                                  styles.optionLast,
-                                (hovered || pressed) && styles.optionHover,
-                              ]}
-                            >
-                              <Ionicons
-                                name={
-                                  active
-                                    ? "checkmark-circle"
-                                    : "ellipse-outline"
-                                }
-                                size={18}
-                                color={active ? C.NAVY : C.PLACEHOLDER}
-                              />
-                              <Text
-                                numberOfLines={1}
-                                style={[
-                                  styles.companyOptionText,
-                                  active && styles.companyOptionTextActive,
-                                ]}
-                              >
-                                {companyLabel(company)}
-                              </Text>
-                              {isDefaultCompany(company) ? (
-                                <Text style={styles.companyBadge}>DEFAULT</Text>
-                              ) : null}
-                            </Pressable>
-                          );
-                        })}
-                      </ScrollView>
-                    </View>
-                  ) : null}
                 </View>
               )}
 
