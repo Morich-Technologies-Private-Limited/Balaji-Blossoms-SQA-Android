@@ -204,18 +204,31 @@ const subtitleOf = (source, seedling) =>
 const plantTitleWithSize = (line) =>
   line.size ? `${line.plantName} · ${line.size}` : line.plantName;
 
+/** How many plants a line comes to — trays × tray size for a seedling. This is
+    a head count for display (the seedling maths column, the quantity hint, the
+    quantity metric); it is never what the line is billed on. */
 const derivedQuantity = (line) => {
   const entered = toCount(line.quantity);
   const traySize = toCount(line.traySize);
   return line.seedling && traySize > 0 ? entered * traySize : entered;
 };
 
-const lineAmount = (line) => derivedQuantity(line) * toMoney(line.price);
+/** What a line is billed on. A seedling is priced per tray, so its billable
+    count is the tray count as entered — trayReserved in Draft, trayDelivered
+    once past it — and never the plants-per-tray total. Everything else is
+    priced per plant, where the two are the same number. */
+const billableQuantity = (line) => toCount(line.quantity);
+
+/** line.price is already the after-discount unit price (see priceOf). */
+const lineAmount = (line) => billableQuantity(line) * toMoney(line.price);
 
 const linePacking = (line) =>
   toCount(line.quantity) * toMoney(line.packingCharge);
 
 const unitWord = (line) => (line.seedling ? "trays" : "plants");
+
+/** What one unit of price buys — a seedling is priced per tray, not per plant. */
+const priceUnitWord = (line) => (line.seedling ? "tray" : "plant");
 
 /* ── per-row change detection ────────────────────────────────────────
    Each row remembers the values it was last saved with (the `base*` fields).
@@ -363,7 +376,9 @@ const lineFromReservation = (reservation, isDraft) => {
     size: reservation.size,
     plantType: reservation.plantType,
     seedling,
-    price: listPriceOf(reservation),
+    /* Billed at the discounted price when there is one; the list price is kept
+       alongside so the price cell can strike it through. */
+    price: priceOf(reservation),
     listPrice: listPriceOf(reservation),
     traySize: reservation.traySize ?? null,
     unitId: reservation.unitId ?? null,
@@ -1439,7 +1454,9 @@ function CloseConfirmModal({
  *
  * Access: on open the screen calls /check/access. Anything other than an
  * explicit EDIT grant — including a failed lookup — defaults to READ, which is
- * fully read-only (same surface as an invoiced quotation).
+ * fully read-only (same surface as an invoiced quotation). At DELIVERY_SHADE
+ * the grant is not enough on its own: only a DELIVERY_MANAGER or an ADMIN can
+ * edit there, everyone else is read-only.
  *
  * Level drives the editable surface. In Draft the grid is fully editable and
  * nothing is audited. Once the quotation leaves Draft every change is history:
@@ -1490,11 +1507,19 @@ function EditInner({ quotation, onClose, onSaved }) {
   const [access, setAccess] = useState("READ");
   const [accessResolved, setAccessResolved] = useState(false);
   const [role, setRole] = useState(null);
-  const canEdit = access === "EDIT" || role === "SALES";
 
   const isDraft = level === "DRAFT";
   const isDelivery = level === "DELIVERY_SHADE";
   const isInvoiced = level === "INVOICE_GENERATED";
+
+  /* Loading shade belongs to the delivery team: once a quotation is at
+     DELIVERY_SHADE only a DELIVERY_MANAGER or an ADMIN may edit it, whatever
+     the access grant says. Everybody else — SALES included — drops to the
+     read-only surface until it moves on. */
+  const deliveryRole = role === "DELIVERY_MANAGER" || role === "ADMIN";
+  const lockedToDeliveryRole = isDelivery && !deliveryRole;
+  const canEdit =
+    (access === "EDIT" || role === "SALES") && !lockedToDeliveryRole;
 
   /* Editing needs BOTH an EDIT grant and a non-invoiced level. READ collapses
      the whole screen to the same read-only surface as an invoice. */
@@ -1990,7 +2015,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             size: plant.size,
             plantType: plant.plantType,
             seedling,
-            price: listPriceOf(plant),
+            price: priceOf(plant),
             listPrice: listPriceOf(plant),
             traySize: preferred?.traySize ?? null,
             unitId: preferred?.unitId ?? null,
@@ -2067,10 +2092,6 @@ function EditInner({ quotation, onClose, onSaved }) {
     setSpecials((prev) => prev.filter((special) => special.key !== key));
   }, []);
 
-  const focusSearch = useCallback(() => {
-    searchRef.current?.focus?.();
-  }, []);
-
   /* ── pickers ─────────────────────────────────────────────────────── */
   const openUnitPicker = useCallback(
     async (line) => {
@@ -2085,7 +2106,7 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       updateLine(line.key, {
         inventoryList: match?.inventoryList || [],
-        ...(match && !line.price ? { price: listPriceOf(match) } : null),
+        ...(match && !line.price ? { price: priceOf(match) } : null),
       });
       setPicker((prev) =>
         prev && prev.key === line.key ? { ...prev, loading: false } : prev,
@@ -2253,19 +2274,21 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const working = saving || busy !== null;
 
-  const blockingReason = !canEdit
-    ? "You have read-only access to this quotation."
-    : !userId
-      ? "Signed-in user not found. Sign in again to save."
-      : incomplete
-        ? "Every row needs a unit and a quantity above zero."
-        : missingFieldReason
-          ? "Add a reason for every changed field before saving."
-          : discountRemarkMissing
-            ? "Add a remark for the additional discount."
-            : discountOverTotal
-              ? "The discount is more than the order total."
-              : null;
+  const blockingReason = lockedToDeliveryRole
+    ? "Only a delivery manager or an admin can edit a quotation in the loading shade."
+    : !canEdit
+      ? "You have read-only access to this quotation."
+      : !userId
+        ? "Signed-in user not found. Sign in again to save."
+        : incomplete
+          ? "Every row needs a unit and a quantity above zero."
+          : missingFieldReason
+            ? "Add a reason for every changed field before saving."
+            : discountRemarkMissing
+              ? "Add a remark for the additional discount."
+              : discountOverTotal
+                ? "The discount is more than the order total."
+                : null;
 
   const canSave = dirty && !working && !blockingReason;
 
@@ -3216,7 +3239,8 @@ function EditInner({ quotation, onClose, onSaved }) {
               {!line.isSpecial && !showPrice ? (
                 <View style={styles.metaTag}>
                   <Text style={styles.metaTagText}>
-                    {formatAmount(effectivePriceOf(line))} / plant
+                    {formatAmount(effectivePriceOf(line))} /{" "}
+                    {priceUnitWord(line)}
                   </Text>
                 </View>
               ) : null}
@@ -3239,7 +3263,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       showPrice && {
         key: "price",
         label: "Price",
-        sublabel: "per plant",
+        sublabel: "per tray or plant",
         size: w.price,
         align: "right",
         render: (line) => priceBlock(line),
@@ -3428,7 +3452,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                   {formatAmount(
                     item.isSpecial ? item.price : effectivePriceOf(item),
                   )}{" "}
-                  / plant
+                  / {item.isSpecial ? "plant" : priceUnitWord(item)}
                 </Text>
               </View>
               {!item.isSpecial && lineChanged(item) ? (
@@ -3550,7 +3574,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                 <Text style={styles.loadingText}>Checking stock…</Text>
               </View>
             ) : (
-              <ScrollView keyboardShouldPersistTaps="handled">
+              <ScrollView
+                style={styles.sheetScroll}
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled
+              >
                 {options.length === 0 ? (
                   <Text style={styles.resultEmpty}>
                     {unitMode
@@ -3865,7 +3893,11 @@ function EditInner({ quotation, onClose, onSaved }) {
 
               {showResults ? (
                 <View style={styles.results}>
-                  <ScrollView keyboardShouldPersistTaps="handled">
+                  <ScrollView
+                    style={styles.resultsScroll}
+                    keyboardShouldPersistTaps="handled"
+                    nestedScrollEnabled
+                  >
                     {searching && results.length === 0 ? (
                       <View style={styles.resultLoading}>
                         <ActivityIndicator color={C.NAVY} />
@@ -3955,20 +3987,6 @@ function EditInner({ quotation, onClose, onSaved }) {
                 </View>
               ) : null}
             </View>
-
-            <Pressable
-              style={({ hovered, pressed }) => [
-                styles.addButton,
-                hovered && styles.addButtonHover,
-                pressed && styles.addButtonPressed,
-              ]}
-              onPress={focusSearch}
-            >
-              <Ionicons name="add" size={19} color="#FFFFFF" />
-              {space >= 460 ? (
-                <Text style={styles.addButtonText}>ADD PLANT</Text>
-              ) : null}
-            </Pressable>
           </View>
         ) : null}
 

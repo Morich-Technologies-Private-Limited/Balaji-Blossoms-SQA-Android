@@ -54,8 +54,8 @@ const DETAIL_FIELDS = [
 /**
  * Create-quotation popup.
  *
- * Flow: search customers by name / mobile / GST → pick one from the dropdown →
- * review the full customer details → pick the issuing company → create. The
+ * Flow: pick the issuing company → search customers by name / mobile / GST →
+ * pick one from the dropdown → review the full customer details → create. The
  * quotation is created against the selected customer, company, and the
  * signed-in user.
  *
@@ -235,8 +235,8 @@ export default function CreateQuotationModal({
 
   const handleSubmit = async () => {
     if (!canSubmit) {
-      if (!selected) setError("Search and select a customer first.");
-      else if (companyId == null) setError("Select a company first.");
+      if (companyId == null) setError("Select a company first.");
+      else if (!selected) setError("Search and select a customer first.");
       else if (!userId) setError("No signed-in user found. Sign in again.");
       return;
     }
@@ -295,7 +295,7 @@ export default function CreateQuotationModal({
               <View style={styles.headerText}>
                 <Text style={styles.title}>New quotation</Text>
                 <Text style={styles.subtitle}>
-                  Find a customer, then start their draft.
+                  Pick a company, find a customer, then start their draft.
                 </Text>
               </View>
               <Pressable onPress={onClose} hitSlop={10} style={styles.closeBtn}>
@@ -309,207 +309,8 @@ export default function CreateQuotationModal({
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={false}
             >
-              {/* ── search + dropdown ── */}
-              {!selected ? (
-                <View style={styles.searchBlock}>
-                  <Text style={styles.sectionLabel}>Customer</Text>
-
-                  <View
-                    style={[
-                      styles.inputWrap,
-                      dropdownOpen && styles.inputWrapOpen,
-                      searchError && styles.inputWrapError,
-                    ]}
-                  >
-                    <Ionicons
-                      name="search-outline"
-                      size={styles.iconSize}
-                      color={C.PLACEHOLDER}
-                    />
-                    <TextInput
-                      style={styles.input}
-                      value={query}
-                      onChangeText={setQuery}
-                      placeholder="Search by name, mobile, GST…"
-                      placeholderTextColor={C.PLACEHOLDER}
-                      returnKeyType="search"
-                      autoFocus
-                    />
-                    {searching ? (
-                      <ActivityIndicator size="small" color={C.NAVY} />
-                    ) : query.length > 0 ? (
-                      <Pressable onPress={() => setQuery("")} hitSlop={8}>
-                        <Ionicons
-                          name="close-circle"
-                          size={styles.iconSize}
-                          color={C.PLACEHOLDER}
-                        />
-                      </Pressable>
-                    ) : null}
-                  </View>
-
-                  {/* dropdown */}
-                  {dropdownOpen ? (
-                    <View style={styles.dropdown}>
-                      {searching && results.length === 0 ? (
-                        <View style={styles.dropdownState}>
-                          <ActivityIndicator size="small" color={C.NAVY} />
-                          <Text style={styles.dropdownStateText}>
-                            Searching…
-                          </Text>
-                        </View>
-                      ) : searchError ? (
-                        <View style={styles.dropdownState}>
-                          <Ionicons
-                            name="alert-circle-outline"
-                            size={18}
-                            color={C.ORANGE}
-                          />
-                          <Text style={styles.dropdownStateText}>
-                            {searchError}
-                          </Text>
-                        </View>
-                      ) : results.length === 0 ? (
-                        <View style={styles.dropdownState}>
-                          <Ionicons
-                            name="person-outline"
-                            size={18}
-                            color={C.PLACEHOLDER}
-                          />
-                          <Text style={styles.dropdownStateText}>
-                            No customers match “{query.trim()}”.
-                          </Text>
-                        </View>
-                      ) : (
-                        <ScrollView
-                          style={styles.dropdownScroll}
-                          keyboardShouldPersistTaps="handled"
-                          nestedScrollEnabled
-                        >
-                          {results.map((customer, index) => (
-                            <Pressable
-                              key={customer.customerId ?? index}
-                              onPress={() => pickCustomer(customer)}
-                              style={({ hovered, pressed }) => [
-                                styles.option,
-                                index === results.length - 1 &&
-                                  styles.optionLast,
-                                (hovered || pressed) && styles.optionHover,
-                              ]}
-                            >
-                              <View style={styles.optionAvatar}>
-                                <Text style={styles.optionAvatarText}>
-                                  {(customer.customerName || "?")
-                                    .charAt(0)
-                                    .toUpperCase()}
-                                </Text>
-                              </View>
-                              <View style={styles.optionText}>
-                                <Text
-                                  numberOfLines={1}
-                                  style={styles.optionName}
-                                >
-                                  {customer.customerName || "Unnamed customer"}
-                                  {customer.alias
-                                    ? `  ·  ${customer.alias}`
-                                    : ""}
-                                </Text>
-                                <Text
-                                  numberOfLines={1}
-                                  style={styles.optionMeta}
-                                >
-                                  {[
-                                    `ID ${customer.customerId}`,
-                                    customer.mobileNumber,
-                                    customer.city,
-                                  ]
-                                    .filter(Boolean)
-                                    .join("  ·  ")}
-                                </Text>
-                              </View>
-                              <Ionicons
-                                name="chevron-forward"
-                                size={18}
-                                color={C.PLACEHOLDER}
-                              />
-                            </Pressable>
-                          ))}
-                        </ScrollView>
-                      )}
-                    </View>
-                  ) : (
-                    <Text style={styles.hint}>
-                      Type at least {MIN_QUERY} characters to search.
-                    </Text>
-                  )}
-                </View>
-              ) : (
-                /* ── selected customer details ── */
-                <View style={styles.detailBlock}>
-                  <View style={styles.sectionHeadRow}>
-                    <Text style={styles.sectionLabel}>Selected customer</Text>
-                    <Pressable
-                      onPress={clearSelection}
-                      hitSlop={8}
-                      style={styles.changeBtn}
-                    >
-                      <Ionicons
-                        name="swap-horizontal-outline"
-                        size={15}
-                        color={C.NAVY}
-                      />
-                      <Text style={styles.changeBtnText}>CHANGE</Text>
-                    </Pressable>
-                  </View>
-
-                  <View style={styles.customerCard}>
-                    <View style={styles.customerCardTop}>
-                      <View style={styles.customerAvatar}>
-                        <Text style={styles.customerAvatarText}>
-                          {(selected.customerName || "?")
-                            .charAt(0)
-                            .toUpperCase()}
-                        </Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text numberOfLines={1} style={styles.customerName}>
-                          {selected.customerName || "Unnamed customer"}
-                        </Text>
-                        {selected.alias ? (
-                          <Text numberOfLines={1} style={styles.customerAlias}>
-                            {selected.alias}
-                          </Text>
-                        ) : null}
-                      </View>
-                    </View>
-
-                    <View style={styles.detailGrid}>
-                      {DETAIL_FIELDS.map((field) => (
-                        <View
-                          key={field.key}
-                          style={[
-                            styles.detailCell,
-                            field.full && styles.detailCellFull,
-                          ]}
-                        >
-                          <Text style={styles.detailLabel}>{field.label}</Text>
-                          <Text
-                            style={styles.detailValue}
-                            numberOfLines={field.full ? 2 : 1}
-                          >
-                            {valueOf(selected, field.key)}
-                          </Text>
-                        </View>
-                      ))}
-                    </View>
-                  </View>
-                </View>
-              )}
-
               {/* ── company ── */}
-              <Text style={[styles.sectionLabel, { marginTop: 20 }]}>
-                Company
-              </Text>
+              <Text style={styles.sectionLabel}>Company</Text>
 
               {companiesLoading ? (
                 <View style={styles.readonlyRow}>
@@ -624,6 +425,202 @@ export default function CreateQuotationModal({
                       </ScrollView>
                     </View>
                   ) : null}
+                </View>
+              )}
+
+              {/* ── search + dropdown ── */}
+              {!selected ? (
+                <View style={[styles.searchBlock, { marginTop: 20 }]}>
+                  <Text style={styles.sectionLabel}>Customer</Text>
+
+                  <View
+                    style={[
+                      styles.inputWrap,
+                      dropdownOpen && styles.inputWrapOpen,
+                      searchError && styles.inputWrapError,
+                    ]}
+                  >
+                    <Ionicons
+                      name="search-outline"
+                      size={styles.iconSize}
+                      color={C.PLACEHOLDER}
+                    />
+                    <TextInput
+                      style={styles.input}
+                      value={query}
+                      onChangeText={setQuery}
+                      placeholder="Search by name, mobile, GST…"
+                      placeholderTextColor={C.PLACEHOLDER}
+                      returnKeyType="search"
+                    />
+                    {searching ? (
+                      <ActivityIndicator size="small" color={C.NAVY} />
+                    ) : query.length > 0 ? (
+                      <Pressable onPress={() => setQuery("")} hitSlop={8}>
+                        <Ionicons
+                          name="close-circle"
+                          size={styles.iconSize}
+                          color={C.PLACEHOLDER}
+                        />
+                      </Pressable>
+                    ) : null}
+                  </View>
+
+                  {/* dropdown */}
+                  {dropdownOpen ? (
+                    <View style={styles.dropdown}>
+                      {searching && results.length === 0 ? (
+                        <View style={styles.dropdownState}>
+                          <ActivityIndicator size="small" color={C.NAVY} />
+                          <Text style={styles.dropdownStateText}>
+                            Searching…
+                          </Text>
+                        </View>
+                      ) : searchError ? (
+                        <View style={styles.dropdownState}>
+                          <Ionicons
+                            name="alert-circle-outline"
+                            size={18}
+                            color={C.ORANGE}
+                          />
+                          <Text style={styles.dropdownStateText}>
+                            {searchError}
+                          </Text>
+                        </View>
+                      ) : results.length === 0 ? (
+                        <View style={styles.dropdownState}>
+                          <Ionicons
+                            name="person-outline"
+                            size={18}
+                            color={C.PLACEHOLDER}
+                          />
+                          <Text style={styles.dropdownStateText}>
+                            No customers match “{query.trim()}”.
+                          </Text>
+                        </View>
+                      ) : (
+                        <ScrollView
+                          style={styles.dropdownScroll}
+                          keyboardShouldPersistTaps="handled"
+                          nestedScrollEnabled
+                        >
+                          {results.map((customer, index) => (
+                            <Pressable
+                              key={customer.customerId ?? index}
+                              onPress={() => pickCustomer(customer)}
+                              style={({ hovered, pressed }) => [
+                                styles.option,
+                                index === results.length - 1 &&
+                                  styles.optionLast,
+                                (hovered || pressed) && styles.optionHover,
+                              ]}
+                            >
+                              <View style={styles.optionAvatar}>
+                                <Text style={styles.optionAvatarText}>
+                                  {(customer.customerName || "?")
+                                    .charAt(0)
+                                    .toUpperCase()}
+                                </Text>
+                              </View>
+                              <View style={styles.optionText}>
+                                <Text
+                                  numberOfLines={1}
+                                  style={styles.optionName}
+                                >
+                                  {customer.customerName || "Unnamed customer"}
+                                  {customer.alias
+                                    ? `  ·  ${customer.alias}`
+                                    : ""}
+                                </Text>
+                                <Text
+                                  numberOfLines={1}
+                                  style={styles.optionMeta}
+                                >
+                                  {[
+                                    `ID ${customer.customerId}`,
+                                    customer.mobileNumber,
+                                    customer.city,
+                                  ]
+                                    .filter(Boolean)
+                                    .join("  ·  ")}
+                                </Text>
+                              </View>
+                              <Ionicons
+                                name="chevron-forward"
+                                size={18}
+                                color={C.PLACEHOLDER}
+                              />
+                            </Pressable>
+                          ))}
+                        </ScrollView>
+                      )}
+                    </View>
+                  ) : (
+                    <Text style={styles.hint}>
+                      Type at least {MIN_QUERY} characters to search.
+                    </Text>
+                  )}
+                </View>
+              ) : (
+                /* ── selected customer details ── */
+                <View style={[styles.detailBlock, { marginTop: 20 }]}>
+                  <View style={styles.sectionHeadRow}>
+                    <Text style={styles.sectionLabel}>Selected customer</Text>
+                    <Pressable
+                      onPress={clearSelection}
+                      hitSlop={8}
+                      style={styles.changeBtn}
+                    >
+                      <Ionicons
+                        name="swap-horizontal-outline"
+                        size={15}
+                        color={C.NAVY}
+                      />
+                      <Text style={styles.changeBtnText}>CHANGE</Text>
+                    </Pressable>
+                  </View>
+
+                  <View style={styles.customerCard}>
+                    <View style={styles.customerCardTop}>
+                      <View style={styles.customerAvatar}>
+                        <Text style={styles.customerAvatarText}>
+                          {(selected.customerName || "?")
+                            .charAt(0)
+                            .toUpperCase()}
+                        </Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text numberOfLines={1} style={styles.customerName}>
+                          {selected.customerName || "Unnamed customer"}
+                        </Text>
+                        {selected.alias ? (
+                          <Text numberOfLines={1} style={styles.customerAlias}>
+                            {selected.alias}
+                          </Text>
+                        ) : null}
+                      </View>
+                    </View>
+
+                    <View style={styles.detailGrid}>
+                      {DETAIL_FIELDS.map((field) => (
+                        <View
+                          key={field.key}
+                          style={[
+                            styles.detailCell,
+                            field.full && styles.detailCellFull,
+                          ]}
+                        >
+                          <Text style={styles.detailLabel}>{field.label}</Text>
+                          <Text
+                            style={styles.detailValue}
+                            numberOfLines={field.full ? 2 : 1}
+                          >
+                            {valueOf(selected, field.key)}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
                 </View>
               )}
 

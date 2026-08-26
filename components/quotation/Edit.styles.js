@@ -221,24 +221,6 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       paddingVertical: 0,
       ...noOutline,
     },
-    addButton: {
-      height: 46,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 8,
-      paddingHorizontal: large ? 20 : 14,
-      borderRadius: 11,
-      backgroundColor: NAVY,
-    },
-    addButtonHover: { backgroundColor: NAVY_DEEP },
-    addButtonPressed: { backgroundColor: NAVY_DEEP },
-    addButtonText: {
-      fontSize: 13,
-      fontWeight: "800",
-      letterSpacing: 0.8,
-      color: SURFACE,
-    },
 
     /* ── check progress strip (delivery shade) ─────────────────────── */
     checkStrip: {
@@ -281,6 +263,14 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       overflow: "hidden",
       zIndex: 30,
       ...shadow(0.14, 24, 10),
+    },
+    /* The height cap has to live on the scroller itself. A ScrollView doesn't
+       shrink (flexShrink defaults to 0), so with the cap only on the wrapper it
+       lays out at full content height and `overflow: hidden` just clips the
+       overflowing rows — they can't be scrolled to. */
+    resultsScroll: {
+      maxHeight: large ? 340 : 280,
+      flexGrow: 0,
     },
     resultCard: {
       flexDirection: "row",
@@ -1305,6 +1295,10 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       paddingBottom: large ? 8 : 20,
       overflow: "hidden",
     },
+    /* Same reason as resultsScroll: without flexShrink the option list lays out
+       at full content height next to the header and the sheet's maxHeight just
+       clips the tail of the list instead of letting it scroll. */
+    sheetScroll: { flexShrink: 1, minHeight: 0 },
     sheetHeader: {
       paddingHorizontal: 20,
       paddingTop: 18,

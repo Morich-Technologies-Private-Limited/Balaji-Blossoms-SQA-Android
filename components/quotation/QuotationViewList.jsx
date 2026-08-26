@@ -124,13 +124,15 @@ const levelOf = (item) =>
 
 /* ── share chooser ─────────────────────────────────────────────────────
    A small sheet offered when the operator taps Send on a row, or automatically
-   after a level change. It only picks *what* to share — Quotation or Collector
-   Sheet — and hands the choice back; the download and the actual share are
-   driven by the parent. */
+   after a level change. It only picks *what* to share — Quotation, Pre-Invoice
+   or Collector Sheet — and hands the choice back; the download and the actual
+   share are driven by the parent. Pre-Invoice is offered only when the parent
+   says so (fully paid, non-empty, not yet invoiced). */
 function ShareKindModal({
   styles,
   quotationLine,
   isInvoice,
+  showPreInvoice,
   busyKind,
   onPick,
   onClose,
@@ -146,13 +148,21 @@ function ShareKindModal({
         ? "The customer-facing invoice PDF"
         : "The customer-facing quotation PDF",
     },
+    showPreInvoice && {
+      /* Internal chooser key only — the value the backend receives is the
+         `type` query param set in pickShareKind ("Pre-Invoice"). */
+      key: "pre_invoice",
+      icon: "receipt-outline",
+      title: "Pre-Invoice",
+      subtitle: "Payment complete — the pre-invoice PDF",
+    },
     {
       key: "collector",
       icon: "clipboard-outline",
       title: "Collector Sheet",
       subtitle: "The picking / collection sheet",
     },
-  ];
+  ].filter(Boolean);
 
   return (
     <Modal transparent animationType="fade" visible onRequestClose={onClose}>
@@ -250,9 +260,10 @@ function ShareKindModal({
  * quotation so the operator can hand over the fresh document. No level change,
  * no popup — a plain close is silent.
  *
- * Send opens the same chooser: the operator shares either the Quotation PDF or
- * the Collector Sheet PDF. The chosen PDF is downloaded and handed to the
- * shared PdfShareSheet. If a parent passes `onSend`, that takes over instead.
+ * Send opens the same chooser: the operator shares the Quotation PDF, the
+ * Collector Sheet PDF, or — for a fully paid, not-yet-invoiced quotation — the
+ * Pre-Invoice PDF. The chosen PDF is downloaded and handed to the shared
+ * PdfShareSheet. If a parent passes `onSend`, that takes over instead.
  */
 function QuotationViewList(
   { mode = "user", title, subtitle, onSelect, onUpdate, onSend },
@@ -464,7 +475,9 @@ function QuotationViewList(
       const response =
         kind === "collector"
           ? await downloadCollectionSheetPdf(id)
-          : await downloadQuotationPdf(id);
+          : kind === "pre_invoice"
+            ? await downloadQuotationPdf(id, { type: "Pre-Invoice" })
+            : await downloadQuotationPdf(id);
 
       setShareBusyKind(null);
 
@@ -473,7 +486,9 @@ function QuotationViewList(
           response?.message ||
             (kind === "collector"
               ? "The collector sheet could not be downloaded."
-              : "The quotation PDF could not be downloaded."),
+              : kind === "pre_invoice"
+                ? "The pre-invoice PDF could not be downloaded."
+                : "The quotation PDF could not be downloaded."),
         );
         return;
       }
@@ -482,9 +497,11 @@ function QuotationViewList(
       const isInvoice = shareTarget.level === "INVOICE_GENERATED";
       const docLabel = isCollector
         ? "Collector sheet"
-        : isInvoice
-          ? "Invoice"
-          : "Quotation";
+        : kind === "pre_invoice"
+          ? "Pre-Invoice"
+          : isInvoice
+            ? "Invoice"
+            : "Quotation";
       const quotationLine = `QTN-${id}${
         shareTarget.customerName ? ` · ${shareTarget.customerName}` : ""
       }`;
@@ -1089,6 +1106,13 @@ function QuotationViewList(
           styles={styles}
           quotationLine={shareLine}
           isInvoice={shareTarget.level === "INVOICE_GENERATED"}
+          /* Pre-Invoice is only meaningful once the quotation is fully paid,
+             actually has a value, and has not already become an invoice. */
+          showPreInvoice={
+            Number(shareTarget.remainingPayment || 0) === 0 &&
+            Number(shareTarget.totalAmount || 0) > 0 &&
+            shareTarget.level !== "INVOICE_GENERATED"
+          }
           busyKind={shareBusyKind}
           onPick={pickShareKind}
           onClose={closeShare}
