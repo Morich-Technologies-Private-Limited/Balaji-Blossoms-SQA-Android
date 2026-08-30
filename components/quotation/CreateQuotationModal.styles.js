@@ -4,6 +4,8 @@ const NAVY = "#0F4776";
 const NAVY_TINT = "#EAF1F8";
 const NAVY_DARK = "#0C3A61";
 const ORANGE = "#E8622C";
+const RED = "#DC2626";
+const RED_TINT = "#FEF2F2";
 const SURFACE = "#FFFFFF";
 const INPUT_FILL = "#F5F7FA";
 const BORDER = "#E2E8F0";
@@ -413,6 +415,119 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
       overflow: "hidden",
     },
 
+    /* ── default-billing-company warning ── */
+    warnOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: "rgba(15, 23, 42, 0.5)",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20,
+    },
+    warnCard: {
+      width: Math.min(sheetWidth - 24, 400),
+      backgroundColor: SURFACE,
+      borderRadius: 20,
+      padding: large ? 24 : 20,
+      gap: 14,
+      ...sheetShadow,
+    },
+    warnHeadRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+    },
+    warnBadge: {
+      height: 42,
+      width: 42,
+      borderRadius: 13,
+      backgroundColor: RED_TINT,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    warnTitle: {
+      flex: 1,
+      fontSize: isDesktop ? 18 : 17,
+      fontWeight: "800",
+      letterSpacing: -0.2,
+      color: TEXT,
+    },
+    warnText: {
+      fontSize: 14,
+      lineHeight: 20,
+      color: MUTED,
+    },
+    warnCompare: {
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: BORDER,
+      backgroundColor: INPUT_FILL,
+      overflow: "hidden",
+    },
+    warnCompareRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingVertical: 11,
+      paddingHorizontal: 14,
+    },
+    warnCompareDivider: {
+      borderTopWidth: 1,
+      borderTopColor: BORDER,
+    },
+    warnCompareTag: {
+      width: 74,
+      fontSize: 9.5,
+      fontWeight: "800",
+      letterSpacing: 0.6,
+      color: "#7C8CA1",
+      textTransform: "uppercase",
+    },
+    warnCompareName: {
+      flex: 1,
+      fontSize: 14,
+      fontWeight: "700",
+      color: TEXT,
+    },
+    warnActions: {
+      flexDirection: "row",
+      gap: 12,
+      marginTop: 2,
+    },
+    warnKeepBtn: {
+      flex: 1,
+      minHeight: 48,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: BORDER,
+      backgroundColor: SURFACE,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 10,
+    },
+    warnKeepBtnText: {
+      fontSize: 13.5,
+      fontWeight: "800",
+      letterSpacing: 0.6,
+      color: MUTED,
+      textAlign: "center",
+    },
+    warnReplaceBtn: {
+      flex: 1,
+      minHeight: 48,
+      borderRadius: 14,
+      backgroundColor: RED,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 10,
+    },
+    warnReplaceBtnText: {
+      fontSize: 13.5,
+      fontWeight: "800",
+      letterSpacing: 0.6,
+      color: "#FFFFFF",
+      textAlign: "center",
+    },
+
     /* ── error ── */
     errorRow: {
       flexDirection: "row",
@@ -477,6 +592,7 @@ const makeStyles = ({ width, isTablet, isDesktop }) => {
     NAVY_TINT,
     NAVY_DARK,
     ORANGE,
+    RED,
     SURFACE,
     MUTED,
     PLACEHOLDER,

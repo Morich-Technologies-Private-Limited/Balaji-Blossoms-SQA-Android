@@ -7,6 +7,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   useWindowDimensions,
@@ -98,6 +99,10 @@ export default function CreateQuotationModal({
   const [companyId, setCompanyId] = useState(null);
   const [companyOpen, setCompanyOpen] = useState(false);
 
+  /* Set to the customer's defaultBillingCompanyId while the "replace or keep"
+     warning is up; null when there is nothing to warn about. */
+  const [billingConflict, setBillingConflict] = useState(null);
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -109,6 +114,9 @@ export default function CreateQuotationModal({
   const debounceRef = useRef(null);
   /* Same idea for the company list, which can be reloaded via retry. */
   const companyReqRef = useRef(0);
+  /* customerId we've already raised the billing-company warning for, so it is
+     shown once per pick rather than every time the company list settles. */
+  const warnedForRef = useRef(null);
 
   const loadCompanies = useCallback(async () => {
     const myReq = ++companyReqRef.current;
@@ -146,8 +154,10 @@ export default function CreateQuotationModal({
     setCompanyId(null);
     setCompanyOpen(false);
     setCompaniesError(null);
+    setBillingConflict(null);
     setSubmitting(false);
     setError(null);
+    warnedForRef.current = null;
 
     let alive = true;
     (async () => {
@@ -206,6 +216,31 @@ export default function CreateQuotationModal({
     };
   }, [query, selected]);
 
+  const findCompany = useCallback(
+    (id) =>
+      id == null
+        ? null
+        : companies.find((company) => company.companyId === id) || null,
+    [companies],
+  );
+
+  /* Raise the "replace or keep" warning once per customer pick, when their
+     CustomerDto.defaultBillingCompanyId points at a company other than the one
+     currently selected. Runs as an effect rather than inline in pickCustomer
+     because the company list may still be loading when the customer is picked.
+     A default that isn't in the list is ignored — we couldn't switch to it. */
+  useEffect(() => {
+    if (!selected || companyId == null) return;
+    if (warnedForRef.current === selected.customerId) return;
+
+    const defaultId = selected.defaultBillingCompanyId;
+    if (defaultId == null || defaultId === companyId) return;
+    if (!findCompany(defaultId)) return;
+
+    warnedForRef.current = selected.customerId;
+    setBillingConflict(defaultId);
+  }, [selected, companyId, findCompany]);
+
   const pickCustomer = (customer) => {
     reqIdRef.current++; // invalidate any in-flight search
     setSelected(customer);
@@ -220,6 +255,8 @@ export default function CreateQuotationModal({
     setSelected(null);
     setQuery("");
     setError(null);
+    setBillingConflict(null);
+    warnedForRef.current = null;
   };
 
   const pickCompany = (id) => {
@@ -228,8 +265,16 @@ export default function CreateQuotationModal({
     setError(null);
   };
 
-  const selectedCompany =
-    companies.find((company) => company.companyId === companyId) || null;
+  /* Switch to the customer's default billing company. */
+  const replaceWithDefaultBilling = () => {
+    setCompanyId(billingConflict);
+    setCompanyOpen(false);
+    setBillingConflict(null);
+    setError(null);
+  };
+
+  const selectedCompany = findCompany(companyId);
+  const conflictCompany = findCompany(billingConflict);
 
   const canSubmit = !!selected && !!userId && companyId != null && !submitting;
 
@@ -271,7 +316,9 @@ export default function CreateQuotationModal({
       visible={visible}
       transparent
       animationType="fade"
-      onRequestClose={onClose}
+      onRequestClose={() =>
+        billingConflict != null ? setBillingConflict(null) : onClose?.()
+      }
     >
       <View style={styles.backdrop}>
         <Pressable style={styles.backdropPress} onPress={onClose} />
@@ -671,6 +718,73 @@ export default function CreateQuotationModal({
             </View>
           </View>
         </KeyboardAvoidingView>
+
+        {/* ── default-billing-company warning ──
+            Rendered in-tree above the sheet rather than as a nested <Modal>,
+            which Android handles unreliably. */}
+        {conflictCompany ? (
+          <View style={styles.warnOverlay}>
+            {/* swallows taps so the sheet and backdrop stay inert behind it */}
+            <Pressable style={StyleSheet.absoluteFill} onPress={() => {}} />
+
+            <View style={styles.warnCard}>
+              <View style={styles.warnHeadRow}>
+                <View style={styles.warnBadge}>
+                  <Ionicons
+                    name="warning-outline"
+                    size={styles.iconSize}
+                    color={C.RED}
+                  />
+                </View>
+                <Text style={styles.warnTitle}>Different billing nursery</Text>
+              </View>
+
+              <Text style={styles.warnText}>
+                {selected?.customerName || "This customer"} bills under{" "}
+                {companyLabel(conflictCompany)} by default, but you&apos;ve
+                selected {selectedCompany ? companyLabel(selectedCompany) : "—"}
+                . Replace it or keep your selection?
+              </Text>
+
+              <View style={styles.warnCompare}>
+                <View style={styles.warnCompareRow}>
+                  <Text style={styles.warnCompareTag}>Default</Text>
+                  <Text numberOfLines={1} style={styles.warnCompareName}>
+                    {companyLabel(conflictCompany)}
+                  </Text>
+                </View>
+                <View
+                  style={[styles.warnCompareRow, styles.warnCompareDivider]}
+                >
+                  <Text style={styles.warnCompareTag}>Selected</Text>
+                  <Text numberOfLines={1} style={styles.warnCompareName}>
+                    {selectedCompany ? companyLabel(selectedCompany) : "—"}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.warnActions}>
+                <Pressable
+                  style={styles.warnKeepBtn}
+                  onPress={() => setBillingConflict(null)}
+                >
+                  <Text numberOfLines={2} style={styles.warnKeepBtnText}>
+                    KEEP SELECTED
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  style={styles.warnReplaceBtn}
+                  onPress={replaceWithDefaultBilling}
+                >
+                  <Text numberOfLines={2} style={styles.warnReplaceBtnText}>
+                    REPLACE
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </View>
+        ) : null}
       </View>
     </Modal>
   );

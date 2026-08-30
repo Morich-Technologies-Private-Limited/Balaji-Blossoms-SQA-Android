@@ -250,11 +250,18 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
 
     /* ── search results ────────────────────────────────────────────── */
+    /* The dropdown is anchored to the body zone, not to the search box, and
+       that is deliberate. Android only dispatches touches to the part of a
+       child that falls inside its parent's own bounds — an absolute child
+       hanging out of the ~70pt toolbar still *draws* in full but everything
+       below the toolbar is dead to gestures, so the list could not be
+       scrolled and only its first row could be tapped. Parenting it to the
+       full-height body zone puts every row back inside its parent. */
     results: {
       position: "absolute",
-      top: 52,
-      left: 0,
-      right: 0,
+      top: 0,
+      left: gutter,
+      right: gutter,
       maxHeight: large ? 340 : 280,
       backgroundColor: SURFACE,
       borderRadius: 14,
@@ -316,6 +323,11 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     resultLoadingText: { fontSize: 13, color: FAINT },
 
     /* ── scrollable body ───────────────────────────────────────────── */
+    /* Positioning context for the search dropdown — see `results`. Clipped so
+       that when the keyboard squeezes this zone below the dropdown's own
+       maxHeight the tail is hidden rather than left dangling outside the
+       bounds, where Android would draw it but ignore touches on it. */
+    bodyZone: { flex: 1, position: "relative", overflow: "hidden" },
     bodyScroll: { flex: 1 },
     bodyContent: { flexGrow: 1, paddingBottom: 4 },
 
@@ -723,7 +735,12 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       alignItems: "center",
       gap: 6,
     },
-    plantNameInline: { maxWidth: "58%", flexShrink: 1 },
+    /* No width cap and no line clamp: a long varietal name — "Chrysanthemum
+       (Shevanti) White · 6\"" — has to read in full. Left free to shrink, it
+       takes the whole first line of the wrapping row and wraps onto a second
+       line, pushing the subtitle and tags below it; short names still sit
+       inline with them as before. */
+    plantNameInline: { flexShrink: 1 },
     plantSubInline: { fontSize: 11, color: "#8A97A8" },
     /* line total, tucked onto the end of the header row instead of its own
        footer band lower in the card */

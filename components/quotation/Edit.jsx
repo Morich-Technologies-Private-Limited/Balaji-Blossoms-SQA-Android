@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -20,6 +21,11 @@ import { getApplicableOffer } from "../../api/getOffer";
 import { getQuotationAccess } from "../../api/getQuotationAccess";
 import { getSpecialPlantByBarcodeId } from "../../api/getSpecialPlant";
 import { searchPlants } from "../../api/plantApi";
+import {
+  fetchAllUnits,
+  fetchPlantInventoryConfig,
+  INVENTORY_MODES,
+} from "../../api/unitApi";
 import {
   convertToInvoice,
   moveToLoadingShade,
@@ -372,6 +378,8 @@ const lineFromReservation = (reservation, isDraft) => {
     key: nextKey(),
     plantId: reservation.plantId,
     plantName: reservation.plantName,
+    /* the group this plant hangs off — offers are looked up by it */
+    parentGroupName: reservation.parentGroupName ?? null,
     plantSubtitle: subtitleOf(reservation, seedling),
     size: reservation.size,
     plantType: reservation.plantType,
@@ -1607,6 +1615,13 @@ function EditInner({ quotation, onClose, onSaved }) {
   );
 
   const [packings, setPackings] = useState([]);
+  /* Which units a row may sit on. On (AVAILABLE_UNIT) is the long-standing
+     flow: only the units that actually stock the plant. Off (ANY_UNIT) opens
+     the picker up to every unit in the company. The backend decides — the
+     default here holds if the config call fails. */
+  const [takePlantFromAvailableUnit, setTakePlantFromAvailableUnit] =
+    useState(true);
+  const [allUnits, setAllUnits] = useState(null);
   const [term, setTerm] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -1675,6 +1690,10 @@ function EditInner({ quotation, onClose, onSaved }) {
   const searchTimer = useRef(null);
   const searchRef = useRef(null);
   const bodyScrollRef = useRef(null);
+  /* Live quantity inputs, keyed by line key, so a freshly added row can be
+     focused the moment it mounts — see `addPlant`. Entries are removed on
+     unmount, so a deleted line leaves nothing behind. */
+  const qtyInputRefs = useRef(new Map());
 
   /* ── access check ─────────────────────────────────────────────────
      Runs once on open. Any non-EDIT answer (including an error or a missing
@@ -1766,53 +1785,117 @@ function EditInner({ quotation, onClose, onSaved }) {
     };
   }, [term]);
 
-  /* ── offer lookup (display only) ─────────────────────────────────── */
+  /* ── offer lookup (display only) ─────────────────────────────────────
+     Offers are cut group-wise. Every line under the same parent group pools
+     its quantity into a single lookup — Rose Blue 10 + Rose White 30 asks for
+     "Rose" at 40 — and the one discount that comes back is then applied to
+     each of those lines individually. */
   const offerCache = useRef(new Map());
 
+  /* syncOffers reads the lines through a ref so it can stay a stable callback:
+     it is fired from the debounce below, from field blurs, from the keyboard
+     closing, and from the header refresh button. */
+  const linesRef = useRef(lines);
   useEffect(() => {
-    let alive = true;
-    const timer = setTimeout(async () => {
-      const pending = lines.filter(
-        (line) =>
-          line.plantId != null &&
-          toCount(line.quantity) > 0 &&
-          line.offerKey !== `${line.plantId}:${toCount(line.quantity)}`,
-      );
-      if (pending.length === 0) return;
-
-      const resolved = await Promise.all(
-        pending.map(async (line) => {
-          const qty = toCount(line.quantity);
-          const key = `${line.plantId}:${qty}`;
-          let value = offerCache.current.get(key);
-          if (value === undefined) {
-            const response = await getApplicableOffer(line.plantId, qty);
-            value =
-              response?.status === "SUCCESS"
-                ? toMoney(response.payload?.discount)
-                : 0;
-            offerCache.current.set(key, value);
-          }
-          return { key: line.key, offerKey: key, discount: value };
-        }),
-      );
-
-      if (!alive) return;
-      setLines((prev) =>
-        prev.map((line) => {
-          const hit = resolved.find((r) => r.key === line.key);
-          return hit
-            ? { ...line, offerDiscount: hit.discount, offerKey: hit.offerKey }
-            : line;
-        }),
-      );
-    }, SEARCH_DEBOUNCE);
-
-    return () => {
-      alive = false;
-      clearTimeout(timer);
-    };
+    linesRef.current = lines;
   }, [lines]);
+
+  const [offersBusy, setOffersBusy] = useState(false);
+  /* Blur, keyboard-dismiss and the debounce can all land within a few ms of
+     each other, so only the newest run is allowed to write its result back. */
+  const offerRunRef = useRef(0);
+  const offerAliveRef = useRef(true);
+  useEffect(
+    () => () => {
+      offerAliveRef.current = false;
+    },
+    [],
+  );
+
+  /* `force` is the header button: it drops the cache and re-asks for every
+     group, so a discount changed on the server since this screen opened is
+     picked up. Without it a group is only re-asked when its pooled total
+     moved. */
+  const syncOffers = useCallback(async ({ force = false } = {}) => {
+    const run = ++offerRunRef.current;
+    const current = linesRef.current;
+
+    /* pool the quantities of every line sharing a parent group */
+    const totals = new Map();
+    current.forEach((line) => {
+      const group = line.parentGroupName;
+      const qty = toCount(line.quantity);
+      if (!group || line.plantId == null || qty <= 0) return;
+      totals.set(group, (totals.get(group) ?? 0) + qty);
+    });
+
+    if (force) offerCache.current.clear();
+
+    const pending = force
+      ? [...totals]
+      : [...totals].filter(([group, total]) =>
+          current.some(
+            (line) =>
+              line.parentGroupName === group &&
+              line.offerKey !== `${group}:${total}`,
+          ),
+        );
+
+    if (pending.length === 0) {
+      if (run === offerRunRef.current) setOffersBusy(false);
+      return;
+    }
+
+    setOffersBusy(true);
+
+    const resolved = await Promise.all(
+      pending.map(async ([group, total]) => {
+        const key = `${group}:${total}`;
+        let value = offerCache.current.get(key);
+        if (value === undefined) {
+          const response = await getApplicableOffer(group, total);
+          value =
+            response?.status === "SUCCESS"
+              ? toMoney(response.payload?.discount)
+              : 0;
+          offerCache.current.set(key, value);
+        }
+        return { group, offerKey: key, discount: value };
+      }),
+    );
+
+    /* superseded by a newer run — that one owns the spinner and the write */
+    if (!offerAliveRef.current || run !== offerRunRef.current) return;
+
+    setOffersBusy(false);
+    setLines((prev) =>
+      prev.map((line) => {
+        const hit = resolved.find((r) => r.group === line.parentGroupName);
+        return hit
+          ? { ...line, offerDiscount: hit.discount, offerKey: hit.offerKey }
+          : line;
+      }),
+    );
+  }, []);
+
+  /* Debounced catch-all so offers still settle while the user keeps typing. */
+  useEffect(() => {
+    const timer = setTimeout(() => syncOffers(), SEARCH_DEBOUNCE);
+    return () => clearTimeout(timer);
+  }, [lines, syncOffers]);
+
+  /* Tapping away from a field, or hitting Done, closes the keyboard — refresh
+     right then rather than making the user wait out the debounce. */
+  useEffect(() => {
+    const sub = Keyboard.addListener("keyboardDidHide", () => syncOffers());
+    return () => sub.remove();
+  }, [syncOffers]);
+
+  /** Header refresh: drop the keyboard, then re-ask for every group. */
+  const refreshCalculations = useCallback(() => {
+    Keyboard.dismiss();
+    syncOffers({ force: true });
+  }, [syncOffers]);
 
   /* A transient success banner clears itself. */
   useEffect(() => {
@@ -1975,6 +2058,14 @@ function EditInner({ quotation, onClose, onSaved }) {
       const inventory = plant.inventoryList || [];
       const preferred =
         inventory.find((row) => row.unitId === quotation?.unitId) ||
+        /* ANY_UNIT: the quotation's own unit is still the default even when it
+           holds none of this plant — falling through to whichever unit happens
+           to have stock would move the row somewhere unexpected. */
+        (takePlantFromAvailableUnit
+          ? null
+          : (allUnits || []).find(
+              (unit) => unit.unitId === quotation?.unitId,
+            )) ||
         inventory.find((row) => (row.quantity || 0) > 0) ||
         inventory[0] ||
         null;
@@ -1988,6 +2079,10 @@ function EditInner({ quotation, onClose, onSaved }) {
           line.plantId === plant.plantId &&
           line.unitId === (preferred?.unitId ?? null),
       );
+
+      /* Minted out here rather than inside the updater so the row can be
+         addressed — focused — once it has mounted. */
+      const newKey = existing ? null : nextKey();
 
       setLines((prev) => {
         if (existing) {
@@ -2008,9 +2103,10 @@ function EditInner({ quotation, onClose, onSaved }) {
         return [
           ...prev,
           {
-            key: nextKey(),
+            key: newKey,
             plantId: plant.plantId,
             plantName: plant.plantName,
+            parentGroupName: plant.parentGroupName ?? null,
             plantSubtitle: subtitleOf(plant, seedling),
             size: plant.size,
             plantType: plant.plantType,
@@ -2049,15 +2145,25 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       /* A brand-new row lands at the bottom of the list — on the mobile card
          layout, scroll it into view so the operator sees what they just
-         added instead of having to hunt for it. The delay gives the new
-         card a chance to actually lay out before we scroll to it. */
-      if (!existing && isCardMode) {
+         added instead of having to hunt for it, then put the caret straight
+         into its quantity box: adding a plant is always followed by typing
+         how many, so there is no reason to make the operator tap for it.
+         The delay gives the new row a chance to actually lay out and
+         register its input ref before either happens. */
+      if (!existing) {
         setTimeout(() => {
-          bodyScrollRef.current?.scrollToEnd({ animated: true });
+          if (isCardMode) bodyScrollRef.current?.scrollToEnd({ animated: true });
+          qtyInputRefs.current.get(newKey)?.focus();
         }, 50);
       }
     },
-    [quotation?.unitId, lines, isCardMode],
+    [
+      quotation?.unitId,
+      lines,
+      isCardMode,
+      takePlantFromAvailableUnit,
+      allUnits,
+    ],
   );
 
   /* ── special plants (barcode) ────────────────────────────────────── */
@@ -2092,27 +2198,76 @@ function EditInner({ quotation, onClose, onSaved }) {
     setSpecials((prev) => prev.filter((special) => special.key !== key));
   }, []);
 
+  /* ── unit source ─────────────────────────────────────────────────────
+     The full unit list is fetched once per screen and shared by every row's
+     picker; the ref holds the in-flight promise so two rows opening at the
+     same time still make one call. */
+  const unitsRequest = useRef(null);
+
+  const loadAllUnits = useCallback(() => {
+    if (!unitsRequest.current) {
+      unitsRequest.current = fetchAllUnits().then((response) => {
+        const list =
+          response?.status === "SUCCESS" ? response.payload || [] : [];
+        setAllUnits(list);
+        return list;
+      });
+    }
+    return unitsRequest.current;
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const mode = await fetchPlantInventoryConfig();
+      /* An unreadable config leaves the stricter default in place. */
+      if (!alive || !mode) return;
+      const available = mode === INVENTORY_MODES.AVAILABLE_UNIT;
+      setTakePlantFromAvailableUnit(available);
+      /* Warm the cache now: ANY_UNIT needs the list to default a newly added
+         plant to the quotation's own unit, not just to open a picker. */
+      if (!available) loadAllUnits();
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [loadAllUnits]);
+
   /* ── pickers ─────────────────────────────────────────────────────── */
   const openUnitPicker = useCallback(
     async (line) => {
-      setPicker({ type: "unit", key: line.key, loading: !line.inventoryList });
-      if (line.inventoryList) return;
-
-      const response = await searchPlants(line.plantName, 20);
-      const match =
-        response?.status === "SUCCESS"
-          ? (response.payload || []).find((p) => p.plantId === line.plantId)
-          : null;
-
-      updateLine(line.key, {
-        inventoryList: match?.inventoryList || [],
-        ...(match && !line.price ? { price: priceOf(match) } : null),
+      const needsUnits = !takePlantFromAvailableUnit && allUnits === null;
+      setPicker({
+        type: "unit",
+        key: line.key,
+        loading: !line.inventoryList || needsUnits,
       });
+      if (line.inventoryList && !needsUnits) return;
+
+      /* Both modes want the plant's inventory: ANY_UNIT lists every unit but
+         still shows the stock figures against the ones that carry it. */
+      const unitsTask = needsUnits ? loadAllUnits() : null;
+
+      if (!line.inventoryList) {
+        const response = await searchPlants(line.plantName, 20);
+        const match =
+          response?.status === "SUCCESS"
+            ? (response.payload || []).find((p) => p.plantId === line.plantId)
+            : null;
+
+        updateLine(line.key, {
+          inventoryList: match?.inventoryList || [],
+          ...(match && !line.price ? { price: priceOf(match) } : null),
+        });
+      }
+
+      await unitsTask;
       setPicker((prev) =>
         prev && prev.key === line.key ? { ...prev, loading: false } : prev,
       );
     },
-    [updateLine],
+    [updateLine, takePlantFromAvailableUnit, allUnits, loadAllUnits],
   );
 
   const openPackingPicker = useCallback((key) => {
@@ -2177,6 +2332,27 @@ function EditInner({ quotation, onClose, onSaved }) {
     () => lines.find((line) => line.key === picker?.key) || null,
     [lines, picker],
   );
+
+  /* What the unit picker offers for the row it is open on. AVAILABLE_UNIT
+     hands back the plant's inventory untouched; ANY_UNIT lists every unit with
+     the inventory merged in, so a unit that doesn't carry the plant is still
+     selectable and simply reads as having none. */
+  const unitOptions = useMemo(() => {
+    const inventory = activeLine?.inventoryList || [];
+    if (takePlantFromAvailableUnit) return inventory;
+
+    const stockByUnit = new Map(inventory.map((row) => [row.unitId, row]));
+    return (allUnits || []).map((unit) => {
+      const stock = stockByUnit.get(unit.unitId);
+      return {
+        unitId: unit.unitId,
+        unitName: unit.unitName,
+        quantity: stock?.quantity ?? 0,
+        traySize: stock?.traySize ?? null,
+        stocked: !!stock,
+      };
+    });
+  }, [activeLine, takePlantFromAvailableUnit, allUnits]);
 
   /* ── totals ──────────────────────────────────────────────────────── */
   const totals = useMemo(() => {
@@ -2874,12 +3050,19 @@ function EditInner({ quotation, onClose, onSaved }) {
         <View style={styles.cellFill}>
           <View style={[styles.qtyBox, moved && styles.qtyBoxDirty]}>
             <TextInput
+              ref={(node) => {
+                if (node) qtyInputRefs.current.set(line.key, node);
+                else qtyInputRefs.current.delete(line.key);
+              }}
               style={styles.qtyInput}
               value={line.quantity}
               onChangeText={(value) =>
                 updateLine(line.key, { quantity: value.replace(/[^0-9]/g, "") })
               }
-              onBlur={() => commitFieldEdit(line.key, "quantity")}
+              onBlur={() => {
+                commitFieldEdit(line.key, "quantity");
+                syncOffers(); // quantity drives the offer — don't wait it out
+              }}
               keyboardType="number-pad"
               selectTextOnFocus
               placeholder="0"
@@ -2908,7 +3091,15 @@ function EditInner({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [styles, C, isDraft, lineEditable, updateLine, commitFieldEdit],
+    [
+      styles,
+      C,
+      isDraft,
+      lineEditable,
+      updateLine,
+      commitFieldEdit,
+      syncOffers,
+    ],
   );
 
   const packingField = useCallback(
@@ -3221,7 +3412,10 @@ function EditInner({ quotation, onClose, onSaved }) {
         align: "left",
         render: (line) => (
           <View style={styles.cellFill}>
-            <Text style={styles.plantName} numberOfLines={1}>
+            {/* Unclamped — the plant column is the flexible one and rows are
+                already variable height, so a long name wraps inside the
+                column rather than being cut off. */}
+            <Text style={styles.plantName}>
               {line.isSpecial ? line.plantName : plantTitleWithSize(line)}
             </Text>
             <Text style={styles.plantSub} numberOfLines={1}>
@@ -3430,10 +3624,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             {/* Name, subtitle, price and any tag all flow in one row to keep
                each card compact — several cards should fit on one screen. */}
             <View style={styles.cardHeaderRow}>
-              <Text
-                style={[styles.plantName, styles.plantNameInline]}
-                numberOfLines={1}
-              >
+              <Text style={[styles.plantName, styles.plantNameInline]}>
                 {item.isSpecial ? item.plantName : plantTitleWithSize(item)}
               </Text>
               <Text style={styles.plantSubInline} numberOfLines={1}>
@@ -3538,7 +3729,7 @@ function EditInner({ quotation, onClose, onSaved }) {
     const packingMode = picker.type === "packing";
 
     const options = unitMode
-      ? activeLine.inventoryList || []
+      ? unitOptions
       : [
           NO_PACKING,
           ...packings,
@@ -3582,7 +3773,9 @@ function EditInner({ quotation, onClose, onSaved }) {
                 {options.length === 0 ? (
                   <Text style={styles.resultEmpty}>
                     {unitMode
-                      ? "This plant is not stocked in any unit."
+                      ? takePlantFromAvailableUnit
+                        ? "This plant is not stocked in any unit."
+                        : "No units found."
                       : "No packing options yet."}
                   </Text>
                 ) : null}
@@ -3657,11 +3850,16 @@ function EditInner({ quotation, onClose, onSaved }) {
                           </Text>
                           <Text style={styles.optionMeta}>
                             {unitMode
-                              ? `${formatNumber(option.quantity ?? 0)} in stock${
-                                  option.traySize
-                                    ? ` · ${option.traySize} per tray`
-                                    : ""
-                                }`
+                              ? /* ANY_UNIT lists units that don't carry the
+                                   plant at all — say so rather than "0 in
+                                   stock", which reads like sold out. */
+                                option.stocked === false
+                                ? "Not stocked here"
+                                : `${formatNumber(option.quantity ?? 0)} in stock${
+                                    option.traySize
+                                      ? ` · ${option.traySize} per tray`
+                                      : ""
+                                  }`
                               : option.size
                                 ? `Fits ${option.size}`
                                 : "No charge"}
@@ -3784,6 +3982,25 @@ function EditInner({ quotation, onClose, onSaved }) {
               ]}
               hitSlop={8}
               accessibilityRole="button"
+              accessibilityLabel="Refresh offers and totals"
+              disabled={working || offersBusy}
+              onPress={refreshCalculations}
+            >
+              {offersBusy ? (
+                <ActivityIndicator color={C.NAVY} />
+              ) : (
+                <Ionicons name="refresh" size={19} color={C.NAVY} />
+              )}
+            </Pressable>
+
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.iconBtn,
+                hovered && styles.iconBtnHover,
+                pressed && styles.iconBtnPressed,
+              ]}
+              hitSlop={8}
+              accessibilityRole="button"
               accessibilityLabel="Open the quotation PDF"
               disabled={working}
               onPress={reopenPdf}
@@ -3890,178 +4107,183 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </Pressable>
                 ) : null}
               </View>
-
-              {showResults ? (
-                <View style={styles.results}>
-                  <ScrollView
-                    style={styles.resultsScroll}
-                    keyboardShouldPersistTaps="handled"
-                    nestedScrollEnabled
-                  >
-                    {searching && results.length === 0 ? (
-                      <View style={styles.resultLoading}>
-                        <ActivityIndicator color={C.NAVY} />
-                        <Text style={styles.resultLoadingText}>
-                          Searching the catalogue…
-                        </Text>
-                      </View>
-                    ) : null}
-
-                    {!searching && results.length === 0 ? (
-                      <Text style={styles.resultEmpty}>
-                        No plants match “{term.trim()}”. Try a shorter name.
-                      </Text>
-                    ) : null}
-
-                    {results.map((plant) => {
-                      const inventory = plant.inventoryList || [];
-                      const stock = inventory.reduce(
-                        (sum, row) => sum + (row.quantity || 0),
-                        0,
-                      );
-                      const availableUnits = inventory.filter(
-                        (row) => (row.quantity || 0) > 0,
-                      ).length;
-
-                      return (
-                        <Pressable
-                          key={plant.plantId}
-                          style={({ pressed, hovered }) => [
-                            styles.resultCard,
-                            hovered && styles.resultCardHover,
-                            pressed && styles.resultCardPressed,
-                          ]}
-                          onPress={() => addPlant(plant)}
-                        >
-                          <View style={styles.resultIcon}>
-                            <Ionicons
-                              name="leaf-outline"
-                              size={17}
-                              color={C.NAVY}
-                            />
-                          </View>
-
-                          <View style={styles.fill}>
-                            <Text style={styles.resultName} numberOfLines={1}>
-                              {plant.plantName}
-                            </Text>
-
-                            <View style={styles.chipRow}>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {plant.size || "No size"}
-                                </Text>
-                              </View>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {formatNumber(stock)} in stock
-                                </Text>
-                              </View>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {availableUnits} unit
-                                  {availableUnits === 1 ? "" : "s"}
-                                </Text>
-                              </View>
-                            </View>
-                          </View>
-
-                          <View style={styles.resultPriceWrap}>
-                            <Text style={styles.resultPrice}>
-                              {formatAmount(priceOf(plant))}
-                            </Text>
-                            <Text style={styles.resultPriceLabel}>
-                              per plant
-                            </Text>
-                          </View>
-
-                          <Ionicons
-                            name="add-circle"
-                            size={22}
-                            color={C.GREEN}
-                          />
-                        </Pressable>
-                      );
-                    })}
-                  </ScrollView>
-                </View>
-              ) : null}
             </View>
           </View>
         ) : null}
 
-        {/* ── scrollable body ── */}
-        <ScrollView
-          ref={bodyScrollRef}
-          style={styles.bodyScroll}
-          contentContainerStyle={styles.bodyContent}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          {showChecks && lines.length > 0 ? (
-            <View style={styles.checkStrip}>
-              <Ionicons
-                name={allChecked ? "checkmark-circle" : "ellipse-outline"}
-                size={18}
-                color={allChecked ? C.GREEN : C.MUTED}
-              />
-              <Text style={styles.checkStripText}>
-                {allChecked
-                  ? "Every row checked. The invoice is ready."
-                  : `${checkedCount} of ${checkableLines.length} rows checked`}
-              </Text>
-            </View>
-          ) : null}
+        {/* ── scrollable body ──
+           The search dropdown is a sibling of the body scroller, absolutely
+           positioned over its top edge, rather than a child of the search
+           box. Android will not deliver touches to the part of a child that
+           sits outside its parent's bounds, so hanging the list off the short
+           toolbar left it visible but unscrollable. */}
+        <View style={styles.bodyZone}>
+          <ScrollView
+            ref={bodyScrollRef}
+            style={styles.bodyScroll}
+            contentContainerStyle={styles.bodyContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {showChecks && lines.length > 0 ? (
+              <View style={styles.checkStrip}>
+                <Ionicons
+                  name={allChecked ? "checkmark-circle" : "ellipse-outline"}
+                  size={18}
+                  color={allChecked ? C.GREEN : C.MUTED}
+                />
+                <Text style={styles.checkStripText}>
+                  {allChecked
+                    ? "Every row checked. The invoice is ready."
+                    : `${checkedCount} of ${checkableLines.length} rows checked`}
+                </Text>
+              </View>
+            ) : null}
 
-          <View style={styles.tableWrap} onLayout={onTableLayout}>
-            {tableRows.length === 0 ? (
-              <View style={styles.tableShell}>
-                <View style={styles.emptyWrap}>
-                  <View style={styles.emptyIcon}>
-                    <Ionicons name="leaf-outline" size={28} color={C.NAVY} />
+            <View style={styles.tableWrap} onLayout={onTableLayout}>
+              {tableRows.length === 0 ? (
+                <View style={styles.tableShell}>
+                  <View style={styles.emptyWrap}>
+                    <View style={styles.emptyIcon}>
+                      <Ionicons name="leaf-outline" size={28} color={C.NAVY} />
+                    </View>
+                    <Text style={styles.emptyTitle}>
+                      No plants on this quotation
+                    </Text>
+                    <Text style={styles.emptyText}>
+                      {canEditTotals
+                        ? "Search above to add the first one."
+                        : "Nothing was reserved against this quotation."}
+                    </Text>
                   </View>
-                  <Text style={styles.emptyTitle}>
-                    No plants on this quotation
-                  </Text>
-                  <Text style={styles.emptyText}>
-                    {canEditTotals
-                      ? "Search above to add the first one."
-                      : "Nothing was reserved against this quotation."}
-                  </Text>
                 </View>
-              </View>
-            ) : isCardMode ? (
-              <View style={styles.cardList}>
-                {tableRows.map((item, index) => renderCard(item, index))}
-              </View>
-            ) : (
-              <View style={styles.tableShell}>
-                {tableHead}
-                <View style={styles.tableBody}>
-                  {tableRows.map((item, index) => renderRow(item, index))}
+              ) : isCardMode ? (
+                <View style={styles.cardList}>
+                  {tableRows.map((item, index) => renderCard(item, index))}
                 </View>
-              </View>
-            )}
-          </View>
-
-          {renderAudit()}
-
-          {error ? (
-            <View style={styles.banner}>
-              <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
-              <Text style={styles.bannerText}>{error}</Text>
+              ) : (
+                <View style={styles.tableShell}>
+                  {tableHead}
+                  <View style={styles.tableBody}>
+                    {tableRows.map((item, index) => renderRow(item, index))}
+                  </View>
+                </View>
+              )}
             </View>
-          ) : notice ? (
-            <View style={[styles.banner, styles.bannerOk]}>
-              <Ionicons
-                name="checkmark-circle"
-                size={17}
-                color={C.GREEN_DEEP}
-              />
-              <Text style={styles.bannerOkText}>{notice}</Text>
+
+            {renderAudit()}
+
+            {error ? (
+              <View style={styles.banner}>
+                <Ionicons
+                  name="alert-circle-outline"
+                  size={17}
+                  color={C.ALERT}
+                />
+                <Text style={styles.bannerText}>{error}</Text>
+              </View>
+            ) : notice ? (
+              <View style={[styles.banner, styles.bannerOk]}>
+                <Ionicons
+                  name="checkmark-circle"
+                  size={17}
+                  color={C.GREEN_DEEP}
+                />
+                <Text style={styles.bannerOkText}>{notice}</Text>
+              </View>
+            ) : null}
+          </ScrollView>
+
+          {canEditTotals && showResults ? (
+            <View style={styles.results}>
+              <ScrollView
+                style={styles.resultsScroll}
+                keyboardShouldPersistTaps="handled"
+                showsVerticalScrollIndicator
+              >
+                {searching && results.length === 0 ? (
+                  <View style={styles.resultLoading}>
+                    <ActivityIndicator color={C.NAVY} />
+                    <Text style={styles.resultLoadingText}>
+                      Searching the catalogue…
+                    </Text>
+                  </View>
+                ) : null}
+
+                {!searching && results.length === 0 ? (
+                  <Text style={styles.resultEmpty}>
+                    No plants match “{term.trim()}”. Try a shorter name.
+                  </Text>
+                ) : null}
+
+                {results.map((plant) => {
+                  const inventory = plant.inventoryList || [];
+                  const stock = inventory.reduce(
+                    (sum, row) => sum + (row.quantity || 0),
+                    0,
+                  );
+                  const availableUnits = inventory.filter(
+                    (row) => (row.quantity || 0) > 0,
+                  ).length;
+
+                  return (
+                    <Pressable
+                      key={plant.plantId}
+                      style={({ pressed, hovered }) => [
+                        styles.resultCard,
+                        hovered && styles.resultCardHover,
+                        pressed && styles.resultCardPressed,
+                      ]}
+                      onPress={() => addPlant(plant)}
+                    >
+                      <View style={styles.resultIcon}>
+                        <Ionicons
+                          name="leaf-outline"
+                          size={17}
+                          color={C.NAVY}
+                        />
+                      </View>
+
+                      <View style={styles.fill}>
+                        <Text style={styles.resultName} numberOfLines={1}>
+                          {plant.plantName}
+                        </Text>
+
+                        <View style={styles.chipRow}>
+                          <View style={styles.chip}>
+                            <Text style={styles.chipText}>
+                              {plant.size || "No size"}
+                            </Text>
+                          </View>
+                          <View style={styles.chip}>
+                            <Text style={styles.chipText}>
+                              {formatNumber(stock)} in stock
+                            </Text>
+                          </View>
+                          <View style={styles.chip}>
+                            <Text style={styles.chipText}>
+                              {availableUnits} unit
+                              {availableUnits === 1 ? "" : "s"}
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+
+                      <View style={styles.resultPriceWrap}>
+                        <Text style={styles.resultPrice}>
+                          {formatAmount(priceOf(plant))}
+                        </Text>
+                        <Text style={styles.resultPriceLabel}>per plant</Text>
+                      </View>
+
+                      <Ionicons name="add-circle" size={22} color={C.GREEN} />
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
             </View>
           ) : null}
-        </ScrollView>
+        </View>
 
         {/* ── totals + actions ── */}
         <View style={styles.footerDock}>

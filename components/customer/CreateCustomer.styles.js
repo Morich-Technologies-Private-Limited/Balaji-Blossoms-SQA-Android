@@ -217,6 +217,17 @@ export default function makeStyles({ width, height, isTablet, isDesktop }) {
       color: NAVY,
       fontWeight: "700",
     },
+    pickerBadge: {
+      fontSize: 9.5,
+      fontWeight: "800",
+      letterSpacing: 0.6,
+      color: NAVY,
+      backgroundColor: `${NAVY}14`,
+      paddingHorizontal: 6,
+      paddingVertical: 3,
+      borderRadius: 999,
+      overflow: "hidden",
+    },
     pickerState: {
       alignItems: "center",
       justifyContent: "center",
