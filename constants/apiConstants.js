@@ -9,6 +9,7 @@ export const UPDATE_QUOTATION_PLANTS_URL = `${API_BASE_URL}/quotation/updatePlan
 export const QUOTATION_PDF_URL = `${API_BASE_URL}/quotation/pdf`;
 export const COLLECTION_SHEET_PDF_URL = `${API_BASE_URL}/quotation/download/collection-sheet`;
 export const QUOTATION_ACCESS_URL = `${API_BASE_URL}/quotation/check/access`;
+export const QUOTATION_EDIT_LEVEL_URL = `${API_BASE_URL}/quotation/editLevel`;
 
 export const CONVERT_TO_INVOICE_URL = `${API_BASE_URL}/quotation/convertToInvoice`;
 export const MOVE_TO_DELIVERY_SHADE_URL = `${API_BASE_URL}/quotation/update/status/moveToDeliveryShade`;

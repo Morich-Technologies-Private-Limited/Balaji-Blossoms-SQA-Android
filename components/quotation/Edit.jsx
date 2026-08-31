@@ -19,17 +19,18 @@ import { fetchPackingList } from "../../api/fetchPacking";
 import { getQuotation } from "../../api/fetchQuotation";
 import { getApplicableOffer } from "../../api/getOffer";
 import { getQuotationAccess } from "../../api/getQuotationAccess";
+import { getQuotationEditLevels } from "../../api/getQuotationEditLevels";
 import { getSpecialPlantByBarcodeId } from "../../api/getSpecialPlant";
 import { searchPlants } from "../../api/plantApi";
+import {
+  convertToInvoice,
+  moveToLoadingShade,
+} from "../../api/quotationActions.js";
 import {
   fetchAllUnits,
   fetchPlantInventoryConfig,
   INVENTORY_MODES,
 } from "../../api/unitApi";
-import {
-  convertToInvoice,
-  moveToLoadingShade,
-} from "../../api/quotationActions.js";
 import { updateQuotationPlants } from "../../api/updateQuotation";
 
 import PdfShareSheet from "../../utility/PdfShareSheet";
@@ -41,6 +42,14 @@ const LEVEL_META = {
   DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Invoiced", tint: "#16A34A" },
 };
+
+/** Which levels a role may edit when /quotation/editLevel can't be reached —
+    the rule the app carried before the endpoint existed. Loading shade belongs
+    to the delivery team; everyone else edits in Draft only. */
+const fallbackEditLevels = (role) =>
+  role === "DELIVERY_MANAGER" || role === "ADMIN"
+    ? ["DRAFT", "DELIVERY_SHADE"]
+    : ["DRAFT"];
 
 const SEARCH_DEBOUNCE = 350;
 const NO_PACKING = { packingId: null, packingName: "No packing", price: 0 };
@@ -186,18 +195,64 @@ const specialFromRecord = (record) => ({
   barcodeId: record?.barcodeId,
   plantName: record?.plantName || "Special plant",
   price: toMoney(record?.price),
+  /* Kept unparsed on purpose: `null` (no discount on this plant) has to stay
+     distinguishable from a real 0, which toMoney would also produce. */
+  discountPrice: record?.discountPrice ?? null,
   unitId: record?.unitId ?? null,
   unitName: record?.unitName ?? null,
   status: record?.status ?? null,
   arrivalDate: record?.arrivalDate ?? null,
   departureDate: record?.departureDate ?? null,
+  /* Scanned in during this session, so the server has never seen it. Set at
+     the barcode-add site rather than through a second parameter here: this
+     function is passed straight to .map(), which would feed the array index
+     into any extra argument. */
+  isNew: false,
 });
+
+/** What a special plant actually costs. `discountPrice` is the already-final
+    figure the backend worked out, so the screen only ever chooses between it
+    and the list price — it never applies a percentage itself. An absent
+    discountPrice means the plant isn't discounted. */
+const specialPriceOf = (special) =>
+  special?.discountPrice != null
+    ? toMoney(special.discountPrice)
+    : toMoney(special?.price);
+
+/** True only when there is a discount worth showing the customer. */
+const specialDiscounted = (special) =>
+  special?.discountPrice != null &&
+  specialPriceOf(special) < toMoney(special?.price);
+
+/** Identifies a removed row to the backend. A regular line is known by its
+    plantId, a special plant by the barcode on the physical item. */
+const removalIdOf = (row) =>
+  row?.isSpecial
+    ? { plantId: null, barcodeId: row.barcodeId ?? null, isSpecialPlant: true }
+    : { plantId: row?.plantId, barcodeId: null, isSpecialPlant: false };
 
 /** Jackson serialises `isSelectedByCustomer` both ways depending on config.
     An absent value means YES — rows are the customer's pick until somebody
     says otherwise. */
 const chosenByCustomer = (source) =>
   source?.selectedByCustomer ?? source?.isSelectedByCustomer ?? true;
+
+/** Units are listed in the order the company set on them, not the order the
+    inventory or the API happened to return. A unit with no sequence sorts
+    after every ordered one, then by name, so the tail is at least stable. */
+const bySequence = (a, b) => {
+  const left = a?.sequence ?? Number.MAX_SAFE_INTEGER;
+  const right = b?.sequence ?? Number.MAX_SAFE_INTEGER;
+  if (left !== right) return left - right;
+  return String(a?.unitName || "").localeCompare(String(b?.unitName || ""));
+};
+
+/** The unit a plant should be selected on when nothing else has decided.
+    Same Jackson quirk as chosenByCustomer: Lombok turns a primitive
+    `isDefaultForPlantSelection` into isDefaultForPlantSelection(), which
+    serialises as either name depending on the ObjectMapper. */
+const isDefaultUnitForPlants = (unit) =>
+  !!(unit?.defaultForPlantSelection ?? unit?.isDefaultForPlantSelection);
 
 const subtitleOf = (source, seedling) =>
   source?.botanicalName ||
@@ -428,6 +483,7 @@ const settleLine = (line) => ({
   baseUnitId: line.unitId ?? null,
   baseUnitName: line.unitName ?? null,
   fieldReasons: {},
+  choiceFollowsUnit: false,
   isNew: false,
 });
 
@@ -1516,18 +1572,25 @@ function EditInner({ quotation, onClose, onSaved }) {
   const [accessResolved, setAccessResolved] = useState(false);
   const [role, setRole] = useState(null);
 
+  /* Which quotation levels this role may edit. Served by /quotation/editLevel
+     so the role→level matrix lives in one place on the backend; null until it
+     resolves, and it falls back to the app's own rule if the call fails. */
+  const [editLevels, setEditLevels] = useState(null);
+
   const isDraft = level === "DRAFT";
   const isDelivery = level === "DELIVERY_SHADE";
   const isInvoiced = level === "INVOICE_GENERATED";
 
-  /* Loading shade belongs to the delivery team: once a quotation is at
-     DELIVERY_SHADE only a DELIVERY_MANAGER or an ADMIN may edit it, whatever
-     the access grant says. Everybody else — SALES included — drops to the
-     read-only surface until it moves on. */
-  const deliveryRole = role === "DELIVERY_MANAGER" || role === "ADMIN";
-  const lockedToDeliveryRole = isDelivery && !deliveryRole;
-  const canEdit =
-    (access === "EDIT" || role === "SALES") && !lockedToDeliveryRole;
+  /* The level gate. Whether this role can work a quotation at this level is
+     the backend's call — a level absent from the list is read-only for this
+     user, whatever the access grant says. INVOICE_GENERATED is never in the
+     list, so an invoiced quotation locks here too. */
+  const allowedEditLevels = editLevels ?? fallbackEditLevels(role);
+  const levelEditable = allowedEditLevels.includes(level);
+  /* Locked by level rather than by grant — worth its own message, and only
+     once the answer has actually landed. */
+  const lockedToLevel = accessResolved && !levelEditable && !isInvoiced;
+  const canEdit = (access === "EDIT" || role === "SALES") && levelEditable;
 
   /* Editing needs BOTH an EDIT grant and a non-invoiced level. READ collapses
      the whole screen to the same read-only surface as an invoice. */
@@ -1679,6 +1742,14 @@ function EditInner({ quotation, onClose, onSaved }) {
   /* The delete reason modal is a gate in front of a pending delete. */
   const [pendingDelete, setPendingDelete] = useState(null);
 
+  /* Every removal of a row the server already knows about, banked until the
+     next successful save carries it away as plantRemovalDtoList. Dropping a
+     row out of `lines` / `specials` only tells the backend that it is gone —
+     the DTO is what carries *why*, which is why a Draft removal is recorded
+     here too even though it collects no reason. Rows added in this session
+     are never listed: the server never had them. */
+  const [removals, setRemovals] = useState([]);
+
   /* Gates the back / close buttons: shown instead of closing immediately
      whenever there are unsaved changes, so a save or a discard is explicit. */
   const [confirmClose, setConfirmClose] = useState(false);
@@ -1703,15 +1774,34 @@ function EditInner({ quotation, onClose, onSaved }) {
     let alive = true;
     (async () => {
       const id = quotation?.quotationId;
-      const [response, currentRole] = await Promise.all([
-        id == null ? Promise.resolve(null) : getQuotationAccess(id),
-        getCurrentRole(),
-      ]);
+      /* The role is needed before the level list can be asked for, so it is
+         resolved first; the two server calls then run together. */
+      const currentRole = await getCurrentRole();
       if (!alive) return;
       setRole(currentRole || null);
+
+      const [response, levelResponse] = await Promise.all([
+        id == null ? Promise.resolve(null) : getQuotationAccess(id),
+        currentRole
+          ? getQuotationEditLevels(currentRole)
+          : Promise.resolve(null),
+      ]);
+      if (!alive) return;
+
       const granted =
         response?.status === "SUCCESS" ? response.payload?.accessLevel : null;
       setAccess(granted === "EDIT" ? "EDIT" : "READ");
+
+      /* An empty list is a real answer — this role edits nothing — but a
+         failed call is not, and falls back to the app's own rule so a backend
+         outage doesn't lock the floor out of every quotation. */
+      const levels =
+        levelResponse?.status === "SUCCESS" &&
+        Array.isArray(levelResponse.payload)
+          ? levelResponse.payload.map((name) => String(name).toUpperCase())
+          : fallbackEditLevels(currentRole);
+      setEditLevels(levels);
+
       setAccessResolved(true);
     })();
     return () => {
@@ -1820,7 +1910,10 @@ function EditInner({ quotation, onClose, onSaved }) {
     const run = ++offerRunRef.current;
     const current = linesRef.current;
 
-    /* pool the quantities of every line sharing a parent group */
+    /* Pool the quantities of every line sharing a parent group. `quantity` is
+       the right figure for both kinds of row, not derivedQuantity: a seedling
+       is always dealt in trays, so its offer brackets on the tray count and
+       must not be expanded to plants. */
     const totals = new Map();
     current.forEach((line) => {
       const group = line.parentGroupName;
@@ -1831,51 +1924,66 @@ function EditInner({ quotation, onClose, onSaved }) {
 
     if (force) offerCache.current.clear();
 
-    const pending = force
-      ? [...totals]
-      : [...totals].filter(([group, total]) =>
-          current.some(
-            (line) =>
-              line.parentGroupName === group &&
-              line.offerKey !== `${group}:${total}`,
-          ),
-        );
+    /* Every group is revalidated on every pass, not just the ones whose own
+       pooled total moved. Filtering to moved groups looked like a saving but
+       dropped changes on the floor: a group whose quantities all fall to zero
+       leaves `totals` altogether, so it was never in the pending list and its
+       lines kept the discount they earned at the old quantity.
 
-    if (pending.length === 0) {
-      if (run === offerRunRef.current) setOffersBusy(false);
-      return;
-    }
+       Re-asking for everything costs nothing when nothing moved — the cache
+       keys on group:total, so only a total this screen has not seen before
+       reaches the network. */
+    const wanted = [...totals];
+    const needsNetwork = wanted.some(
+      ([group, total]) =>
+        offerCache.current.get(`${group}:${total}`) === undefined,
+    );
+    if (needsNetwork) setOffersBusy(true);
 
-    setOffersBusy(true);
-
-    const resolved = await Promise.all(
-      pending.map(async ([group, total]) => {
-        const key = `${group}:${total}`;
-        let value = offerCache.current.get(key);
-        if (value === undefined) {
-          const response = await getApplicableOffer(group, total);
-          value =
-            response?.status === "SUCCESS"
-              ? toMoney(response.payload?.discount)
-              : 0;
-          offerCache.current.set(key, value);
-        }
-        return { group, offerKey: key, discount: value };
-      }),
+    const resolved = new Map(
+      await Promise.all(
+        wanted.map(async ([group, total]) => {
+          const key = `${group}:${total}`;
+          let value = offerCache.current.get(key);
+          if (value === undefined) {
+            const response = await getApplicableOffer(group, total);
+            value =
+              response?.status === "SUCCESS"
+                ? toMoney(response.payload?.discount)
+                : 0;
+            offerCache.current.set(key, value);
+          }
+          return [group, { offerKey: key, discount: value }];
+        }),
+      ),
     );
 
     /* superseded by a newer run — that one owns the spinner and the write */
     if (!offerAliveRef.current || run !== offerRunRef.current) return;
 
     setOffersBusy(false);
-    setLines((prev) =>
-      prev.map((line) => {
-        const hit = resolved.find((r) => r.group === line.parentGroupName);
-        return hit
-          ? { ...line, offerDiscount: hit.discount, offerKey: hit.offerKey }
-          : line;
-      }),
-    );
+    setLines((prev) => {
+      let moved = false;
+      const next = prev.map((line) => {
+        const hit = resolved.get(line.parentGroupName);
+        /* No entry means the group earns nothing right now — either it pooled
+           to zero or it never qualified. Either way the line must be cleared,
+           not left alone. */
+        const discount = hit ? hit.discount : 0;
+        const offerKey = hit ? hit.offerKey : null;
+        if (
+          toMoney(line.offerDiscount) === toMoney(discount) &&
+          (line.offerKey ?? null) === offerKey
+        )
+          return line;
+        moved = true;
+        return { ...line, offerDiscount: discount, offerKey };
+      });
+      /* The same array back when nothing actually changed. The debounce below
+         watches `lines`, so handing it a fresh array every pass would have it
+         re-arm itself forever. */
+      return moved ? next : prev;
+    });
   }, []);
 
   /* Debounced catch-all so offers still settle while the user keeps typing. */
@@ -2027,6 +2135,15 @@ function EditInner({ quotation, onClose, onSaved }) {
               ...line,
               unitId: snap.unitId ?? null,
               unitName: snap.unitName ?? null,
+              /* If the choice only moved because this unit pick moved it, it
+                 rode in on the pick and goes back out with it — otherwise the
+                 row keeps a default belonging to a unit it is no longer on. */
+              ...(line.choiceFollowsUnit
+                ? {
+                    selectedByCustomer: !!snap.selectedByCustomer,
+                    choiceFollowsUnit: false,
+                  }
+                : null),
               fieldReasons: nextReasons,
             };
           case "packing":
@@ -2056,9 +2173,25 @@ function EditInner({ quotation, onClose, onSaved }) {
   const addPlant = useCallback(
     (plant) => {
       const inventory = plant.inventoryList || [];
+
+      /* The unit flagged isDefaultForPlantSelection is the company's standing
+         answer to which unit a plant comes from, so it is the first choice —
+         ahead of even the quotation's own unit. Preferred as its inventory row
+         when it holds the plant, so the new line still picks up traySize and
+         the available figure. In AVAILABLE_UNIT mode it counts only when it
+         does hold the plant: the picker lists nothing else there, so defaulting
+         to it otherwise would strand the row on a unit the operator cannot
+         see in the list. */
+      const flagged = (allUnits || []).find(isDefaultUnitForPlants);
+      const flaggedStock = flagged
+        ? inventory.find((row) => row.unitId === flagged.unitId)
+        : null;
+
       const preferred =
+        flaggedStock ||
+        (flagged && !takePlantFromAvailableUnit ? flagged : null) ||
         inventory.find((row) => row.unitId === quotation?.unitId) ||
-        /* ANY_UNIT: the quotation's own unit is still the default even when it
+        /* ANY_UNIT: the quotation's own unit is still preferred even when it
            holds none of this plant — falling through to whichever unit happens
            to have stock would move the row somewhere unexpected. */
         (takePlantFromAvailableUnit
@@ -2067,8 +2200,16 @@ function EditInner({ quotation, onClose, onSaved }) {
               (unit) => unit.unitId === quotation?.unitId,
             )) ||
         inventory.find((row) => (row.quantity || 0) > 0) ||
-        inventory[0] ||
+        [...inventory].sort(bySequence)[0] ||
         null;
+
+      /* The unit decides the selected-by-customer starting point here for the
+         same reason it does in chooseUnit — a row should never open on a
+         default its unit disagrees with. `preferred` may be an inventory row,
+         which carries no default, so it is looked up by unitId. */
+      const preferredUnit = (allUnits || []).find(
+        (unit) => unit.unitId === preferred?.unitId,
+      );
 
       /* Checked against the live `lines` state (not `prev` inside the updater
          below) so the caller can know, synchronously, whether this tap grew
@@ -2125,8 +2266,11 @@ function EditInner({ quotation, onClose, onSaved }) {
             packingCharge,
             packingManual: false,
             packingCustom: false,
-            /* new rows are the customer's pick until told otherwise */
-            selectedByCustomer: true,
+            /* the unit's default, or the customer's pick when no unit
+               record says otherwise */
+            selectedByCustomer: preferredUnit
+              ? chosenByCustomer(preferredUnit)
+              : true,
             baseQuantity: "0",
             basePackingName: packingName,
             basePackingCharge: packingCharge,
@@ -2152,7 +2296,8 @@ function EditInner({ quotation, onClose, onSaved }) {
          register its input ref before either happens. */
       if (!existing) {
         setTimeout(() => {
-          if (isCardMode) bodyScrollRef.current?.scrollToEnd({ animated: true });
+          if (isCardMode)
+            bodyScrollRef.current?.scrollToEnd({ animated: true });
           qtyInputRefs.current.get(newKey)?.focus();
         }, 50);
       }
@@ -2188,15 +2333,14 @@ function EditInner({ quotation, onClose, onSaved }) {
         };
       }
 
-      setSpecials((prev) => [...prev, specialFromRecord(response.payload)]);
+      setSpecials((prev) => [
+        ...prev,
+        { ...specialFromRecord(response.payload), isNew: true },
+      ]);
       return { ok: true, plant: response.payload };
     },
     [specials],
   );
-
-  const removeSpecial = useCallback((key) => {
-    setSpecials((prev) => prev.filter((special) => special.key !== key));
-  }, []);
 
   /* ── unit source ─────────────────────────────────────────────────────
      The full unit list is fetched once per screen and shared by every row's
@@ -2224,9 +2368,11 @@ function EditInner({ quotation, onClose, onSaved }) {
       if (!alive || !mode) return;
       const available = mode === INVENTORY_MODES.AVAILABLE_UNIT;
       setTakePlantFromAvailableUnit(available);
-      /* Warm the cache now: ANY_UNIT needs the list to default a newly added
-         plant to the quotation's own unit, not just to open a picker. */
-      if (!available) loadAllUnits();
+      /* Warm the cache now, in either mode. ANY_UNIT needs the list to default
+         a newly added plant to the quotation's own unit, and both modes need
+         it for the display sequence and the selected-by-customer default — a
+         plant's inventoryList carries neither. */
+      loadAllUnits();
     })();
 
     return () => {
@@ -2276,11 +2422,28 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const chooseUnit = useCallback(
     (line, inventory) => {
+      /* Each unit carries its own selected-by-customer default, and every unit
+         change re-applies it — including a change back to a unit the row was
+         on earlier. An operator who wants something else sets it on the choice
+         field afterwards; the unit only ever decides the starting point.
+         `choiceFollowsUnit` marks that the flip came from here rather than
+         from the operator, so it is reasoned under the unit rather than
+         demanding a second reason nothing prompts for. */
+      const fallsOut =
+        inventory.defaultSelectedByCustomer != null &&
+        !!inventory.defaultSelectedByCustomer !== !!line.selectedByCustomer;
+
       updateLine(line.key, {
         unitId: inventory.unitId,
         unitName: inventory.unitName,
         traySize: inventory.traySize ?? line.traySize,
         available: inventory.quantity ?? null,
+        ...(fallsOut
+          ? {
+              selectedByCustomer: !!inventory.defaultSelectedByCustomer,
+              choiceFollowsUnit: true,
+            }
+          : null),
       });
       setPicker(null);
       /* A picker selection is an immediate, discrete edit — reason it now. */
@@ -2321,7 +2484,12 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const chooseChoice = useCallback(
     (line, option) => {
-      updateLine(line.key, { selectedByCustomer: option.value });
+      /* The operator has taken the choice over from the unit default, so it
+         is their edit now and carries its own reason. */
+      updateLine(line.key, {
+        selectedByCustomer: option.value,
+        choiceFollowsUnit: false,
+      });
       setPicker(null);
       setTimeout(() => commitFieldEdit(line.key, "choice"), 0);
     },
@@ -2334,24 +2502,50 @@ function EditInner({ quotation, onClose, onSaved }) {
   );
 
   /* What the unit picker offers for the row it is open on. AVAILABLE_UNIT
-     hands back the plant's inventory untouched; ANY_UNIT lists every unit with
-     the inventory merged in, so a unit that doesn't carry the plant is still
-     selectable and simply reads as having none. */
+     draws from the plant's inventory; ANY_UNIT lists every unit with the
+     inventory merged in, so a unit that doesn't carry the plant is still
+     selectable and simply reads as having none.
+
+     Either way the options are ordered by the unit's own sequence and carry
+     its selected-by-customer default, both of which live only on the unit
+     record — the plant's inventoryList has neither, so it is matched up by
+     unitId. */
   const unitOptions = useMemo(() => {
     const inventory = activeLine?.inventoryList || [];
-    if (takePlantFromAvailableUnit) return inventory;
+    const unitById = new Map(
+      (allUnits || []).map((unit) => [unit.unitId, unit]),
+    );
+
+    if (takePlantFromAvailableUnit) {
+      return inventory
+        .map((row) => {
+          const unit = unitById.get(row.unitId);
+          return {
+            ...row,
+            sequence: unit?.sequence ?? null,
+            /* null, not a guess, when the unit list hasn't landed: choosing
+               this option then leaves the row's own choice alone. */
+            defaultSelectedByCustomer: unit ? chosenByCustomer(unit) : null,
+          };
+        })
+        .sort(bySequence);
+    }
 
     const stockByUnit = new Map(inventory.map((row) => [row.unitId, row]));
-    return (allUnits || []).map((unit) => {
-      const stock = stockByUnit.get(unit.unitId);
-      return {
-        unitId: unit.unitId,
-        unitName: unit.unitName,
-        quantity: stock?.quantity ?? 0,
-        traySize: stock?.traySize ?? null,
-        stocked: !!stock,
-      };
-    });
+    return (allUnits || [])
+      .map((unit) => {
+        const stock = stockByUnit.get(unit.unitId);
+        return {
+          unitId: unit.unitId,
+          unitName: unit.unitName,
+          quantity: stock?.quantity ?? 0,
+          traySize: stock?.traySize ?? null,
+          stocked: !!stock,
+          sequence: unit.sequence ?? null,
+          defaultSelectedByCustomer: chosenByCustomer(unit),
+        };
+      })
+      .sort(bySequence);
   }, [activeLine, takePlantFromAvailableUnit, allUnits]);
 
   /* ── totals ──────────────────────────────────────────────────────── */
@@ -2366,7 +2560,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       packing += linePacking(line);
     });
 
-    const special = specials.reduce((sum, sp) => sum + toMoney(sp.price), 0);
+    const special = specials.reduce((sum, sp) => sum + specialPriceOf(sp), 0);
 
     const subtotal = plantAmount + packing + special;
     const transportValue = toMoney(transport);
@@ -2422,7 +2616,11 @@ function EditInner({ quotation, onClose, onSaved }) {
   );
 
   /* Past Draft, every changed field must carry a reason before saving. New
-     rows are exempt (they need no per-field reason). */
+     rows are exempt (they need no per-field reason), and so is a choice that
+     only moved because the unit under it moved — the operator never edited
+     it, nothing prompts for it, and the unit's own reason already covers it.
+     Without this exemption a unit change whose default differs would lock the
+     Save button with no way to clear it. */
   const missingFieldReason = useMemo(() => {
     if (!auditActive) return false;
     return lines.some((line) => {
@@ -2430,6 +2628,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       return ["quantity", "unit", "packing", "choice"].some(
         (field) =>
           fieldChanged(line, field) &&
+          !(field === "choice" && line.choiceFollowsUnit) &&
           !String(line.fieldReasons?.[field] || "").trim(),
       );
     });
@@ -2450,8 +2649,8 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const working = saving || busy !== null;
 
-  const blockingReason = lockedToDeliveryRole
-    ? "Only a delivery manager or an admin can edit a quotation in the loading shade."
+  const blockingReason = lockedToLevel
+    ? `Your role cannot edit a quotation at ${levelMeta.label.toLowerCase()}.`
     : !canEdit
       ? "You have read-only access to this quotation."
       : !userId
@@ -2574,140 +2773,164 @@ function EditInner({ quotation, onClose, onSaved }) {
      Per-field reasons now live on each line (line.fieldReasons). At save, each
      changed field's reason is joined into a single per-row reason string sent
      with that row. Draft is never audited, so no reasons are attached there. */
-  const persist = useCallback(
-    async ({ deleteReason } = {}) => {
-      if (blockingReason) {
-        setError(blockingReason);
-        return null;
-      }
+  const persist = useCallback(async () => {
+    if (blockingReason) {
+      setError(blockingReason);
+      return null;
+    }
 
-      setError(null);
-      setNotice(null);
-      setSaving(true);
+    setError(null);
+    setNotice(null);
+    setSaving(true);
 
-      const discountAmount = toMoney(discount);
-      const transportAmount = toMoney(transport);
-      const advanceAmount = toMoney(advance);
+    const discountAmount = toMoney(discount);
+    const transportAmount = toMoney(transport);
+    const advanceAmount = toMoney(advance);
 
-      const reasonForLine = (line) => {
-        if (!auditActive || line.isNew) return null;
-        const parts = ["quantity", "unit", "packing", "choice"]
-          .filter((field) => fieldChanged(line, field))
-          .map((field) => {
-            const r = String(line.fieldReasons?.[field] || "").trim();
-            return r ? `${FIELD_META[field].label}: ${r}` : null;
-          })
-          .filter(Boolean);
-        return parts.length > 0 ? parts.join(" · ") : null;
-      };
+    const reasonForLine = (line) => {
+      if (!auditActive || line.isNew) return null;
+      const parts = ["quantity", "unit", "packing", "choice"]
+        .filter((field) => fieldChanged(line, field))
+        .map((field) => {
+          const r = String(line.fieldReasons?.[field] || "").trim();
+          if (r) return `${FIELD_META[field].label}: ${r}`;
+          /* Unreasoned because the operator never touched it — say so
+               rather than letting the flip go into the audit unexplained. */
+          if (field === "choice" && line.choiceFollowsUnit)
+            return `${FIELD_META.choice.label}: default for ${
+              line.unitName || "the selected unit"
+            }`;
+          return null;
+        })
+        .filter(Boolean);
+      return parts.length > 0 ? parts.join(" · ") : null;
+    };
 
-      const body = {
-        plantList: lines.map((line) => ({
-          plantId: line.plantId,
-          // Unchanged contract: seedlings still send the tray count.
-          quantityReserved: toCount(line.quantity),
-          unitId: line.unitId,
-          unitName: line.unitName,
-          packingId: line.packingId ?? null,
-          packingName: line.packingName,
-          packingCharge: toMoney(line.packingCharge),
-          selectedByCustomer: line.selectedByCustomer,
-          reason: lineChanged(line) ? reasonForLine(line) : null,
-        })),
-        specialPlantList: specials.map((special) => ({
-          barcodeId: special.barcodeId,
-        })),
-        additionalDiscount: discountAmount,
-        additionalDiscountRemark:
-          discountAmount > 0 ? discountRemark.trim() : null,
-        transportationCost: transportAmount,
-        /* The flat advanceAmount field is gone — the backend only reads the
+    const body = {
+      plantList: lines.map((line) => ({
+        plantId: line.plantId,
+        // Unchanged contract: seedlings still send the tray count.
+        quantityReserved: toCount(line.quantity),
+        unitId: line.unitId,
+        unitName: line.unitName,
+        packingId: line.packingId ?? null,
+        packingName: line.packingName,
+        packingCharge: toMoney(line.packingCharge),
+        selectedByCustomer: line.selectedByCustomer,
+        reason: lineChanged(line) ? reasonForLine(line) : null,
+      })),
+      specialPlantList: specials.map((special) => ({
+        barcodeId: special.barcodeId,
+      })),
+      additionalDiscount: discountAmount,
+      additionalDiscountRemark:
+        discountAmount > 0 ? discountRemark.trim() : null,
+      transportationCost: transportAmount,
+      /* The flat advanceAmount field is gone — the backend only reads the
            ledger now. Only the signed-in user's own row is ever sent, so a
            save can never touch a colleague's collected advance; resending an
            unchanged amount is a no-op on the server. */
-        advanceTransactionList: userId
-          ? [
-              {
-                emailId: userId,
-                collectorName: userName || userId,
-                amount: advanceAmount,
-                transactionMode: advanceMode,
-              },
-            ]
-          : [],
-        /* Delete reasons aren't tied to a surviving row, so they ride along at
-           the document level when a removal triggered this save. */
-        deleteReason: deleteReason || null,
-      };
+      advanceTransactionList: userId
+        ? [
+            {
+              emailId: userId,
+              collectorName: userName || userId,
+              amount: advanceAmount,
+              transactionMode: advanceMode,
+            },
+          ]
+        : [],
+      /* Every row that left the quotation since the last save, each with the
+           reason it left. This replaces the old document-level deleteReason,
+           which could only ever describe one removal and lost the reason
+           entirely once a second row went in the same save.
 
-      const response = await updateQuotationPlants(
-        quotation.quotationId,
-        userId,
-        body,
-      );
+           `specialPlant` is the name Jackson derives from Lombok's
+           isSpecialPlant()/setSpecialPlant() pair on a primitive boolean;
+           `isSpecialPlant` is sent alongside it because this codebase has
+           already been bitten by that mapping going both ways depending on
+           the ObjectMapper config (see chosenByCustomer). Drop whichever one
+           the backend does not read. */
+      plantRemovalDtoList: removals.map((removal) => ({
+        plantId: removal.plantId,
+        barcodeId: removal.barcodeId,
+        specialPlant: removal.isSpecialPlant,
+        isSpecialPlant: removal.isSpecialPlant,
+        reason: removal.reason,
+      })),
+    };
 
-      setSaving(false);
+    const response = await updateQuotationPlants(
+      quotation.quotationId,
+      userId,
+      body,
+    );
 
-      if (response?.status === "SUCCESS") {
-        const payload = response.payload;
+    setSaving(false);
 
-        if (payload) {
-          rehydrate(payload);
-        } else {
-          // No echo from the server: settle locally so the screen goes clean.
-          setLines((prev) => prev.map(settleLine));
-          setAdvanceLedger((prev) => {
-            const others = prev.filter(
-              (row) => norm(row?.emailId) !== norm(userId),
-            );
-            if (advanceAmount <= 0) return others;
-            return [
-              ...others,
-              {
-                emailId: userId,
-                collectorName: userName || userId,
-                amount: advanceAmount,
-                collectionDate: new Date().toISOString(),
-                transactionMode: advanceMode,
-              },
-            ];
-          });
-          baselineRef.current = stateSignatureOf(
-            lines.map(settleLine),
-            discount,
-            discountRemark,
-            transport,
-            advance,
-            advanceMode,
-            specials,
+    if (response?.status === "SUCCESS") {
+      const payload = response.payload;
+
+      /* Accounted for on the server now — banking them again on the next
+           save would re-report removals the quotation no longer has. */
+      setRemovals([]);
+
+      if (payload) {
+        rehydrate(payload);
+      } else {
+        // No echo from the server: settle locally so the screen goes clean.
+        setLines((prev) => prev.map(settleLine));
+        setAdvanceLedger((prev) => {
+          const others = prev.filter(
+            (row) => norm(row?.emailId) !== norm(userId),
           );
-        }
-
-        setNotice(response.message || "Quotation saved.");
-        onSaved?.(payload ?? true, { source: "save", keepOpen: true });
-        return payload ?? true;
+          if (advanceAmount <= 0) return others;
+          return [
+            ...others,
+            {
+              emailId: userId,
+              collectorName: userName || userId,
+              amount: advanceAmount,
+              collectionDate: new Date().toISOString(),
+              transactionMode: advanceMode,
+            },
+          ];
+        });
+        baselineRef.current = stateSignatureOf(
+          lines.map(settleLine),
+          discount,
+          discountRemark,
+          transport,
+          advance,
+          advanceMode,
+          specials,
+        );
       }
 
-      setError(response?.message || "Could not save the quotation.");
-      return null;
-    },
-    [
-      blockingReason,
-      lines,
-      specials,
-      quotation,
-      userId,
-      userName,
-      onSaved,
-      discount,
-      discountRemark,
-      transport,
-      advance,
-      advanceMode,
-      auditActive,
-      rehydrate,
-    ],
-  );
+      setNotice(response.message || "Quotation saved.");
+      onSaved?.(payload ?? true, { source: "save", keepOpen: true });
+      return payload ?? true;
+    }
+
+    setError(response?.message || "Could not save the quotation.");
+    return null;
+  }, [
+    blockingReason,
+    lines,
+    specials,
+    removals,
+    quotation,
+    userId,
+    userName,
+    onSaved,
+    discount,
+    discountRemark,
+    transport,
+    advance,
+    advanceMode,
+    auditActive,
+    rehydrate,
+  ]);
 
   /* Save Changes. All per-field reasons are already gathered inline, so this
      just validates and writes — no summary modal in the way. */
@@ -2751,62 +2974,89 @@ function EditInner({ quotation, onClose, onSaved }) {
     }
   }, [persist, onClose]);
 
+  const bankRemoval = useCallback((row, reason) => {
+    /* Never saved, so there is nothing on the server to account for. */
+    if (row.isNew) return;
+    setRemovals((prev) => [
+      ...prev,
+      { ...removalIdOf(row), reason: reason || null },
+    ]);
+  }, []);
+
   /* Delete. Allowed in Draft and Delivery shade; past Draft it is reasoned via
-     the delete reason modal. */
+     the delete reason modal. Special plants go down the same path — the
+     removal DTO carries a reason for them too, so there is no case for
+     letting a barcode row leave the quotation unexplained. */
   const requestDelete = useCallback(
-    (line) => {
+    (row) => {
       if (working) return;
 
-      /* Draft, or a row added in this session (never saved): just drop it. */
-      if (!auditActive || line.isNew) {
-        dropLine(line.key);
+      /* Draft, or a row added in this session (never saved): just drop it.
+         The drop is still banked (unless it is brand new) so the backend is
+         told what left, even though Draft asks for no reason. */
+      if (!auditActive || row.isNew) {
+        bankRemoval(row, null);
+        if (row.isSpecial)
+          setSpecials((prev) => prev.filter((sp) => sp.key !== row.key));
+        else dropLine(row.key);
         return;
       }
 
       setPendingDelete({
-        lineKey: line.key,
+        rowKey: row.key,
+        isSpecial: !!row.isSpecial,
+        removal: removalIdOf(row),
         request: {
-          summary: `${line.plantName} will be removed from this quotation and the removal recorded.`,
-          title: line.plantName,
-          detail: `${formatNumber(toCount(line.quantity))} ${unitWord(
-            line,
-          )} · ${line.unitName || "no unit"} · ${formatAmount(
-            lineAmount(line),
-          )}`,
+          summary: `${row.plantName} will be removed from this quotation and the removal recorded.`,
+          title: row.plantName,
+          detail: row.isSpecial
+            ? `${row.barcodeId || "no barcode"} · ${
+                row.unitName || "no unit"
+              } · ${formatAmount(specialPriceOf(row))}`
+            : `${formatNumber(toCount(row.quantity))} ${unitWord(row)} · ${
+                row.unitName || "no unit"
+              } · ${formatAmount(lineAmount(row))}`,
         },
       });
     },
-    [working, auditActive, dropLine],
+    [working, auditActive, dropLine, bankRemoval],
   );
 
-  /* The delete reason modal hands its reason back here. The row is dropped, the
-     resulting document is saved, and the modal closes only if the save
-     succeeds. `pendingDeleteReason` stages the save so it runs against the new
-     line list once state has committed. */
-  const [pendingDeleteReason, setPendingDeleteReason] = useState(null);
+  /* The delete reason modal hands its reason back here. The row is dropped and
+     banked, the resulting document is saved, and the modal closes only if the
+     save succeeds. `pendingRemovalSave` stages the save so it runs against the
+     new row lists — and the new removal list — once state has committed. */
+  const [pendingRemovalSave, setPendingRemovalSave] = useState(null);
 
   const submitDelete = useCallback(
     (reason) => {
       const action = pendingDelete;
       if (!action) return;
-      setLines((prev) => prev.filter((line) => line.key !== action.lineKey));
+      if (action.isSpecial) {
+        setSpecials((prev) => prev.filter((sp) => sp.key !== action.rowKey));
+      } else {
+        setLines((prev) => prev.filter((line) => line.key !== action.rowKey));
+      }
+      setRemovals((prev) => [
+        ...prev,
+        { ...action.removal, reason: reason || null },
+      ]);
       setTimeout(() => {
-        setPendingDeleteReason({ reason });
+        setPendingRemovalSave({ at: Date.now() });
       }, 0);
     },
     [pendingDelete],
   );
 
   useEffect(() => {
-    if (!pendingDeleteReason) return;
-    const { reason } = pendingDeleteReason;
-    setPendingDeleteReason(null);
+    if (!pendingRemovalSave) return;
+    setPendingRemovalSave(null);
     (async () => {
-      const result = await persist({ deleteReason: reason });
+      const result = await persist();
       if (result) setPendingDelete(null);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingDeleteReason]);
+  }, [pendingRemovalSave]);
 
   /* ── paperwork ───────────────────────────────────────────────────── */
   const openPdf = useCallback(
@@ -2944,7 +3194,12 @@ function EditInner({ quotation, onClose, onSaved }) {
       if (line.isSpecial) {
         return (
           <View style={styles.alignRight}>
-            <Text style={styles.priceText}>{formatAmount(line.price)}</Text>
+            <Text style={styles.priceText}>
+              {formatAmount(specialPriceOf(line))}
+            </Text>
+            {specialDiscounted(line) ? (
+              <Text style={styles.priceStrike}>{formatAmount(line.price)}</Text>
+            ) : null}
           </View>
         );
       }
@@ -3091,15 +3346,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [
-      styles,
-      C,
-      isDraft,
-      lineEditable,
-      updateLine,
-      commitFieldEdit,
-      syncOffers,
-    ],
+    [styles, C, isDraft, lineEditable, updateLine, commitFieldEdit, syncOffers],
   );
 
   const packingField = useCallback(
@@ -3338,7 +3585,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             hitSlop={6}
             accessibilityRole="button"
             accessibilityLabel={`Remove special plant ${line.barcodeId}`}
-            onPress={() => removeSpecial(line.key)}
+            onPress={() => requestDelete(line)}
           >
             <Ionicons name="trash-outline" size={16} color={C.RED} />
           </Pressable>
@@ -3366,7 +3613,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       checkBox,
       toggleCheck,
       deleteButton,
-      removeSpecial,
+      requestDelete,
       styles,
       C,
     ],
@@ -3539,7 +3786,9 @@ function EditInner({ quotation, onClose, onSaved }) {
         align: "right",
         render: (line) => (
           <Text style={styles.amountText} numberOfLines={1}>
-            {formatAmount(line.isSpecial ? line.price : lineAmount(line))}
+            {formatAmount(
+              line.isSpecial ? specialPriceOf(line) : lineAmount(line),
+            )}
           </Text>
         ),
       },
@@ -3641,9 +3890,17 @@ function EditInner({ quotation, onClose, onSaved }) {
               <View style={styles.metaTag}>
                 <Text style={styles.metaTagText}>
                   {formatAmount(
-                    item.isSpecial ? item.price : effectivePriceOf(item),
+                    item.isSpecial
+                      ? specialPriceOf(item)
+                      : effectivePriceOf(item),
                   )}{" "}
                   / {item.isSpecial ? "plant" : priceUnitWord(item)}
+                  {specialDiscounted(item) ? (
+                    <Text style={styles.metaTagStrike}>
+                      {"  "}
+                      {formatAmount(item.price)}
+                    </Text>
+                  ) : null}
                 </Text>
               </View>
               {!item.isSpecial && lineChanged(item) ? (
@@ -3661,7 +3918,9 @@ function EditInner({ quotation, onClose, onSaved }) {
               {/* Line total sits at the end of the header row, after every
                  tag, instead of its own footer band lower in the card. */}
               <Text style={styles.cardHeaderAmount} numberOfLines={1}>
-                {formatAmount(item.isSpecial ? item.price : lineAmount(item))}
+                {formatAmount(
+                  item.isSpecial ? specialPriceOf(item) : lineAmount(item),
+                )}
               </Text>
             </View>
           </View>

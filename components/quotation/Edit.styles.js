@@ -407,6 +407,14 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       backgroundColor: FILL_DEEP,
     },
     metaTagText: { fontSize: 10.5, fontWeight: "700", color: "#5A6B80" },
+    /* the pre-discount price, struck through inline beside the price it was
+       reduced to — same tag, so it needs no marginTop of its own */
+    metaTagStrike: {
+      fontSize: 10.5,
+      fontWeight: "700",
+      color: FAINT,
+      textDecorationLine: "line-through",
+    },
     /* the SPECIAL flag on barcode-scanned rows, shown inline in the table */
     specialTag: {
       flexDirection: "row",
