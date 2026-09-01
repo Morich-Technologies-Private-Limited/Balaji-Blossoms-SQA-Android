@@ -152,7 +152,12 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       borderWidth: 1,
       borderColor: ALERT_LINE,
     },
-    dirtyDot: { height: 5, width: 5, borderRadius: 2.5, backgroundColor: ALERT },
+    dirtyDot: {
+      height: 5,
+      width: 5,
+      borderRadius: 2.5,
+      backgroundColor: ALERT,
+    },
     dirtyText: {
       fontSize: large ? 10 : 8.5,
       fontWeight: "800",
@@ -337,6 +342,20 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     bodyZone: { flex: 1, position: "relative" },
     bodyScroll: { flex: 1 },
     bodyContent: { flexGrow: 1, paddingBottom: 4 },
+    /* One wrapper around everything the body scrolls, so a single row can be
+       measured against the scrolled content — see `scrollRowIntoView`. */
+    bodyContentInner: { flexGrow: 1 },
+
+    /* ── opening state ─────────────────────────────────────────────────
+       Held until the access check answers, so the grid never opens on the
+       wrong surface and swaps under the operator. Its caption reuses
+       `loadingText`, further down with the picker sheet's own spinner. */
+    loadingBody: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 12,
+    },
 
     /* ── table ─────────────────────────────────────────────────────── */
     tableWrap: {
