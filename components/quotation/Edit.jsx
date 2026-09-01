@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -18,12 +19,18 @@ import { fetchPackingList } from "../../api/fetchPacking";
 import { getQuotation } from "../../api/fetchQuotation";
 import { getApplicableOffer } from "../../api/getOffer";
 import { getQuotationAccess } from "../../api/getQuotationAccess";
+import { getQuotationEditLevels } from "../../api/getQuotationEditLevels";
 import { getSpecialPlantByBarcodeId } from "../../api/getSpecialPlant";
 import { searchPlants } from "../../api/plantApi";
 import {
   convertToInvoice,
   moveToLoadingShade,
 } from "../../api/quotationActions.js";
+import {
+  fetchAllUnits,
+  fetchPlantInventoryConfig,
+  INVENTORY_MODES,
+} from "../../api/unitApi";
 import { updateQuotationPlants } from "../../api/updateQuotation";
 
 import PdfShareSheet from "../../utility/PdfShareSheet";
@@ -35,6 +42,14 @@ const LEVEL_META = {
   DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Invoiced", tint: "#16A34A" },
 };
+
+/** Which levels a role may edit when /quotation/editLevel can't be reached —
+    the rule the app carried before the endpoint existed. Loading shade belongs
+    to the delivery team; everyone else edits in Draft only. */
+const fallbackEditLevels = (role) =>
+  role === "DELIVERY_MANAGER" || role === "ADMIN"
+    ? ["DRAFT", "DELIVERY_SHADE"]
+    : ["DRAFT"];
 
 const SEARCH_DEBOUNCE = 350;
 const NO_PACKING = { packingId: null, packingName: "No packing", price: 0 };
@@ -167,8 +182,9 @@ const listPriceOf = (source) =>
   toMoney(source?.price ?? source?.plantPrice ?? source?.unitPrice ?? 0);
 
 /** Offer discount is a flat amount off the unit price, fetched per quantity.
-    Display only: it never changes the saved quotation or the billed amount, and
-    it is not applied to special plants. */
+    Display only: it is never sent back on save, and it is not applied to
+    special plants. It does drive the row amount and the totals on screen, so
+    what the operator reads matches the cut price shown in the price column. */
 const offerDiscountOf = (line) => Math.max(0, toMoney(line?.offerDiscount));
 const effectivePriceOf = (line) =>
   Math.max(0, toMoney(line?.price) - offerDiscountOf(line));
@@ -180,18 +196,74 @@ const specialFromRecord = (record) => ({
   barcodeId: record?.barcodeId,
   plantName: record?.plantName || "Special plant",
   price: toMoney(record?.price),
+  /* Kept unparsed on purpose: `null` (no discount on this plant) has to stay
+     distinguishable from a real 0, which toMoney would also produce. */
+  discountPrice: record?.discountPrice ?? null,
   unitId: record?.unitId ?? null,
   unitName: record?.unitName ?? null,
   status: record?.status ?? null,
   arrivalDate: record?.arrivalDate ?? null,
   departureDate: record?.departureDate ?? null,
+  /* The delivery tick, and the saved tick this row is ordered by. */
+  checked: rowChecked(record),
+  baseChecked: rowChecked(record),
+  /* Scanned in during this session, so the server has never seen it. Set at
+     the barcode-add site rather than through a second parameter here: this
+     function is passed straight to .map(), which would feed the array index
+     into any extra argument. */
+  isNew: false,
 });
+
+/** What a special plant actually costs. `discountPrice` is the already-final
+    figure the backend worked out, so the screen only ever chooses between it
+    and the list price — it never applies a percentage itself. An absent
+    discountPrice means the plant isn't discounted. */
+const specialPriceOf = (special) =>
+  special?.discountPrice != null
+    ? toMoney(special.discountPrice)
+    : toMoney(special?.price);
+
+/** True only when there is a discount worth showing the customer. */
+const specialDiscounted = (special) =>
+  special?.discountPrice != null &&
+  specialPriceOf(special) < toMoney(special?.price);
+
+/** Identifies a removed row to the backend. A regular line is known by its
+    plantId, a special plant by the barcode on the physical item. */
+const removalIdOf = (row) =>
+  row?.isSpecial
+    ? { plantId: null, barcodeId: row.barcodeId ?? null, isSpecialPlant: true }
+    : { plantId: row?.plantId, barcodeId: null, isSpecialPlant: false };
 
 /** Jackson serialises `isSelectedByCustomer` both ways depending on config.
     An absent value means YES — rows are the customer's pick until somebody
     says otherwise. */
 const chosenByCustomer = (source) =>
   source?.selectedByCustomer ?? source?.isSelectedByCustomer ?? true;
+
+/** The delivery tick saved against a row. Same Jackson quirk as
+    chosenByCustomer — Lombok's isPlantChecked() serialises as either
+    `plantChecked` or `isPlantChecked` depending on the ObjectMapper — so both
+    spellings are read. Absent means untouched, i.e. not checked. */
+const rowChecked = (source) =>
+  !!(source?.plantChecked ?? source?.isPlantChecked ?? false);
+
+/** Units are listed in the order the company set on them, not the order the
+    inventory or the API happened to return. A unit with no sequence sorts
+    after every ordered one, then by name, so the tail is at least stable. */
+const bySequence = (a, b) => {
+  const left = a?.sequence ?? Number.MAX_SAFE_INTEGER;
+  const right = b?.sequence ?? Number.MAX_SAFE_INTEGER;
+  if (left !== right) return left - right;
+  return String(a?.unitName || "").localeCompare(String(b?.unitName || ""));
+};
+
+/** The unit a plant should be selected on when nothing else has decided.
+    Same Jackson quirk as chosenByCustomer: Lombok turns a primitive
+    `isDefaultForPlantSelection` into isDefaultForPlantSelection(), which
+    serialises as either name depending on the ObjectMapper. */
+const isDefaultUnitForPlants = (unit) =>
+  !!(unit?.defaultForPlantSelection ?? unit?.isDefaultForPlantSelection);
 
 const subtitleOf = (source, seedling) =>
   source?.botanicalName ||
@@ -219,8 +291,10 @@ const derivedQuantity = (line) => {
     priced per plant, where the two are the same number. */
 const billableQuantity = (line) => toCount(line.quantity);
 
-/** line.price is already the after-discount unit price (see priceOf). */
-const lineAmount = (line) => billableQuantity(line) * toMoney(line.price);
+/** line.price is already the after-discount unit price (see priceOf), and the
+    offer is a further flat cut off it — so the row is billed on the same
+    effective price the price column shows struck through. */
+const lineAmount = (line) => billableQuantity(line) * effectivePriceOf(line);
 
 const linePacking = (line) =>
   toCount(line.quantity) * toMoney(line.packingCharge);
@@ -314,6 +388,29 @@ const fieldDelta = (line, field) => {
   }
 };
 
+/* The fields that describe what physically leaves the shade. Moving any of
+   them invalidates the delivery manager's tick — whatever was counted out
+   against the old figures no longer matches the row — so the row drops back to
+   unchecked and has to be picked and ticked again. Note this is about the
+   *patch*, not the baseline: putting a value back the way it was still clears
+   the tick, because the row still has to be re-verified against the shelf. */
+const PICK_FIELDS = [
+  "quantity",
+  "unitId",
+  "packingName",
+  "packingCharge",
+  "selectedByCustomer",
+];
+
+/** Does this patch actually move a pick field to a different value? Patches
+    that only carry background data (an inventory list, a backfilled price, a
+    reason) leave the tick alone. */
+const patchTouchesPick = (line, patch) =>
+  PICK_FIELDS.some(
+    (field) =>
+      field in patch && String(patch[field] ?? "") !== String(line[field] ?? ""),
+  );
+
 /** Everything the save call cares about, flattened so it can be compared. */
 const signatureOf = (lines) =>
   JSON.stringify(
@@ -324,6 +421,10 @@ const signatureOf = (lines) =>
       line.packingName,
       toMoney(line.packingCharge),
       line.selectedByCustomer ? 1 : 0,
+      /* The delivery tick is saved state, so ticking a box on its own makes
+         the screen dirty and Save is offered — a partly ticked list is a
+         legitimate thing to put on the server. */
+      line.checked ? 1 : 0,
     ]),
   );
 
@@ -349,7 +450,7 @@ const stateSignatureOf = (
   ).trim()}|${toMoney(transport)}|${toMoney(advance)}|${advanceMode || ""}|${(
     specials || []
   )
-    .map((special) => special.barcodeId)
+    .map((special) => `${special.barcodeId}:${special.checked ? 1 : 0}`)
     .sort()
     .join(",")}`;
 
@@ -372,6 +473,8 @@ const lineFromReservation = (reservation, isDraft) => {
     key: nextKey(),
     plantId: reservation.plantId,
     plantName: reservation.plantName,
+    /* the group this plant hangs off — offers are looked up by it */
+    parentGroupName: reservation.parentGroupName ?? null,
     plantSubtitle: subtitleOf(reservation, seedling),
     size: reservation.size,
     plantType: reservation.plantType,
@@ -404,7 +507,13 @@ const lineFromReservation = (reservation, isDraft) => {
     baseUnitName: reservation.unitName ?? null,
     /* per-field reasons, gathered inline as each field is edited */
     fieldReasons: {},
-    checked: false,
+    /* The delivery tick comes back from the server, so reopening a quotation
+       shows exactly what the delivery manager had already ticked.
+       `baseChecked` is the last *saved* tick and is what the row is ordered
+       by — rows only move to the bottom once the tick is on the server, so a
+       row never jumps out from under the finger that just ticked it. */
+    checked: rowChecked(reservation),
+    baseChecked: rowChecked(reservation),
     isNew: false,
   };
 };
@@ -419,9 +528,22 @@ const settleLine = (line) => ({
   baseSelectedByCustomer: !!line.selectedByCustomer,
   baseUnitId: line.unitId ?? null,
   baseUnitName: line.unitName ?? null,
+  baseChecked: !!line.checked,
   fieldReasons: {},
+  choiceFollowsUnit: false,
   isNew: false,
 });
+
+/** Rows already ticked off on the server sink to the bottom, so reopening a
+    part-picked quotation shows what is still outstanding first. The key is
+    `baseChecked` — the *saved* tick — so a box ticked here and now does not
+    make its row jump away from under the finger that ticked it; the list
+    settles into its new order on the next save or reopen. Order within each
+    half is untouched, so nothing else moves. */
+const sinkChecked = (rows) => [
+  ...rows.filter((row) => !row.baseChecked),
+  ...rows.filter((row) => row.baseChecked),
+];
 
 /** Audit rows come back on the quotation; normalise the shapes we might get. */
 const auditFromRecord = (record, index) => ({
@@ -1467,6 +1589,19 @@ function CloseConfirmModal({
  *
  * `selectedByCustomer` is a Yes / No dropdown. New rows default to Yes.
  *
+ * Loading shade ticks: in DELIVERY_SHADE every saved row — special plants
+ * included — carries a tick box, but only for the delivery team
+ * (DELIVERY_MANAGER / ADMIN); every other role sees the tick state read-only.
+ * A tick is ordinary unsaved state: pressing a box makes the screen dirty and
+ * enables SAVE CHANGES, and nothing reaches the server until that is pressed.
+ * The tick is then saved state (isPlantChecked), so a part-picked list comes
+ * back exactly as it was left, with the rows already ticked off moved to the
+ * bottom. Editing what a row *is* — quantity, unit, packing or customer
+ * choice — clears its tick, so a row that moved after being counted out has to
+ * be picked again. GENERATE INVOICE is shown to everyone who can work a shade
+ * quotation but only enables for the delivery team, once every row is ticked
+ * and nothing is unsaved.
+ *
  * Saving is deliberately inert: SAVE CHANGES, MOVE TO LOADING SHADE and
  * GENERATE INVOICE all call `updateQuotationPlants` and stop. The modal never
  * closes on save — the response is folded back into the screen by `rehydrate`.
@@ -1508,24 +1643,43 @@ function EditInner({ quotation, onClose, onSaved }) {
   const [accessResolved, setAccessResolved] = useState(false);
   const [role, setRole] = useState(null);
 
+  /* Which quotation levels this role may edit. Served by /quotation/editLevel
+     so the role→level matrix lives in one place on the backend; null until it
+     resolves, and it falls back to the app's own rule if the call fails. */
+  const [editLevels, setEditLevels] = useState(null);
+
   const isDraft = level === "DRAFT";
   const isDelivery = level === "DELIVERY_SHADE";
   const isInvoiced = level === "INVOICE_GENERATED";
 
-  /* Loading shade belongs to the delivery team: once a quotation is at
-     DELIVERY_SHADE only a DELIVERY_MANAGER or an ADMIN may edit it, whatever
-     the access grant says. Everybody else — SALES included — drops to the
-     read-only surface until it moves on. */
-  const deliveryRole = role === "DELIVERY_MANAGER" || role === "ADMIN";
-  const lockedToDeliveryRole = isDelivery && !deliveryRole;
-  const canEdit =
-    (access === "EDIT" || role === "SALES") && !lockedToDeliveryRole;
+  /* The level gate. Whether this role can work a quotation at this level is
+     the backend's call — a level absent from the list is read-only for this
+     user, whatever the access grant says. INVOICE_GENERATED is never in the
+     list, so an invoiced quotation locks here too. */
+  const allowedEditLevels = editLevels ?? fallbackEditLevels(role);
+  const levelEditable = allowedEditLevels.includes(level);
+  /* Locked by level rather than by grant — worth its own message, and only
+     once the answer has actually landed. */
+  const lockedToLevel = accessResolved && !levelEditable && !isInvoiced;
+  const canEdit = (access === "EDIT" || role === "SALES") && levelEditable;
 
   /* Editing needs BOTH an EDIT grant and a non-invoiced level. READ collapses
      the whole screen to the same read-only surface as an invoice. */
   const canEditLines = canEdit && !isInvoiced; // quantities, units, packing, add/remove
   const canEditTotals = canEdit && !isInvoiced; // discount, transport, specials
-  const showChecks = canEdit && isDelivery; // tick boxes live in the action column
+
+  /* Ticking rows off is the delivery team's job, so the boxes belong to them
+     alone. ADMIN counts as delivery here for the same reason it does in
+     fallbackEditLevels — it is the app's super-user and is otherwise the one
+     role that could reach the loading shade with no way to invoice out of it.
+     Anyone else working a shade quotation (sales, chiefly) sees the rows and
+     the tick state, but read-only: no boxes to press. */
+  const isDeliveryTeam = role === "DELIVERY_MANAGER" || role === "ADMIN";
+  const showChecks = canEdit && isDelivery && isDeliveryTeam; // tick boxes live in the action column
+  /* The invoice button is rendered for everyone who can work a shade
+     quotation, so the flow reads the same for all of them — but only the
+     delivery team can ever press it. */
+  const showInvoiceAction = canEdit && isDelivery;
   /* Draft is not history. Nothing before this point is audited or reasoned. */
   const auditActive = !isDraft;
 
@@ -1607,9 +1761,20 @@ function EditInner({ quotation, onClose, onSaved }) {
   );
 
   const [packings, setPackings] = useState([]);
+  /* Which units a row may sit on. On (AVAILABLE_UNIT) is the long-standing
+     flow: only the units that actually stock the plant. Off (ANY_UNIT) opens
+     the picker up to every unit in the company. The backend decides — the
+     default here holds if the config call fails. */
+  const [takePlantFromAvailableUnit, setTakePlantFromAvailableUnit] =
+    useState(true);
+  const [allUnits, setAllUnits] = useState(null);
   const [term, setTerm] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
+  /* Where the body zone starts inside the card. The search dropdown is parented
+     to the card, not to the body zone, so it needs that offset to sit right
+     under the toolbar — see the dropdown itself for why. */
+  const [bodyTop, setBodyTop] = useState(0);
   const [picker, setPicker] = useState(null);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(null); // "shade" | "invoice" | "pdf" | null
@@ -1664,6 +1829,14 @@ function EditInner({ quotation, onClose, onSaved }) {
   /* The delete reason modal is a gate in front of a pending delete. */
   const [pendingDelete, setPendingDelete] = useState(null);
 
+  /* Every removal of a row the server already knows about, banked until the
+     next successful save carries it away as plantRemovalDtoList. Dropping a
+     row out of `lines` / `specials` only tells the backend that it is gone —
+     the DTO is what carries *why*, which is why a Draft removal is recorded
+     here too even though it collects no reason. Rows added in this session
+     are never listed: the server never had them. */
+  const [removals, setRemovals] = useState([]);
+
   /* Gates the back / close buttons: shown instead of closing immediately
      whenever there are unsaved changes, so a save or a discard is explicit. */
   const [confirmClose, setConfirmClose] = useState(false);
@@ -1675,6 +1848,10 @@ function EditInner({ quotation, onClose, onSaved }) {
   const searchTimer = useRef(null);
   const searchRef = useRef(null);
   const bodyScrollRef = useRef(null);
+  /* Live quantity inputs, keyed by line key, so a freshly added row can be
+     focused the moment it mounts — see `addPlant`. Entries are removed on
+     unmount, so a deleted line leaves nothing behind. */
+  const qtyInputRefs = useRef(new Map());
 
   /* ── access check ─────────────────────────────────────────────────
      Runs once on open. Any non-EDIT answer (including an error or a missing
@@ -1684,15 +1861,34 @@ function EditInner({ quotation, onClose, onSaved }) {
     let alive = true;
     (async () => {
       const id = quotation?.quotationId;
-      const [response, currentRole] = await Promise.all([
-        id == null ? Promise.resolve(null) : getQuotationAccess(id),
-        getCurrentRole(),
-      ]);
+      /* The role is needed before the level list can be asked for, so it is
+         resolved first; the two server calls then run together. */
+      const currentRole = await getCurrentRole();
       if (!alive) return;
       setRole(currentRole || null);
+
+      const [response, levelResponse] = await Promise.all([
+        id == null ? Promise.resolve(null) : getQuotationAccess(id),
+        currentRole
+          ? getQuotationEditLevels(currentRole)
+          : Promise.resolve(null),
+      ]);
+      if (!alive) return;
+
       const granted =
         response?.status === "SUCCESS" ? response.payload?.accessLevel : null;
       setAccess(granted === "EDIT" ? "EDIT" : "READ");
+
+      /* An empty list is a real answer — this role edits nothing — but a
+         failed call is not, and falls back to the app's own rule so a backend
+         outage doesn't lock the floor out of every quotation. */
+      const levels =
+        levelResponse?.status === "SUCCESS" &&
+        Array.isArray(levelResponse.payload)
+          ? levelResponse.payload.map((name) => String(name).toUpperCase())
+          : fallbackEditLevels(currentRole);
+      setEditLevels(levels);
+
       setAccessResolved(true);
     })();
     return () => {
@@ -1766,53 +1962,135 @@ function EditInner({ quotation, onClose, onSaved }) {
     };
   }, [term]);
 
-  /* ── offer lookup (display only) ─────────────────────────────────── */
+  /* ── offer lookup (display only) ─────────────────────────────────────
+     Offers are cut group-wise. Every line under the same parent group pools
+     its quantity into a single lookup — Rose Blue 10 + Rose White 30 asks for
+     "Rose" at 40 — and the one discount that comes back is then applied to
+     each of those lines individually. */
   const offerCache = useRef(new Map());
 
+  /* syncOffers reads the lines through a ref so it can stay a stable callback:
+     it is fired from the debounce below, from field blurs, from the keyboard
+     closing, and from the header refresh button. */
+  const linesRef = useRef(lines);
   useEffect(() => {
-    let alive = true;
-    const timer = setTimeout(async () => {
-      const pending = lines.filter(
-        (line) =>
-          line.plantId != null &&
-          toCount(line.quantity) > 0 &&
-          line.offerKey !== `${line.plantId}:${toCount(line.quantity)}`,
-      );
-      if (pending.length === 0) return;
+    linesRef.current = lines;
+  }, [lines]);
 
-      const resolved = await Promise.all(
-        pending.map(async (line) => {
-          const qty = toCount(line.quantity);
-          const key = `${line.plantId}:${qty}`;
+  const [offersBusy, setOffersBusy] = useState(false);
+  /* Blur, keyboard-dismiss and the debounce can all land within a few ms of
+     each other, so only the newest run is allowed to write its result back. */
+  const offerRunRef = useRef(0);
+  const offerAliveRef = useRef(true);
+  useEffect(
+    () => () => {
+      offerAliveRef.current = false;
+    },
+    [],
+  );
+
+  /* `force` is the header button: it drops the cache and re-asks for every
+     group, so a discount changed on the server since this screen opened is
+     picked up. Without it a group is only re-asked when its pooled total
+     moved. */
+  const syncOffers = useCallback(async ({ force = false } = {}) => {
+    const run = ++offerRunRef.current;
+    const current = linesRef.current;
+
+    /* Pool the quantities of every line sharing a parent group. `quantity` is
+       the right figure for both kinds of row, not derivedQuantity: a seedling
+       is always dealt in trays, so its offer brackets on the tray count and
+       must not be expanded to plants. */
+    const totals = new Map();
+    current.forEach((line) => {
+      const group = line.parentGroupName;
+      const qty = toCount(line.quantity);
+      if (!group || line.plantId == null || qty <= 0) return;
+      totals.set(group, (totals.get(group) ?? 0) + qty);
+    });
+
+    if (force) offerCache.current.clear();
+
+    /* Every group is revalidated on every pass, not just the ones whose own
+       pooled total moved. Filtering to moved groups looked like a saving but
+       dropped changes on the floor: a group whose quantities all fall to zero
+       leaves `totals` altogether, so it was never in the pending list and its
+       lines kept the discount they earned at the old quantity.
+
+       Re-asking for everything costs nothing when nothing moved — the cache
+       keys on group:total, so only a total this screen has not seen before
+       reaches the network. */
+    const wanted = [...totals];
+    const needsNetwork = wanted.some(
+      ([group, total]) =>
+        offerCache.current.get(`${group}:${total}`) === undefined,
+    );
+    if (needsNetwork) setOffersBusy(true);
+
+    const resolved = new Map(
+      await Promise.all(
+        wanted.map(async ([group, total]) => {
+          const key = `${group}:${total}`;
           let value = offerCache.current.get(key);
           if (value === undefined) {
-            const response = await getApplicableOffer(line.plantId, qty);
+            const response = await getApplicableOffer(group, total);
             value =
               response?.status === "SUCCESS"
                 ? toMoney(response.payload?.discount)
                 : 0;
             offerCache.current.set(key, value);
           }
-          return { key: line.key, offerKey: key, discount: value };
+          return [group, { offerKey: key, discount: value }];
         }),
-      );
+      ),
+    );
 
-      if (!alive) return;
-      setLines((prev) =>
-        prev.map((line) => {
-          const hit = resolved.find((r) => r.key === line.key);
-          return hit
-            ? { ...line, offerDiscount: hit.discount, offerKey: hit.offerKey }
-            : line;
-        }),
-      );
-    }, SEARCH_DEBOUNCE);
+    /* superseded by a newer run — that one owns the spinner and the write */
+    if (!offerAliveRef.current || run !== offerRunRef.current) return;
 
-    return () => {
-      alive = false;
-      clearTimeout(timer);
-    };
-  }, [lines]);
+    setOffersBusy(false);
+    setLines((prev) => {
+      let moved = false;
+      const next = prev.map((line) => {
+        const hit = resolved.get(line.parentGroupName);
+        /* No entry means the group earns nothing right now — either it pooled
+           to zero or it never qualified. Either way the line must be cleared,
+           not left alone. */
+        const discount = hit ? hit.discount : 0;
+        const offerKey = hit ? hit.offerKey : null;
+        if (
+          toMoney(line.offerDiscount) === toMoney(discount) &&
+          (line.offerKey ?? null) === offerKey
+        )
+          return line;
+        moved = true;
+        return { ...line, offerDiscount: discount, offerKey };
+      });
+      /* The same array back when nothing actually changed. The debounce below
+         watches `lines`, so handing it a fresh array every pass would have it
+         re-arm itself forever. */
+      return moved ? next : prev;
+    });
+  }, []);
+
+  /* Debounced catch-all so offers still settle while the user keeps typing. */
+  useEffect(() => {
+    const timer = setTimeout(() => syncOffers(), SEARCH_DEBOUNCE);
+    return () => clearTimeout(timer);
+  }, [lines, syncOffers]);
+
+  /* Tapping away from a field, or hitting Done, closes the keyboard — refresh
+     right then rather than making the user wait out the debounce. */
+  useEffect(() => {
+    const sub = Keyboard.addListener("keyboardDidHide", () => syncOffers());
+    return () => sub.remove();
+  }, [syncOffers]);
+
+  /** Header refresh: drop the keyboard, then re-ask for every group. */
+  const refreshCalculations = useCallback(() => {
+    Keyboard.dismiss();
+    syncOffers({ force: true });
+  }, [syncOffers]);
 
   /* A transient success banner clears itself. */
   useEffect(() => {
@@ -1821,9 +2099,18 @@ function EditInner({ quotation, onClose, onSaved }) {
     return () => clearTimeout(timer);
   }, [notice]);
 
+  /* Every user-driven line edit funnels through here, which is also where the
+     delivery tick is invalidated: change what the row is (quantity, unit,
+     packing, customer choice) and the tick comes off, so nothing that moved
+     after being counted out can slip into an invoice still ticked. */
   const updateLine = useCallback((key, patch) => {
     setLines((prev) =>
-      prev.map((line) => (line.key === key ? { ...line, ...patch } : line)),
+      prev.map((line) => {
+        if (line.key !== key) return line;
+        const next = { ...line, ...patch };
+        if (line.checked && patchTouchesPick(line, patch)) next.checked = false;
+        return next;
+      }),
     );
   }, []);
 
@@ -1831,23 +2118,23 @@ function EditInner({ quotation, onClose, onSaved }) {
     setLines((prev) => prev.filter((line) => line.key !== key));
   }, []);
 
-  const toggleCheck = useCallback((key) => {
-    setLines((prev) =>
-      prev.map((line) =>
-        line.key === key ? { ...line, checked: !line.checked } : line,
-      ),
-    );
+  /* Special plants carry their own tick (isPlantChecked on the reservation),
+     so the toggle dispatches on which list the row lives in. */
+  const toggleCheck = useCallback((row) => {
+    const flip = (item) =>
+      item.key === row.key ? { ...item, checked: !item.checked } : item;
+    if (row.isSpecial) setSpecials((prev) => prev.map(flip));
+    else setLines((prev) => prev.map(flip));
   }, []);
 
   const toggleCheckAll = useCallback(() => {
-    setLines((prev) => {
-      const checkable = prev.filter((line) => !line.isNew);
-      const next = !checkable.every((line) => line.checked);
-      return prev.map((line) =>
-        line.isNew ? line : { ...line, checked: next },
-      );
-    });
-  }, []);
+    const allOn = (rows) => rows.every((row) => row.isNew || row.checked);
+    const next = !(allOn(lines) && allOn(specials));
+    const set = (rows) =>
+      rows.map((row) => (row.isNew ? row : { ...row, checked: next }));
+    setLines(set);
+    setSpecials(set);
+  }, [lines, specials]);
 
   /* ── per-field reason handling ───────────────────────────────────────
      `commitFieldEdit` is called from a field's onBlur. Past Draft, if the
@@ -1944,6 +2231,15 @@ function EditInner({ quotation, onClose, onSaved }) {
               ...line,
               unitId: snap.unitId ?? null,
               unitName: snap.unitName ?? null,
+              /* If the choice only moved because this unit pick moved it, it
+                 rode in on the pick and goes back out with it — otherwise the
+                 row keeps a default belonging to a unit it is no longer on. */
+              ...(line.choiceFollowsUnit
+                ? {
+                    selectedByCustomer: !!snap.selectedByCustomer,
+                    choiceFollowsUnit: false,
+                  }
+                : null),
               fieldReasons: nextReasons,
             };
           case "packing":
@@ -1973,11 +2269,43 @@ function EditInner({ quotation, onClose, onSaved }) {
   const addPlant = useCallback(
     (plant) => {
       const inventory = plant.inventoryList || [];
+
+      /* The unit flagged isDefaultForPlantSelection is the company's standing
+         answer to which unit a plant comes from, so it is the first choice —
+         ahead of even the quotation's own unit. Preferred as its inventory row
+         when it holds the plant, so the new line still picks up traySize and
+         the available figure. In AVAILABLE_UNIT mode it counts only when it
+         does hold the plant: the picker lists nothing else there, so defaulting
+         to it otherwise would strand the row on a unit the operator cannot
+         see in the list. */
+      const flagged = (allUnits || []).find(isDefaultUnitForPlants);
+      const flaggedStock = flagged
+        ? inventory.find((row) => row.unitId === flagged.unitId)
+        : null;
+
       const preferred =
+        flaggedStock ||
+        (flagged && !takePlantFromAvailableUnit ? flagged : null) ||
         inventory.find((row) => row.unitId === quotation?.unitId) ||
+        /* ANY_UNIT: the quotation's own unit is still preferred even when it
+           holds none of this plant — falling through to whichever unit happens
+           to have stock would move the row somewhere unexpected. */
+        (takePlantFromAvailableUnit
+          ? null
+          : (allUnits || []).find(
+              (unit) => unit.unitId === quotation?.unitId,
+            )) ||
         inventory.find((row) => (row.quantity || 0) > 0) ||
-        inventory[0] ||
+        [...inventory].sort(bySequence)[0] ||
         null;
+
+      /* The unit decides the selected-by-customer starting point here for the
+         same reason it does in chooseUnit — a row should never open on a
+         default its unit disagrees with. `preferred` may be an inventory row,
+         which carries no default, so it is looked up by unitId. */
+      const preferredUnit = (allUnits || []).find(
+        (unit) => unit.unitId === preferred?.unitId,
+      );
 
       /* Checked against the live `lines` state (not `prev` inside the updater
          below) so the caller can know, synchronously, whether this tap grew
@@ -1989,11 +2317,21 @@ function EditInner({ quotation, onClose, onSaved }) {
           line.unitId === (preferred?.unitId ?? null),
       );
 
+      /* Minted out here rather than inside the updater so the row can be
+         addressed — focused — once it has mounted. */
+      const newKey = existing ? null : nextKey();
+
       setLines((prev) => {
         if (existing) {
+          /* Bumping the quantity moves the row, so it loses its tick the same
+             way an edit through updateLine would. */
           return prev.map((line) =>
             line.key === existing.key
-              ? { ...line, quantity: String(toCount(line.quantity) + 1) }
+              ? {
+                  ...line,
+                  quantity: String(toCount(line.quantity) + 1),
+                  checked: false,
+                }
               : line,
           );
         }
@@ -2008,9 +2346,10 @@ function EditInner({ quotation, onClose, onSaved }) {
         return [
           ...prev,
           {
-            key: nextKey(),
+            key: newKey,
             plantId: plant.plantId,
             plantName: plant.plantName,
+            parentGroupName: plant.parentGroupName ?? null,
             plantSubtitle: subtitleOf(plant, seedling),
             size: plant.size,
             plantType: plant.plantType,
@@ -2029,8 +2368,11 @@ function EditInner({ quotation, onClose, onSaved }) {
             packingCharge,
             packingManual: false,
             packingCustom: false,
-            /* new rows are the customer's pick until told otherwise */
-            selectedByCustomer: true,
+            /* the unit's default, or the customer's pick when no unit
+               record says otherwise */
+            selectedByCustomer: preferredUnit
+              ? chosenByCustomer(preferredUnit)
+              : true,
             baseQuantity: "0",
             basePackingName: packingName,
             basePackingCharge: packingCharge,
@@ -2039,6 +2381,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             baseUnitName: preferred?.unitName ?? null,
             fieldReasons: {},
             checked: false,
+            baseChecked: false,
             isNew: true,
           },
         ];
@@ -2049,15 +2392,26 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       /* A brand-new row lands at the bottom of the list — on the mobile card
          layout, scroll it into view so the operator sees what they just
-         added instead of having to hunt for it. The delay gives the new
-         card a chance to actually lay out before we scroll to it. */
-      if (!existing && isCardMode) {
+         added instead of having to hunt for it, then put the caret straight
+         into its quantity box: adding a plant is always followed by typing
+         how many, so there is no reason to make the operator tap for it.
+         The delay gives the new row a chance to actually lay out and
+         register its input ref before either happens. */
+      if (!existing) {
         setTimeout(() => {
-          bodyScrollRef.current?.scrollToEnd({ animated: true });
+          if (isCardMode)
+            bodyScrollRef.current?.scrollToEnd({ animated: true });
+          qtyInputRefs.current.get(newKey)?.focus();
         }, 50);
       }
     },
-    [quotation?.unitId, lines, isCardMode],
+    [
+      quotation?.unitId,
+      lines,
+      isCardMode,
+      takePlantFromAvailableUnit,
+      allUnits,
+    ],
   );
 
   /* ── special plants (barcode) ────────────────────────────────────── */
@@ -2082,37 +2436,87 @@ function EditInner({ quotation, onClose, onSaved }) {
         };
       }
 
-      setSpecials((prev) => [...prev, specialFromRecord(response.payload)]);
+      setSpecials((prev) => [
+        ...prev,
+        { ...specialFromRecord(response.payload), isNew: true },
+      ]);
       return { ok: true, plant: response.payload };
     },
     [specials],
   );
 
-  const removeSpecial = useCallback((key) => {
-    setSpecials((prev) => prev.filter((special) => special.key !== key));
+  /* ── unit source ─────────────────────────────────────────────────────
+     The full unit list is fetched once per screen and shared by every row's
+     picker; the ref holds the in-flight promise so two rows opening at the
+     same time still make one call. */
+  const unitsRequest = useRef(null);
+
+  const loadAllUnits = useCallback(() => {
+    if (!unitsRequest.current) {
+      unitsRequest.current = fetchAllUnits().then((response) => {
+        const list =
+          response?.status === "SUCCESS" ? response.payload || [] : [];
+        setAllUnits(list);
+        return list;
+      });
+    }
+    return unitsRequest.current;
   }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const mode = await fetchPlantInventoryConfig();
+      /* An unreadable config leaves the stricter default in place. */
+      if (!alive || !mode) return;
+      const available = mode === INVENTORY_MODES.AVAILABLE_UNIT;
+      setTakePlantFromAvailableUnit(available);
+      /* Warm the cache now, in either mode. ANY_UNIT needs the list to default
+         a newly added plant to the quotation's own unit, and both modes need
+         it for the display sequence and the selected-by-customer default — a
+         plant's inventoryList carries neither. */
+      loadAllUnits();
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [loadAllUnits]);
 
   /* ── pickers ─────────────────────────────────────────────────────── */
   const openUnitPicker = useCallback(
     async (line) => {
-      setPicker({ type: "unit", key: line.key, loading: !line.inventoryList });
-      if (line.inventoryList) return;
-
-      const response = await searchPlants(line.plantName, 20);
-      const match =
-        response?.status === "SUCCESS"
-          ? (response.payload || []).find((p) => p.plantId === line.plantId)
-          : null;
-
-      updateLine(line.key, {
-        inventoryList: match?.inventoryList || [],
-        ...(match && !line.price ? { price: priceOf(match) } : null),
+      const needsUnits = !takePlantFromAvailableUnit && allUnits === null;
+      setPicker({
+        type: "unit",
+        key: line.key,
+        loading: !line.inventoryList || needsUnits,
       });
+      if (line.inventoryList && !needsUnits) return;
+
+      /* Both modes want the plant's inventory: ANY_UNIT lists every unit but
+         still shows the stock figures against the ones that carry it. */
+      const unitsTask = needsUnits ? loadAllUnits() : null;
+
+      if (!line.inventoryList) {
+        const response = await searchPlants(line.plantName, 20);
+        const match =
+          response?.status === "SUCCESS"
+            ? (response.payload || []).find((p) => p.plantId === line.plantId)
+            : null;
+
+        updateLine(line.key, {
+          inventoryList: match?.inventoryList || [],
+          ...(match && !line.price ? { price: priceOf(match) } : null),
+        });
+      }
+
+      await unitsTask;
       setPicker((prev) =>
         prev && prev.key === line.key ? { ...prev, loading: false } : prev,
       );
     },
-    [updateLine],
+    [updateLine, takePlantFromAvailableUnit, allUnits, loadAllUnits],
   );
 
   const openPackingPicker = useCallback((key) => {
@@ -2121,11 +2525,28 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const chooseUnit = useCallback(
     (line, inventory) => {
+      /* Each unit carries its own selected-by-customer default, and every unit
+         change re-applies it — including a change back to a unit the row was
+         on earlier. An operator who wants something else sets it on the choice
+         field afterwards; the unit only ever decides the starting point.
+         `choiceFollowsUnit` marks that the flip came from here rather than
+         from the operator, so it is reasoned under the unit rather than
+         demanding a second reason nothing prompts for. */
+      const fallsOut =
+        inventory.defaultSelectedByCustomer != null &&
+        !!inventory.defaultSelectedByCustomer !== !!line.selectedByCustomer;
+
       updateLine(line.key, {
         unitId: inventory.unitId,
         unitName: inventory.unitName,
         traySize: inventory.traySize ?? line.traySize,
         available: inventory.quantity ?? null,
+        ...(fallsOut
+          ? {
+              selectedByCustomer: !!inventory.defaultSelectedByCustomer,
+              choiceFollowsUnit: true,
+            }
+          : null),
       });
       setPicker(null);
       /* A picker selection is an immediate, discrete edit — reason it now. */
@@ -2166,7 +2587,12 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const chooseChoice = useCallback(
     (line, option) => {
-      updateLine(line.key, { selectedByCustomer: option.value });
+      /* The operator has taken the choice over from the unit default, so it
+         is their edit now and carries its own reason. */
+      updateLine(line.key, {
+        selectedByCustomer: option.value,
+        choiceFollowsUnit: false,
+      });
       setPicker(null);
       setTimeout(() => commitFieldEdit(line.key, "choice"), 0);
     },
@@ -2177,6 +2603,53 @@ function EditInner({ quotation, onClose, onSaved }) {
     () => lines.find((line) => line.key === picker?.key) || null,
     [lines, picker],
   );
+
+  /* What the unit picker offers for the row it is open on. AVAILABLE_UNIT
+     draws from the plant's inventory; ANY_UNIT lists every unit with the
+     inventory merged in, so a unit that doesn't carry the plant is still
+     selectable and simply reads as having none.
+
+     Either way the options are ordered by the unit's own sequence and carry
+     its selected-by-customer default, both of which live only on the unit
+     record — the plant's inventoryList has neither, so it is matched up by
+     unitId. */
+  const unitOptions = useMemo(() => {
+    const inventory = activeLine?.inventoryList || [];
+    const unitById = new Map(
+      (allUnits || []).map((unit) => [unit.unitId, unit]),
+    );
+
+    if (takePlantFromAvailableUnit) {
+      return inventory
+        .map((row) => {
+          const unit = unitById.get(row.unitId);
+          return {
+            ...row,
+            sequence: unit?.sequence ?? null,
+            /* null, not a guess, when the unit list hasn't landed: choosing
+               this option then leaves the row's own choice alone. */
+            defaultSelectedByCustomer: unit ? chosenByCustomer(unit) : null,
+          };
+        })
+        .sort(bySequence);
+    }
+
+    const stockByUnit = new Map(inventory.map((row) => [row.unitId, row]));
+    return (allUnits || [])
+      .map((unit) => {
+        const stock = stockByUnit.get(unit.unitId);
+        return {
+          unitId: unit.unitId,
+          unitName: unit.unitName,
+          quantity: stock?.quantity ?? 0,
+          traySize: stock?.traySize ?? null,
+          stocked: !!stock,
+          sequence: unit.sequence ?? null,
+          defaultSelectedByCustomer: chosenByCustomer(unit),
+        };
+      })
+      .sort(bySequence);
+  }, [activeLine, takePlantFromAvailableUnit, allUnits]);
 
   /* ── totals ──────────────────────────────────────────────────────── */
   const totals = useMemo(() => {
@@ -2190,7 +2663,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       packing += linePacking(line);
     });
 
-    const special = specials.reduce((sum, sp) => sum + toMoney(sp.price), 0);
+    const special = specials.reduce((sum, sp) => sum + specialPriceOf(sp), 0);
 
     const subtotal = plantAmount + packing + special;
     const transportValue = toMoney(transport);
@@ -2246,7 +2719,11 @@ function EditInner({ quotation, onClose, onSaved }) {
   );
 
   /* Past Draft, every changed field must carry a reason before saving. New
-     rows are exempt (they need no per-field reason). */
+     rows are exempt (they need no per-field reason), and so is a choice that
+     only moved because the unit under it moved — the operator never edited
+     it, nothing prompts for it, and the unit's own reason already covers it.
+     Without this exemption a unit change whose default differs would lock the
+     Save button with no way to clear it. */
   const missingFieldReason = useMemo(() => {
     if (!auditActive) return false;
     return lines.some((line) => {
@@ -2254,6 +2731,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       return ["quantity", "unit", "packing", "choice"].some(
         (field) =>
           fieldChanged(line, field) &&
+          !(field === "choice" && line.choiceFollowsUnit) &&
           !String(line.fieldReasons?.[field] || "").trim(),
       );
     });
@@ -2267,15 +2745,32 @@ function EditInner({ quotation, onClose, onSaved }) {
   const discountRemarkMissing = discountEntered > 0 && !discountRemark.trim();
   const discountOverTotal = discountEntered > totals.beforeDiscount;
 
-  const checkableLines = lines.filter((line) => !line.isNew);
-  const checkedCount = checkableLines.filter((line) => line.checked).length;
+  /* Every row the delivery manager has to account for — special plants carry
+     their own tick too, so a quotation made only of barcoded plants can still
+     reach "everything checked". Rows added in this session are excluded: they
+     are not on the server yet, so there is nothing to tick off against. */
+  const checkableRows = useMemo(
+    () => [
+      ...lines.filter((line) => !line.isNew),
+      ...specials
+        .filter((special) => !special.isNew)
+        .map((special) => ({ ...special, isSpecial: true })),
+    ],
+    [lines, specials],
+  );
+  const checkedCount = checkableRows.filter((row) => row.checked).length;
   const allChecked =
-    checkableLines.length > 0 && checkedCount === checkableLines.length;
+    checkableRows.length > 0 && checkedCount === checkableRows.length;
+
+  /* The invoice needs a delivery-side user, every row ticked, and nothing left
+     unsaved. `showChecks` already carries the role gate — whoever owns the
+     boxes is whoever can invoice. */
+  const canInvoice = showChecks;
 
   const working = saving || busy !== null;
 
-  const blockingReason = lockedToDeliveryRole
-    ? "Only a delivery manager or an admin can edit a quotation in the loading shade."
+  const blockingReason = lockedToLevel
+    ? `Your role cannot edit a quotation at ${levelMeta.label.toLowerCase()}.`
     : !canEdit
       ? "You have read-only access to this quotation."
       : !userId
@@ -2319,36 +2814,45 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       setLevel(nextLevel);
 
-      setLines((prev) => {
-        const checkedMap = new Map(
-          prev.map((line) => [
-            `${line.plantId}:${line.unitId ?? 0}`,
-            line.checked,
-          ]),
-        );
-        const offerMap = new Map(
-          prev.map((line) => [
-            `${line.plantId}:${line.unitId ?? 0}`,
-            { offerDiscount: line.offerDiscount, offerKey: line.offerKey },
-          ]),
-        );
-
-        return (payload.plantList || []).map((row) => {
-          const rebuilt = lineFromReservation(row, nextIsDraft);
-          const id = `${rebuilt.plantId}:${rebuilt.unitId ?? 0}`;
-          const offer = offerMap.get(id);
-          return {
-            ...rebuilt,
-            checked: checkedMap.get(id) ?? false,
-            offerDiscount: offer?.offerDiscount,
-            offerKey: offer?.offerKey,
-          };
-        });
-      });
-
-      const nextSpecials = (payload.specialPlantList || []).map(
-        specialFromRecord,
+      /* Rows are rebuilt from the echo, but two things only this screen knows
+         are carried across: the offer figures (display-only, never saved) and
+         the delivery tick *when the server did not echo one back*. Without
+         that fallback a backend that ignores isPlantChecked would wipe the
+         operator's ticks on every save. */
+      const carried = new Map(
+        lines.map((line) => [`${line.plantId}:${line.unitId ?? 0}`, line]),
       );
+
+      const nextLines = (payload.plantList || []).map((row) => {
+        const rebuilt = lineFromReservation(row, nextIsDraft);
+        const id = `${rebuilt.plantId}:${rebuilt.unitId ?? 0}`;
+        const previous = carried.get(id);
+        const echoed = row?.plantChecked ?? row?.isPlantChecked;
+        const checked = echoed == null ? !!previous?.checked : !!echoed;
+        return {
+          ...rebuilt,
+          checked,
+          /* Just saved, so this tick is the row's new resting state — and
+             what the row is ordered by from here on. */
+          baseChecked: checked,
+          offerDiscount: previous?.offerDiscount,
+          offerKey: previous?.offerKey,
+        };
+      });
+      setLines(nextLines);
+
+      const carriedSpecials = new Map(
+        specials.map((special) => [special.barcodeId, special]),
+      );
+      const nextSpecials = (payload.specialPlantList || []).map((row) => {
+        const rebuilt = specialFromRecord(row);
+        const echoed = row?.plantChecked ?? row?.isPlantChecked;
+        const checked =
+          echoed == null
+            ? !!carriedSpecials.get(rebuilt.barcodeId)?.checked
+            : !!echoed;
+        return { ...rebuilt, checked, baseChecked: checked };
+      });
       setSpecials(nextSpecials);
 
       const nextDiscount = toMoney(payload.additionalDiscount);
@@ -2376,11 +2880,12 @@ function EditInner({ quotation, onClose, onSaved }) {
         (payload.invoiceUpdateDetailList || []).map(auditFromRecord),
       );
 
-      /* The saved document becomes the new baseline, so the screen is clean. */
+      /* The saved document becomes the new baseline, so the screen is clean.
+         It is built from the very arrays that went into state — rebuilding it
+         from the payload again would miss any tick carried over above and
+         leave the screen permanently dirty. */
       baselineRef.current = stateSignatureOf(
-        (payload.plantList || []).map((row) =>
-          lineFromReservation(row, nextIsDraft),
-        ),
+        nextLines,
         nextDiscountText,
         nextRemark,
         nextTransportText,
@@ -2389,7 +2894,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         nextSpecials,
       );
     },
-    [level, userId],
+    [level, userId, lines, specials],
   );
 
   /* ── save ────────────────────────────────────────────────────────────
@@ -2398,140 +2903,205 @@ function EditInner({ quotation, onClose, onSaved }) {
      Per-field reasons now live on each line (line.fieldReasons). At save, each
      changed field's reason is joined into a single per-row reason string sent
      with that row. Draft is never audited, so no reasons are attached there. */
-  const persist = useCallback(
-    async ({ deleteReason } = {}) => {
-      if (blockingReason) {
-        setError(blockingReason);
-        return null;
-      }
+  const persist = useCallback(async () => {
+    if (blockingReason) {
+      setError(blockingReason);
+      return null;
+    }
 
-      setError(null);
-      setNotice(null);
-      setSaving(true);
+    setError(null);
+    setNotice(null);
+    setSaving(true);
 
-      const discountAmount = toMoney(discount);
-      const transportAmount = toMoney(transport);
-      const advanceAmount = toMoney(advance);
+    const discountAmount = toMoney(discount);
+    const transportAmount = toMoney(transport);
+    const advanceAmount = toMoney(advance);
 
-      const reasonForLine = (line) => {
-        if (!auditActive || line.isNew) return null;
-        const parts = ["quantity", "unit", "packing", "choice"]
-          .filter((field) => fieldChanged(line, field))
-          .map((field) => {
-            const r = String(line.fieldReasons?.[field] || "").trim();
-            return r ? `${FIELD_META[field].label}: ${r}` : null;
-          })
-          .filter(Boolean);
-        return parts.length > 0 ? parts.join(" · ") : null;
-      };
+    const reasonForLine = (line) => {
+      if (!auditActive || line.isNew) return null;
+      const parts = ["quantity", "unit", "packing", "choice"]
+        .filter((field) => fieldChanged(line, field))
+        .map((field) => {
+          const r = String(line.fieldReasons?.[field] || "").trim();
+          if (r) return `${FIELD_META[field].label}: ${r}`;
+          /* Unreasoned because the operator never touched it — say so
+               rather than letting the flip go into the audit unexplained. */
+          if (field === "choice" && line.choiceFollowsUnit)
+            return `${FIELD_META.choice.label}: default for ${
+              line.unitName || "the selected unit"
+            }`;
+          return null;
+        })
+        .filter(Boolean);
+      return parts.length > 0 ? parts.join(" · ") : null;
+    };
 
-      const body = {
-        plantList: lines.map((line) => ({
+    const body = {
+      plantList: lines.map((line) => ({
+        plantId: line.plantId,
+        // Unchanged contract: seedlings still send the tray count.
+        quantityReserved: toCount(line.quantity),
+        unitId: line.unitId,
+        unitName: line.unitName,
+        packingId: line.packingId ?? null,
+        packingName: line.packingName,
+        packingCharge: toMoney(line.packingCharge),
+        selectedByCustomer: line.selectedByCustomer,
+        /* The delivery tick. Both spellings go out for the same reason
+             `specialPlant`/`isSpecialPlant` do below: which one Jackson binds
+             depends on the ObjectMapper's handling of Lombok's
+             isPlantChecked(). Drop whichever one the backend does not read. */
+        plantChecked: !!line.checked,
+        isPlantChecked: !!line.checked,
+        reason: lineChanged(line) ? reasonForLine(line) : null,
+      })),
+      specialPlantList: specials.map((special) => ({
+        barcodeId: special.barcodeId,
+        plantChecked: !!special.checked,
+        isPlantChecked: !!special.checked,
+      })),
+      /* The delivery tick of every surviving row in one flat list — regular
+         lines first, then specials — so the backend can settle the ticks in a
+         single pass without having to read them off two differently shaped
+         lists. Every row is listed on every save, ticked or not: an absent
+         entry means the row is gone, never that its tick was left alone.
+         Rows are identified the same way removals are (plantId for a regular
+         line, barcode for a special), and both Jackson spellings of each
+         boolean go out for the same reason they do everywhere else here. */
+      plantCheckedList: [
+        ...lines.map((line) => ({
           plantId: line.plantId,
-          // Unchanged contract: seedlings still send the tray count.
-          quantityReserved: toCount(line.quantity),
-          unitId: line.unitId,
-          unitName: line.unitName,
-          packingId: line.packingId ?? null,
-          packingName: line.packingName,
-          packingCharge: toMoney(line.packingCharge),
-          selectedByCustomer: line.selectedByCustomer,
-          reason: lineChanged(line) ? reasonForLine(line) : null,
+          barcodeId: null,
+          specialPlant: false,
+          isSpecialPlant: false,
+          plantChecked: !!line.checked,
+          isPlantChecked: !!line.checked,
         })),
-        specialPlantList: specials.map((special) => ({
-          barcodeId: special.barcodeId,
+        ...specials.map((special) => ({
+          plantId: null,
+          barcodeId: special.barcodeId ?? null,
+          specialPlant: true,
+          isSpecialPlant: true,
+          plantChecked: !!special.checked,
+          isPlantChecked: !!special.checked,
         })),
-        additionalDiscount: discountAmount,
-        additionalDiscountRemark:
-          discountAmount > 0 ? discountRemark.trim() : null,
-        transportationCost: transportAmount,
-        /* The flat advanceAmount field is gone — the backend only reads the
+      ],
+      additionalDiscount: discountAmount,
+      additionalDiscountRemark:
+        discountAmount > 0 ? discountRemark.trim() : null,
+      transportationCost: transportAmount,
+      /* The flat advanceAmount field is gone — the backend only reads the
            ledger now. Only the signed-in user's own row is ever sent, so a
            save can never touch a colleague's collected advance; resending an
            unchanged amount is a no-op on the server. */
-        advanceTransactionList: userId
-          ? [
-              {
-                emailId: userId,
-                collectorName: userName || userId,
-                amount: advanceAmount,
-                transactionMode: advanceMode,
-              },
-            ]
-          : [],
-        /* Delete reasons aren't tied to a surviving row, so they ride along at
-           the document level when a removal triggered this save. */
-        deleteReason: deleteReason || null,
-      };
+      advanceTransactionList: userId
+        ? [
+            {
+              emailId: userId,
+              collectorName: userName || userId,
+              amount: advanceAmount,
+              transactionMode: advanceMode,
+            },
+          ]
+        : [],
+      /* Every row that left the quotation since the last save, each with the
+           reason it left. This replaces the old document-level deleteReason,
+           which could only ever describe one removal and lost the reason
+           entirely once a second row went in the same save.
 
-      const response = await updateQuotationPlants(
-        quotation.quotationId,
-        userId,
-        body,
-      );
+           `specialPlant` is the name Jackson derives from Lombok's
+           isSpecialPlant()/setSpecialPlant() pair on a primitive boolean;
+           `isSpecialPlant` is sent alongside it because this codebase has
+           already been bitten by that mapping going both ways depending on
+           the ObjectMapper config (see chosenByCustomer). Drop whichever one
+           the backend does not read. */
+      plantRemovalDtoList: removals.map((removal) => ({
+        plantId: removal.plantId,
+        barcodeId: removal.barcodeId,
+        specialPlant: removal.isSpecialPlant,
+        isSpecialPlant: removal.isSpecialPlant,
+        reason: removal.reason,
+      })),
+    };
 
-      setSaving(false);
+    const response = await updateQuotationPlants(
+      quotation.quotationId,
+      userId,
+      body,
+    );
 
-      if (response?.status === "SUCCESS") {
-        const payload = response.payload;
+    setSaving(false);
 
-        if (payload) {
-          rehydrate(payload);
-        } else {
-          // No echo from the server: settle locally so the screen goes clean.
-          setLines((prev) => prev.map(settleLine));
-          setAdvanceLedger((prev) => {
-            const others = prev.filter(
-              (row) => norm(row?.emailId) !== norm(userId),
-            );
-            if (advanceAmount <= 0) return others;
-            return [
-              ...others,
-              {
-                emailId: userId,
-                collectorName: userName || userId,
-                amount: advanceAmount,
-                collectionDate: new Date().toISOString(),
-                transactionMode: advanceMode,
-              },
-            ];
-          });
-          baselineRef.current = stateSignatureOf(
-            lines.map(settleLine),
-            discount,
-            discountRemark,
-            transport,
-            advance,
-            advanceMode,
-            specials,
+    if (response?.status === "SUCCESS") {
+      const payload = response.payload;
+
+      /* Accounted for on the server now — banking them again on the next
+           save would re-report removals the quotation no longer has. */
+      setRemovals([]);
+
+      if (payload) {
+        rehydrate(payload);
+      } else {
+        // No echo from the server: settle locally so the screen goes clean.
+        setLines((prev) => prev.map(settleLine));
+        setSpecials((prev) =>
+          prev.map((special) => ({
+            ...special,
+            baseChecked: !!special.checked,
+            isNew: false,
+          })),
+        );
+        setAdvanceLedger((prev) => {
+          const others = prev.filter(
+            (row) => norm(row?.emailId) !== norm(userId),
           );
-        }
-
-        setNotice(response.message || "Quotation saved.");
-        onSaved?.(payload ?? true, { source: "save", keepOpen: true });
-        return payload ?? true;
+          if (advanceAmount <= 0) return others;
+          return [
+            ...others,
+            {
+              emailId: userId,
+              collectorName: userName || userId,
+              amount: advanceAmount,
+              collectionDate: new Date().toISOString(),
+              transactionMode: advanceMode,
+            },
+          ];
+        });
+        baselineRef.current = stateSignatureOf(
+          lines.map(settleLine),
+          discount,
+          discountRemark,
+          transport,
+          advance,
+          advanceMode,
+          specials,
+        );
       }
 
-      setError(response?.message || "Could not save the quotation.");
-      return null;
-    },
-    [
-      blockingReason,
-      lines,
-      specials,
-      quotation,
-      userId,
-      userName,
-      onSaved,
-      discount,
-      discountRemark,
-      transport,
-      advance,
-      advanceMode,
-      auditActive,
-      rehydrate,
-    ],
-  );
+      setNotice(response.message || "Quotation saved.");
+      onSaved?.(payload ?? true, { source: "save", keepOpen: true });
+      return payload ?? true;
+    }
+
+    setError(response?.message || "Could not save the quotation.");
+    return null;
+  }, [
+    blockingReason,
+    lines,
+    specials,
+    removals,
+    quotation,
+    userId,
+    userName,
+    onSaved,
+    discount,
+    discountRemark,
+    transport,
+    advance,
+    advanceMode,
+    auditActive,
+    rehydrate,
+  ]);
 
   /* Save Changes. All per-field reasons are already gathered inline, so this
      just validates and writes — no summary modal in the way. */
@@ -2575,62 +3145,89 @@ function EditInner({ quotation, onClose, onSaved }) {
     }
   }, [persist, onClose]);
 
+  const bankRemoval = useCallback((row, reason) => {
+    /* Never saved, so there is nothing on the server to account for. */
+    if (row.isNew) return;
+    setRemovals((prev) => [
+      ...prev,
+      { ...removalIdOf(row), reason: reason || null },
+    ]);
+  }, []);
+
   /* Delete. Allowed in Draft and Delivery shade; past Draft it is reasoned via
-     the delete reason modal. */
+     the delete reason modal. Special plants go down the same path — the
+     removal DTO carries a reason for them too, so there is no case for
+     letting a barcode row leave the quotation unexplained. */
   const requestDelete = useCallback(
-    (line) => {
+    (row) => {
       if (working) return;
 
-      /* Draft, or a row added in this session (never saved): just drop it. */
-      if (!auditActive || line.isNew) {
-        dropLine(line.key);
+      /* Draft, or a row added in this session (never saved): just drop it.
+         The drop is still banked (unless it is brand new) so the backend is
+         told what left, even though Draft asks for no reason. */
+      if (!auditActive || row.isNew) {
+        bankRemoval(row, null);
+        if (row.isSpecial)
+          setSpecials((prev) => prev.filter((sp) => sp.key !== row.key));
+        else dropLine(row.key);
         return;
       }
 
       setPendingDelete({
-        lineKey: line.key,
+        rowKey: row.key,
+        isSpecial: !!row.isSpecial,
+        removal: removalIdOf(row),
         request: {
-          summary: `${line.plantName} will be removed from this quotation and the removal recorded.`,
-          title: line.plantName,
-          detail: `${formatNumber(toCount(line.quantity))} ${unitWord(
-            line,
-          )} · ${line.unitName || "no unit"} · ${formatAmount(
-            lineAmount(line),
-          )}`,
+          summary: `${row.plantName} will be removed from this quotation and the removal recorded.`,
+          title: row.plantName,
+          detail: row.isSpecial
+            ? `${row.barcodeId || "no barcode"} · ${
+                row.unitName || "no unit"
+              } · ${formatAmount(specialPriceOf(row))}`
+            : `${formatNumber(toCount(row.quantity))} ${unitWord(row)} · ${
+                row.unitName || "no unit"
+              } · ${formatAmount(lineAmount(row))}`,
         },
       });
     },
-    [working, auditActive, dropLine],
+    [working, auditActive, dropLine, bankRemoval],
   );
 
-  /* The delete reason modal hands its reason back here. The row is dropped, the
-     resulting document is saved, and the modal closes only if the save
-     succeeds. `pendingDeleteReason` stages the save so it runs against the new
-     line list once state has committed. */
-  const [pendingDeleteReason, setPendingDeleteReason] = useState(null);
+  /* The delete reason modal hands its reason back here. The row is dropped and
+     banked, the resulting document is saved, and the modal closes only if the
+     save succeeds. `pendingRemovalSave` stages the save so it runs against the
+     new row lists — and the new removal list — once state has committed. */
+  const [pendingRemovalSave, setPendingRemovalSave] = useState(null);
 
   const submitDelete = useCallback(
     (reason) => {
       const action = pendingDelete;
       if (!action) return;
-      setLines((prev) => prev.filter((line) => line.key !== action.lineKey));
+      if (action.isSpecial) {
+        setSpecials((prev) => prev.filter((sp) => sp.key !== action.rowKey));
+      } else {
+        setLines((prev) => prev.filter((line) => line.key !== action.rowKey));
+      }
+      setRemovals((prev) => [
+        ...prev,
+        { ...action.removal, reason: reason || null },
+      ]);
       setTimeout(() => {
-        setPendingDeleteReason({ reason });
+        setPendingRemovalSave({ at: Date.now() });
       }, 0);
     },
     [pendingDelete],
   );
 
   useEffect(() => {
-    if (!pendingDeleteReason) return;
-    const { reason } = pendingDeleteReason;
-    setPendingDeleteReason(null);
+    if (!pendingRemovalSave) return;
+    setPendingRemovalSave(null);
     (async () => {
-      const result = await persist({ deleteReason: reason });
+      const result = await persist();
       if (result) setPendingDelete(null);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingDeleteReason]);
+  }, [pendingRemovalSave]);
 
   /* ── paperwork ───────────────────────────────────────────────────── */
   const openPdf = useCallback(
@@ -2696,6 +3293,9 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const runInvoice = useCallback(async () => {
     if (working) return;
+    /* Belt and braces behind the disabled button — sales never invoices, and
+       an invoice is never generated over a part-picked order. */
+    if (!canInvoice || !allChecked) return;
 
     if (dirty) {
       handleSave();
@@ -2719,7 +3319,15 @@ function EditInner({ quotation, onClose, onSaved }) {
     setNotice("Invoice generated.");
     setPdf({ kind: "invoice", title: "Invoice", file: response.payload });
     setBusy(null);
-  }, [working, dirty, handleSave, quotation, onSaved]);
+  }, [
+    working,
+    canInvoice,
+    allChecked,
+    dirty,
+    handleSave,
+    quotation,
+    onSaved,
+  ]);
 
   const saveHint = blockingReason
     ? blockingReason
@@ -2727,9 +3335,11 @@ function EditInner({ quotation, onClose, onSaved }) {
       ? isDraft
         ? "Save your changes before moving this to the loading shade."
         : "Save your changes before generating the invoice."
-      : showChecks && !allChecked
-        ? `Tick every row to generate the invoice. ${checkedCount} of ${checkableLines.length} checked.`
-        : null;
+      : showInvoiceAction && !canInvoice
+        ? "Only the delivery team can tick rows off and generate the invoice."
+        : showChecks && !allChecked
+          ? `Tick every row to generate the invoice. ${checkedCount} of ${checkableRows.length} checked.`
+          : null;
 
   /* ── shared field renderers ──────────────────────────────────────── */
 
@@ -2768,7 +3378,12 @@ function EditInner({ quotation, onClose, onSaved }) {
       if (line.isSpecial) {
         return (
           <View style={styles.alignRight}>
-            <Text style={styles.priceText}>{formatAmount(line.price)}</Text>
+            <Text style={styles.priceText}>
+              {formatAmount(specialPriceOf(line))}
+            </Text>
+            {specialDiscounted(line) ? (
+              <Text style={styles.priceStrike}>{formatAmount(line.price)}</Text>
+            ) : null}
           </View>
         );
       }
@@ -2874,12 +3489,19 @@ function EditInner({ quotation, onClose, onSaved }) {
         <View style={styles.cellFill}>
           <View style={[styles.qtyBox, moved && styles.qtyBoxDirty]}>
             <TextInput
+              ref={(node) => {
+                if (node) qtyInputRefs.current.set(line.key, node);
+                else qtyInputRefs.current.delete(line.key);
+              }}
               style={styles.qtyInput}
               value={line.quantity}
               onChangeText={(value) =>
                 updateLine(line.key, { quantity: value.replace(/[^0-9]/g, "") })
               }
-              onBlur={() => commitFieldEdit(line.key, "quantity")}
+              onBlur={() => {
+                commitFieldEdit(line.key, "quantity");
+                syncOffers(); // quantity drives the offer — don't wait it out
+              }}
               keyboardType="number-pad"
               selectTextOnFocus
               placeholder="0"
@@ -2908,7 +3530,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [styles, C, isDraft, lineEditable, updateLine, commitFieldEdit],
+    [styles, C, isDraft, lineEditable, updateLine, commitFieldEdit, syncOffers],
   );
 
   const packingField = useCallback(
@@ -3136,8 +3758,7 @@ function EditInner({ quotation, onClose, onSaved }) {
   const actionField = useCallback(
     (line) => {
       if (line.isSpecial) {
-        if (!canEditTotals) return <Text style={styles.dashText}>—</Text>;
-        return (
+        const removeBtn = !canEditTotals ? null : (
           <Pressable
             style={({ hovered, pressed }) => [
               styles.deleteBtn,
@@ -3147,18 +3768,36 @@ function EditInner({ quotation, onClose, onSaved }) {
             hitSlop={6}
             accessibilityRole="button"
             accessibilityLabel={`Remove special plant ${line.barcodeId}`}
-            onPress={() => removeSpecial(line.key)}
+            onPress={() => requestDelete(line)}
           >
             <Ionicons name="trash-outline" size={16} color={C.RED} />
           </Pressable>
         );
+
+        /* A special plant is ticked off like any other row — it is a plant
+           that has to physically leave the shade. */
+        if (showChecks && !line.isNew) {
+          return (
+            <View style={styles.actionStack}>
+              {checkBox(
+                line.checked,
+                () => toggleCheck(line),
+                `Check ${line.plantName}`,
+              )}
+              {removeBtn}
+            </View>
+          );
+        }
+        return removeBtn ?? <Text style={styles.dashText}>—</Text>;
       }
-      if (showChecks) {
+      /* A row added in this session has nothing on the server to tick off
+         against, so it gets no box until it has been saved. */
+      if (showChecks && !line.isNew) {
         return (
           <View style={styles.actionStack}>
             {checkBox(
               line.checked,
-              () => toggleCheck(line.key),
+              () => toggleCheck(line),
               `Check ${line.plantName}`,
             )}
             {canEditLines ? deleteButton(line) : null}
@@ -3175,7 +3814,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       checkBox,
       toggleCheck,
       deleteButton,
-      removeSpecial,
+      requestDelete,
       styles,
       C,
     ],
@@ -3221,7 +3860,10 @@ function EditInner({ quotation, onClose, onSaved }) {
         align: "left",
         render: (line) => (
           <View style={styles.cellFill}>
-            <Text style={styles.plantName} numberOfLines={1}>
+            {/* Unclamped — the plant column is the flexible one and rows are
+                already variable height, so a long name wraps inside the
+                column rather than being cut off. */}
+            <Text style={styles.plantName}>
               {line.isSpecial ? line.plantName : plantTitleWithSize(line)}
             </Text>
             <Text style={styles.plantSub} numberOfLines={1}>
@@ -3345,7 +3987,9 @@ function EditInner({ quotation, onClose, onSaved }) {
         align: "right",
         render: (line) => (
           <Text style={styles.amountText} numberOfLines={1}>
-            {formatAmount(line.isSpecial ? line.price : lineAmount(line))}
+            {formatAmount(
+              line.isSpecial ? specialPriceOf(line) : lineAmount(line),
+            )}
           </Text>
         ),
       },
@@ -3396,7 +4040,10 @@ function EditInner({ quotation, onClose, onSaved }) {
   );
 
   const tableRows = useMemo(
-    () => [...lines, ...specials.map((sp) => ({ ...sp, isSpecial: true }))],
+    () => [
+      ...sinkChecked(lines),
+      ...sinkChecked(specials).map((sp) => ({ ...sp, isSpecial: true })),
+    ],
     [lines, specials],
   );
 
@@ -3408,7 +4055,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         style={[
           styles.lineCard,
           item.isSpecial && styles.lineCardSpecial,
-          !item.isSpecial && item.checked && styles.lineCardChecked,
+          item.checked && styles.lineCardChecked,
           !item.isSpecial && lineChanged(item) && styles.lineCardDirty,
         ]}
       >
@@ -3430,10 +4077,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             {/* Name, subtitle, price and any tag all flow in one row to keep
                each card compact — several cards should fit on one screen. */}
             <View style={styles.cardHeaderRow}>
-              <Text
-                style={[styles.plantName, styles.plantNameInline]}
-                numberOfLines={1}
-              >
+              <Text style={[styles.plantName, styles.plantNameInline]}>
                 {item.isSpecial ? item.plantName : plantTitleWithSize(item)}
               </Text>
               <Text style={styles.plantSubInline} numberOfLines={1}>
@@ -3450,9 +4094,17 @@ function EditInner({ quotation, onClose, onSaved }) {
               <View style={styles.metaTag}>
                 <Text style={styles.metaTagText}>
                   {formatAmount(
-                    item.isSpecial ? item.price : effectivePriceOf(item),
+                    item.isSpecial
+                      ? specialPriceOf(item)
+                      : effectivePriceOf(item),
                   )}{" "}
                   / {item.isSpecial ? "plant" : priceUnitWord(item)}
+                  {specialDiscounted(item) ? (
+                    <Text style={styles.metaTagStrike}>
+                      {"  "}
+                      {formatAmount(item.price)}
+                    </Text>
+                  ) : null}
                 </Text>
               </View>
               {!item.isSpecial && lineChanged(item) ? (
@@ -3470,7 +4122,9 @@ function EditInner({ quotation, onClose, onSaved }) {
               {/* Line total sits at the end of the header row, after every
                  tag, instead of its own footer band lower in the card. */}
               <Text style={styles.cardHeaderAmount} numberOfLines={1}>
-                {formatAmount(item.isSpecial ? item.price : lineAmount(item))}
+                {formatAmount(
+                  item.isSpecial ? specialPriceOf(item) : lineAmount(item),
+                )}
               </Text>
             </View>
           </View>
@@ -3538,7 +4192,7 @@ function EditInner({ quotation, onClose, onSaved }) {
     const packingMode = picker.type === "packing";
 
     const options = unitMode
-      ? activeLine.inventoryList || []
+      ? unitOptions
       : [
           NO_PACKING,
           ...packings,
@@ -3582,7 +4236,9 @@ function EditInner({ quotation, onClose, onSaved }) {
                 {options.length === 0 ? (
                   <Text style={styles.resultEmpty}>
                     {unitMode
-                      ? "This plant is not stocked in any unit."
+                      ? takePlantFromAvailableUnit
+                        ? "This plant is not stocked in any unit."
+                        : "No units found."
                       : "No packing options yet."}
                   </Text>
                 ) : null}
@@ -3657,11 +4313,16 @@ function EditInner({ quotation, onClose, onSaved }) {
                           </Text>
                           <Text style={styles.optionMeta}>
                             {unitMode
-                              ? `${formatNumber(option.quantity ?? 0)} in stock${
-                                  option.traySize
-                                    ? ` · ${option.traySize} per tray`
-                                    : ""
-                                }`
+                              ? /* ANY_UNIT lists units that don't carry the
+                                   plant at all — say so rather than "0 in
+                                   stock", which reads like sold out. */
+                                option.stocked === false
+                                ? "Not stocked here"
+                                : `${formatNumber(option.quantity ?? 0)} in stock${
+                                    option.traySize
+                                      ? ` · ${option.traySize} per tray`
+                                      : ""
+                                  }`
                               : option.size
                                 ? `Fits ${option.size}`
                                 : "No charge"}
@@ -3784,6 +4445,25 @@ function EditInner({ quotation, onClose, onSaved }) {
               ]}
               hitSlop={8}
               accessibilityRole="button"
+              accessibilityLabel="Refresh offers and totals"
+              disabled={working || offersBusy}
+              onPress={refreshCalculations}
+            >
+              {offersBusy ? (
+                <ActivityIndicator color={C.NAVY} />
+              ) : (
+                <Ionicons name="refresh" size={19} color={C.NAVY} />
+              )}
+            </Pressable>
+
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.iconBtn,
+                hovered && styles.iconBtnHover,
+                pressed && styles.iconBtnPressed,
+              ]}
+              hitSlop={8}
+              accessibilityRole="button"
               accessibilityLabel="Open the quotation PDF"
               disabled={working}
               onPress={reopenPdf}
@@ -3890,178 +4570,98 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </Pressable>
                 ) : null}
               </View>
-
-              {showResults ? (
-                <View style={styles.results}>
-                  <ScrollView
-                    style={styles.resultsScroll}
-                    keyboardShouldPersistTaps="handled"
-                    nestedScrollEnabled
-                  >
-                    {searching && results.length === 0 ? (
-                      <View style={styles.resultLoading}>
-                        <ActivityIndicator color={C.NAVY} />
-                        <Text style={styles.resultLoadingText}>
-                          Searching the catalogue…
-                        </Text>
-                      </View>
-                    ) : null}
-
-                    {!searching && results.length === 0 ? (
-                      <Text style={styles.resultEmpty}>
-                        No plants match “{term.trim()}”. Try a shorter name.
-                      </Text>
-                    ) : null}
-
-                    {results.map((plant) => {
-                      const inventory = plant.inventoryList || [];
-                      const stock = inventory.reduce(
-                        (sum, row) => sum + (row.quantity || 0),
-                        0,
-                      );
-                      const availableUnits = inventory.filter(
-                        (row) => (row.quantity || 0) > 0,
-                      ).length;
-
-                      return (
-                        <Pressable
-                          key={plant.plantId}
-                          style={({ pressed, hovered }) => [
-                            styles.resultCard,
-                            hovered && styles.resultCardHover,
-                            pressed && styles.resultCardPressed,
-                          ]}
-                          onPress={() => addPlant(plant)}
-                        >
-                          <View style={styles.resultIcon}>
-                            <Ionicons
-                              name="leaf-outline"
-                              size={17}
-                              color={C.NAVY}
-                            />
-                          </View>
-
-                          <View style={styles.fill}>
-                            <Text style={styles.resultName} numberOfLines={1}>
-                              {plant.plantName}
-                            </Text>
-
-                            <View style={styles.chipRow}>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {plant.size || "No size"}
-                                </Text>
-                              </View>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {formatNumber(stock)} in stock
-                                </Text>
-                              </View>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {availableUnits} unit
-                                  {availableUnits === 1 ? "" : "s"}
-                                </Text>
-                              </View>
-                            </View>
-                          </View>
-
-                          <View style={styles.resultPriceWrap}>
-                            <Text style={styles.resultPrice}>
-                              {formatAmount(priceOf(plant))}
-                            </Text>
-                            <Text style={styles.resultPriceLabel}>
-                              per plant
-                            </Text>
-                          </View>
-
-                          <Ionicons
-                            name="add-circle"
-                            size={22}
-                            color={C.GREEN}
-                          />
-                        </Pressable>
-                      );
-                    })}
-                  </ScrollView>
-                </View>
-              ) : null}
             </View>
           </View>
         ) : null}
 
-        {/* ── scrollable body ── */}
-        <ScrollView
-          ref={bodyScrollRef}
-          style={styles.bodyScroll}
-          contentContainerStyle={styles.bodyContent}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
+        {/* ── scrollable body ──
+           The search dropdown is not a child of this zone (nor of the search
+           box) — it hangs off the card, further down, and only borrows this
+           zone's y offset. See the dropdown for the reasoning. */}
+        <View
+          style={styles.bodyZone}
+          onLayout={(event) => setBodyTop(event.nativeEvent.layout.y)}
         >
-          {showChecks && lines.length > 0 ? (
-            <View style={styles.checkStrip}>
-              <Ionicons
-                name={allChecked ? "checkmark-circle" : "ellipse-outline"}
-                size={18}
-                color={allChecked ? C.GREEN : C.MUTED}
-              />
-              <Text style={styles.checkStripText}>
-                {allChecked
-                  ? "Every row checked. The invoice is ready."
-                  : `${checkedCount} of ${checkableLines.length} rows checked`}
-              </Text>
-            </View>
-          ) : null}
+          <ScrollView
+            ref={bodyScrollRef}
+            style={styles.bodyScroll}
+            contentContainerStyle={styles.bodyContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Picking progress is worth seeing for anyone working a shade
+                quotation, even the roles that cannot tick a box themselves. */}
+            {showInvoiceAction && checkableRows.length > 0 ? (
+              <View style={styles.checkStrip}>
+                <Ionicons
+                  name={allChecked ? "checkmark-circle" : "ellipse-outline"}
+                  size={18}
+                  color={allChecked ? C.GREEN : C.MUTED}
+                />
+                <Text style={styles.checkStripText}>
+                  {allChecked
+                    ? canInvoice
+                      ? "Every row checked. The invoice is ready."
+                      : "Every row checked. The delivery team can invoice it."
+                    : `${checkedCount} of ${checkableRows.length} rows checked`}
+                </Text>
+              </View>
+            ) : null}
 
-          <View style={styles.tableWrap} onLayout={onTableLayout}>
-            {tableRows.length === 0 ? (
-              <View style={styles.tableShell}>
-                <View style={styles.emptyWrap}>
-                  <View style={styles.emptyIcon}>
-                    <Ionicons name="leaf-outline" size={28} color={C.NAVY} />
+            <View style={styles.tableWrap} onLayout={onTableLayout}>
+              {tableRows.length === 0 ? (
+                <View style={styles.tableShell}>
+                  <View style={styles.emptyWrap}>
+                    <View style={styles.emptyIcon}>
+                      <Ionicons name="leaf-outline" size={28} color={C.NAVY} />
+                    </View>
+                    <Text style={styles.emptyTitle}>
+                      No plants on this quotation
+                    </Text>
+                    <Text style={styles.emptyText}>
+                      {canEditTotals
+                        ? "Search above to add the first one."
+                        : "Nothing was reserved against this quotation."}
+                    </Text>
                   </View>
-                  <Text style={styles.emptyTitle}>
-                    No plants on this quotation
-                  </Text>
-                  <Text style={styles.emptyText}>
-                    {canEditTotals
-                      ? "Search above to add the first one."
-                      : "Nothing was reserved against this quotation."}
-                  </Text>
                 </View>
-              </View>
-            ) : isCardMode ? (
-              <View style={styles.cardList}>
-                {tableRows.map((item, index) => renderCard(item, index))}
-              </View>
-            ) : (
-              <View style={styles.tableShell}>
-                {tableHead}
-                <View style={styles.tableBody}>
-                  {tableRows.map((item, index) => renderRow(item, index))}
+              ) : isCardMode ? (
+                <View style={styles.cardList}>
+                  {tableRows.map((item, index) => renderCard(item, index))}
                 </View>
+              ) : (
+                <View style={styles.tableShell}>
+                  {tableHead}
+                  <View style={styles.tableBody}>
+                    {tableRows.map((item, index) => renderRow(item, index))}
+                  </View>
+                </View>
+              )}
+            </View>
+
+            {renderAudit()}
+
+            {error ? (
+              <View style={styles.banner}>
+                <Ionicons
+                  name="alert-circle-outline"
+                  size={17}
+                  color={C.ALERT}
+                />
+                <Text style={styles.bannerText}>{error}</Text>
               </View>
-            )}
-          </View>
-
-          {renderAudit()}
-
-          {error ? (
-            <View style={styles.banner}>
-              <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
-              <Text style={styles.bannerText}>{error}</Text>
-            </View>
-          ) : notice ? (
-            <View style={[styles.banner, styles.bannerOk]}>
-              <Ionicons
-                name="checkmark-circle"
-                size={17}
-                color={C.GREEN_DEEP}
-              />
-              <Text style={styles.bannerOkText}>{notice}</Text>
-            </View>
-          ) : null}
-        </ScrollView>
+            ) : notice ? (
+              <View style={[styles.banner, styles.bannerOk]}>
+                <Ionicons
+                  name="checkmark-circle"
+                  size={17}
+                  color={C.GREEN_DEEP}
+                />
+                <Text style={styles.bannerOkText}>{notice}</Text>
+              </View>
+            ) : null}
+          </ScrollView>
+        </View>
 
         {/* ── totals + actions ── */}
         <View style={styles.footerDock}>
@@ -4430,20 +5030,21 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </Pressable>
                 ) : null}
 
-                {showChecks ? (
+                {showInvoiceAction ? (
                   <Pressable
                     style={({ hovered, pressed }) => [
                       styles.primaryButton,
                       styles.invoiceButton,
                       (hovered || pressed) &&
+                        canInvoice &&
                         allChecked &&
                         !dirty &&
                         styles.invoiceButtonHover,
-                      (!allChecked || working || dirty) &&
+                      (!canInvoice || !allChecked || working || dirty) &&
                         styles.primaryButtonDisabled,
                     ]}
                     onPress={runInvoice}
-                    disabled={!allChecked || working || dirty}
+                    disabled={!canInvoice || !allChecked || working || dirty}
                   >
                     {busy === "invoice" ? (
                       <ActivityIndicator color="#FFFFFF" />
@@ -4566,11 +5167,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                   label: busy === "shade" ? "PROCESSING..." : "Process",
                 });
               }
-              if (showChecks) {
+              if (showInvoiceAction) {
                 gridButtons.push({
                   key: "invoice",
                   kind: "invoice",
-                  disabled: !allChecked || working || dirty,
+                  disabled: !canInvoice || !allChecked || working || dirty,
                   loading: busy === "invoice",
                   onPress: runInvoice,
                   icon: "receipt-outline",
@@ -4708,6 +5309,102 @@ function EditInner({ quotation, onClose, onSaved }) {
 
           {saveHint ? <Text style={styles.saveHint}>{saveHint}</Text> : null}
         </View>
+
+        {/* ── search results ──
+            Parented to the card and painted last, so it lies over the footer
+            dock instead of being cut off at the body zone's bottom edge on a
+            short window. It cannot hang off the search box or the body zone:
+            Android only delivers touches to the part of a child that falls
+            inside its parent's own bounds, so a list overflowing either of
+            those still drew in full but went dead to gestures below the fold.
+            The card is the full height of the screen, so every row stays
+            inside its parent and stays tappable. `bodyTop` puts it back
+            directly under the toolbar. */}
+        {canEditTotals && showResults ? (
+          <View style={[styles.results, { top: bodyTop }]}>
+            <ScrollView
+              style={styles.resultsScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator
+            >
+              {searching && results.length === 0 ? (
+                <View style={styles.resultLoading}>
+                  <ActivityIndicator color={C.NAVY} />
+                  <Text style={styles.resultLoadingText}>
+                    Searching the catalogue…
+                  </Text>
+                </View>
+              ) : null}
+
+              {!searching && results.length === 0 ? (
+                <Text style={styles.resultEmpty}>
+                  No plants match “{term.trim()}”. Try a shorter name.
+                </Text>
+              ) : null}
+
+              {results.map((plant) => {
+                const inventory = plant.inventoryList || [];
+                const stock = inventory.reduce(
+                  (sum, row) => sum + (row.quantity || 0),
+                  0,
+                );
+                const availableUnits = inventory.filter(
+                  (row) => (row.quantity || 0) > 0,
+                ).length;
+
+                return (
+                  <Pressable
+                    key={plant.plantId}
+                    style={({ pressed, hovered }) => [
+                      styles.resultCard,
+                      hovered && styles.resultCardHover,
+                      pressed && styles.resultCardPressed,
+                    ]}
+                    onPress={() => addPlant(plant)}
+                  >
+                    <View style={styles.resultIcon}>
+                      <Ionicons name="leaf-outline" size={17} color={C.NAVY} />
+                    </View>
+
+                    <View style={styles.fill}>
+                      <Text style={styles.resultName} numberOfLines={1}>
+                        {plant.plantName}
+                      </Text>
+
+                      <View style={styles.chipRow}>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {plant.size || "No size"}
+                          </Text>
+                        </View>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {formatNumber(stock)} in stock
+                          </Text>
+                        </View>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {availableUnits} unit
+                            {availableUnits === 1 ? "" : "s"}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    <View style={styles.resultPriceWrap}>
+                      <Text style={styles.resultPrice}>
+                        {formatAmount(priceOf(plant))}
+                      </Text>
+                      <Text style={styles.resultPriceLabel}>per plant</Text>
+                    </View>
+
+                    <Ionicons name="add-circle" size={22} color={C.GREEN} />
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
+        ) : null}
       </View>
 
       {renderPicker()}

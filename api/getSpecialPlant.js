@@ -8,8 +8,12 @@ import { handleApiError } from "./errorHandler";
  * Quantity is always 1 (a special plant is one physical item), so it is not
  * editable on the screen. The offer API is not applied to special plants.
  *
+ * `discountPrice` is the final price the customer pays, worked out by the
+ * backend — the app never derives it. It is absent when the plant carries no
+ * discount, in which case `price` is what is charged.
+ *
  * Response payload shape: SpecialPlant
- * { barcodeId, plantName, arrivalDate, departureDate, price, status, unitId, unitName, reason }
+ * { barcodeId, plantName, arrivalDate, departureDate, price, discountPrice, status, unitId, unitName, reason }
  */
 export const getSpecialPlantByBarcodeId = async (barcodeId) => {
   try {
