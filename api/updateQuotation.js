@@ -14,6 +14,10 @@ import { handleApiError } from "./errorHandler";
  * Rows that left the quotation are additionally listed in `plantRemovalDtoList`
  * ({ plantId, barcodeId, specialPlant, reason }) — the surviving lists say what
  * is gone, that list says why.
+ *
+ * The delivery tick of every surviving row is repeated in `plantCheckedList`
+ * ({ plantId, barcodeId, specialPlant, plantChecked }), regular lines and
+ * special plants together, so the ticks can be settled from one list.
  */
 
 export const updateQuotationPlants = async (quotationId, userId, body) => {

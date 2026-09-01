@@ -250,16 +250,23 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
 
     /* ── search results ────────────────────────────────────────────── */
-    /* The dropdown is anchored to the body zone, not to the search box, and
-       that is deliberate. Android only dispatches touches to the part of a
-       child that falls inside its parent's own bounds — an absolute child
-       hanging out of the ~70pt toolbar still *draws* in full but everything
-       below the toolbar is dead to gestures, so the list could not be
-       scrolled and only its first row could be tapped. Parenting it to the
-       full-height body zone puts every row back inside its parent. */
+    /* The dropdown is anchored to the card, not to the search box or the body
+       zone, and that is deliberate. Android only dispatches touches to the
+       part of a child that falls inside its parent's own bounds — an absolute
+       child hanging out of the ~70pt toolbar still *draws* in full but
+       everything below the toolbar is dead to gestures, so the list could not
+       be scrolled and only its first row could be tapped. The body zone fixed
+       the touches but clipped the list at the footer dock. The card is the
+       full height of the screen: every row stays inside its parent, and
+       nothing below cuts the list short.
+
+       `top` is set inline from the body zone's measured offset. The zIndex and
+       elevation sit above everything the card holds (toolbar 20, footer dock
+       unset) so the list covers the footer's buttons rather than sliding under
+       them — RN needs both: zIndex orders on web and iOS, elevation on
+       Android. */
     results: {
       position: "absolute",
-      top: 0,
       left: gutter,
       right: gutter,
       maxHeight: large ? 340 : 280,
@@ -268,8 +275,10 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       borderWidth: 1,
       borderColor: BORDER,
       overflow: "hidden",
-      zIndex: 30,
+      zIndex: 100,
       ...shadow(0.14, 24, 10),
+      /* After the spread on purpose — shadow() sets its own elevation. */
+      ...(web ? null : { elevation: 24 }),
     },
     /* The height cap has to live on the scroller itself. A ScrollView doesn't
        shrink (flexShrink defaults to 0), so with the cap only on the wrapper it
@@ -323,11 +332,9 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     resultLoadingText: { fontSize: 13, color: FAINT },
 
     /* ── scrollable body ───────────────────────────────────────────── */
-    /* Positioning context for the search dropdown — see `results`. Clipped so
-       that when the keyboard squeezes this zone below the dropdown's own
-       maxHeight the tail is hidden rather than left dangling outside the
-       bounds, where Android would draw it but ignore touches on it. */
-    bodyZone: { flex: 1, position: "relative", overflow: "hidden" },
+    /* Measured (onLayout) to give the search dropdown its top offset — the
+       dropdown itself hangs off the card, so this zone must not clip it. */
+    bodyZone: { flex: 1, position: "relative" },
     bodyScroll: { flex: 1 },
     bodyContent: { flexGrow: 1, paddingBottom: 4 },
 

@@ -182,8 +182,9 @@ const listPriceOf = (source) =>
   toMoney(source?.price ?? source?.plantPrice ?? source?.unitPrice ?? 0);
 
 /** Offer discount is a flat amount off the unit price, fetched per quantity.
-    Display only: it never changes the saved quotation or the billed amount, and
-    it is not applied to special plants. */
+    Display only: it is never sent back on save, and it is not applied to
+    special plants. It does drive the row amount and the totals on screen, so
+    what the operator reads matches the cut price shown in the price column. */
 const offerDiscountOf = (line) => Math.max(0, toMoney(line?.offerDiscount));
 const effectivePriceOf = (line) =>
   Math.max(0, toMoney(line?.price) - offerDiscountOf(line));
@@ -203,6 +204,9 @@ const specialFromRecord = (record) => ({
   status: record?.status ?? null,
   arrivalDate: record?.arrivalDate ?? null,
   departureDate: record?.departureDate ?? null,
+  /* The delivery tick, and the saved tick this row is ordered by. */
+  checked: rowChecked(record),
+  baseChecked: rowChecked(record),
   /* Scanned in during this session, so the server has never seen it. Set at
      the barcode-add site rather than through a second parameter here: this
      function is passed straight to .map(), which would feed the array index
@@ -236,6 +240,13 @@ const removalIdOf = (row) =>
     says otherwise. */
 const chosenByCustomer = (source) =>
   source?.selectedByCustomer ?? source?.isSelectedByCustomer ?? true;
+
+/** The delivery tick saved against a row. Same Jackson quirk as
+    chosenByCustomer — Lombok's isPlantChecked() serialises as either
+    `plantChecked` or `isPlantChecked` depending on the ObjectMapper — so both
+    spellings are read. Absent means untouched, i.e. not checked. */
+const rowChecked = (source) =>
+  !!(source?.plantChecked ?? source?.isPlantChecked ?? false);
 
 /** Units are listed in the order the company set on them, not the order the
     inventory or the API happened to return. A unit with no sequence sorts
@@ -280,8 +291,10 @@ const derivedQuantity = (line) => {
     priced per plant, where the two are the same number. */
 const billableQuantity = (line) => toCount(line.quantity);
 
-/** line.price is already the after-discount unit price (see priceOf). */
-const lineAmount = (line) => billableQuantity(line) * toMoney(line.price);
+/** line.price is already the after-discount unit price (see priceOf), and the
+    offer is a further flat cut off it — so the row is billed on the same
+    effective price the price column shows struck through. */
+const lineAmount = (line) => billableQuantity(line) * effectivePriceOf(line);
 
 const linePacking = (line) =>
   toCount(line.quantity) * toMoney(line.packingCharge);
@@ -375,6 +388,29 @@ const fieldDelta = (line, field) => {
   }
 };
 
+/* The fields that describe what physically leaves the shade. Moving any of
+   them invalidates the delivery manager's tick — whatever was counted out
+   against the old figures no longer matches the row — so the row drops back to
+   unchecked and has to be picked and ticked again. Note this is about the
+   *patch*, not the baseline: putting a value back the way it was still clears
+   the tick, because the row still has to be re-verified against the shelf. */
+const PICK_FIELDS = [
+  "quantity",
+  "unitId",
+  "packingName",
+  "packingCharge",
+  "selectedByCustomer",
+];
+
+/** Does this patch actually move a pick field to a different value? Patches
+    that only carry background data (an inventory list, a backfilled price, a
+    reason) leave the tick alone. */
+const patchTouchesPick = (line, patch) =>
+  PICK_FIELDS.some(
+    (field) =>
+      field in patch && String(patch[field] ?? "") !== String(line[field] ?? ""),
+  );
+
 /** Everything the save call cares about, flattened so it can be compared. */
 const signatureOf = (lines) =>
   JSON.stringify(
@@ -385,6 +421,10 @@ const signatureOf = (lines) =>
       line.packingName,
       toMoney(line.packingCharge),
       line.selectedByCustomer ? 1 : 0,
+      /* The delivery tick is saved state, so ticking a box on its own makes
+         the screen dirty and Save is offered — a partly ticked list is a
+         legitimate thing to put on the server. */
+      line.checked ? 1 : 0,
     ]),
   );
 
@@ -410,7 +450,7 @@ const stateSignatureOf = (
   ).trim()}|${toMoney(transport)}|${toMoney(advance)}|${advanceMode || ""}|${(
     specials || []
   )
-    .map((special) => special.barcodeId)
+    .map((special) => `${special.barcodeId}:${special.checked ? 1 : 0}`)
     .sort()
     .join(",")}`;
 
@@ -467,7 +507,13 @@ const lineFromReservation = (reservation, isDraft) => {
     baseUnitName: reservation.unitName ?? null,
     /* per-field reasons, gathered inline as each field is edited */
     fieldReasons: {},
-    checked: false,
+    /* The delivery tick comes back from the server, so reopening a quotation
+       shows exactly what the delivery manager had already ticked.
+       `baseChecked` is the last *saved* tick and is what the row is ordered
+       by — rows only move to the bottom once the tick is on the server, so a
+       row never jumps out from under the finger that just ticked it. */
+    checked: rowChecked(reservation),
+    baseChecked: rowChecked(reservation),
     isNew: false,
   };
 };
@@ -482,10 +528,22 @@ const settleLine = (line) => ({
   baseSelectedByCustomer: !!line.selectedByCustomer,
   baseUnitId: line.unitId ?? null,
   baseUnitName: line.unitName ?? null,
+  baseChecked: !!line.checked,
   fieldReasons: {},
   choiceFollowsUnit: false,
   isNew: false,
 });
+
+/** Rows already ticked off on the server sink to the bottom, so reopening a
+    part-picked quotation shows what is still outstanding first. The key is
+    `baseChecked` — the *saved* tick — so a box ticked here and now does not
+    make its row jump away from under the finger that ticked it; the list
+    settles into its new order on the next save or reopen. Order within each
+    half is untouched, so nothing else moves. */
+const sinkChecked = (rows) => [
+  ...rows.filter((row) => !row.baseChecked),
+  ...rows.filter((row) => row.baseChecked),
+];
 
 /** Audit rows come back on the quotation; normalise the shapes we might get. */
 const auditFromRecord = (record, index) => ({
@@ -1531,6 +1589,19 @@ function CloseConfirmModal({
  *
  * `selectedByCustomer` is a Yes / No dropdown. New rows default to Yes.
  *
+ * Loading shade ticks: in DELIVERY_SHADE every saved row — special plants
+ * included — carries a tick box, but only for the delivery team
+ * (DELIVERY_MANAGER / ADMIN); every other role sees the tick state read-only.
+ * A tick is ordinary unsaved state: pressing a box makes the screen dirty and
+ * enables SAVE CHANGES, and nothing reaches the server until that is pressed.
+ * The tick is then saved state (isPlantChecked), so a part-picked list comes
+ * back exactly as it was left, with the rows already ticked off moved to the
+ * bottom. Editing what a row *is* — quantity, unit, packing or customer
+ * choice — clears its tick, so a row that moved after being counted out has to
+ * be picked again. GENERATE INVOICE is shown to everyone who can work a shade
+ * quotation but only enables for the delivery team, once every row is ticked
+ * and nothing is unsaved.
+ *
  * Saving is deliberately inert: SAVE CHANGES, MOVE TO LOADING SHADE and
  * GENERATE INVOICE all call `updateQuotationPlants` and stop. The modal never
  * closes on save — the response is folded back into the screen by `rehydrate`.
@@ -1596,7 +1667,19 @@ function EditInner({ quotation, onClose, onSaved }) {
      the whole screen to the same read-only surface as an invoice. */
   const canEditLines = canEdit && !isInvoiced; // quantities, units, packing, add/remove
   const canEditTotals = canEdit && !isInvoiced; // discount, transport, specials
-  const showChecks = canEdit && isDelivery; // tick boxes live in the action column
+
+  /* Ticking rows off is the delivery team's job, so the boxes belong to them
+     alone. ADMIN counts as delivery here for the same reason it does in
+     fallbackEditLevels — it is the app's super-user and is otherwise the one
+     role that could reach the loading shade with no way to invoice out of it.
+     Anyone else working a shade quotation (sales, chiefly) sees the rows and
+     the tick state, but read-only: no boxes to press. */
+  const isDeliveryTeam = role === "DELIVERY_MANAGER" || role === "ADMIN";
+  const showChecks = canEdit && isDelivery && isDeliveryTeam; // tick boxes live in the action column
+  /* The invoice button is rendered for everyone who can work a shade
+     quotation, so the flow reads the same for all of them — but only the
+     delivery team can ever press it. */
+  const showInvoiceAction = canEdit && isDelivery;
   /* Draft is not history. Nothing before this point is audited or reasoned. */
   const auditActive = !isDraft;
 
@@ -1688,6 +1771,10 @@ function EditInner({ quotation, onClose, onSaved }) {
   const [term, setTerm] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
+  /* Where the body zone starts inside the card. The search dropdown is parented
+     to the card, not to the body zone, so it needs that offset to sit right
+     under the toolbar — see the dropdown itself for why. */
+  const [bodyTop, setBodyTop] = useState(0);
   const [picker, setPicker] = useState(null);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(null); // "shade" | "invoice" | "pdf" | null
@@ -2012,9 +2099,18 @@ function EditInner({ quotation, onClose, onSaved }) {
     return () => clearTimeout(timer);
   }, [notice]);
 
+  /* Every user-driven line edit funnels through here, which is also where the
+     delivery tick is invalidated: change what the row is (quantity, unit,
+     packing, customer choice) and the tick comes off, so nothing that moved
+     after being counted out can slip into an invoice still ticked. */
   const updateLine = useCallback((key, patch) => {
     setLines((prev) =>
-      prev.map((line) => (line.key === key ? { ...line, ...patch } : line)),
+      prev.map((line) => {
+        if (line.key !== key) return line;
+        const next = { ...line, ...patch };
+        if (line.checked && patchTouchesPick(line, patch)) next.checked = false;
+        return next;
+      }),
     );
   }, []);
 
@@ -2022,23 +2118,23 @@ function EditInner({ quotation, onClose, onSaved }) {
     setLines((prev) => prev.filter((line) => line.key !== key));
   }, []);
 
-  const toggleCheck = useCallback((key) => {
-    setLines((prev) =>
-      prev.map((line) =>
-        line.key === key ? { ...line, checked: !line.checked } : line,
-      ),
-    );
+  /* Special plants carry their own tick (isPlantChecked on the reservation),
+     so the toggle dispatches on which list the row lives in. */
+  const toggleCheck = useCallback((row) => {
+    const flip = (item) =>
+      item.key === row.key ? { ...item, checked: !item.checked } : item;
+    if (row.isSpecial) setSpecials((prev) => prev.map(flip));
+    else setLines((prev) => prev.map(flip));
   }, []);
 
   const toggleCheckAll = useCallback(() => {
-    setLines((prev) => {
-      const checkable = prev.filter((line) => !line.isNew);
-      const next = !checkable.every((line) => line.checked);
-      return prev.map((line) =>
-        line.isNew ? line : { ...line, checked: next },
-      );
-    });
-  }, []);
+    const allOn = (rows) => rows.every((row) => row.isNew || row.checked);
+    const next = !(allOn(lines) && allOn(specials));
+    const set = (rows) =>
+      rows.map((row) => (row.isNew ? row : { ...row, checked: next }));
+    setLines(set);
+    setSpecials(set);
+  }, [lines, specials]);
 
   /* ── per-field reason handling ───────────────────────────────────────
      `commitFieldEdit` is called from a field's onBlur. Past Draft, if the
@@ -2227,9 +2323,15 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       setLines((prev) => {
         if (existing) {
+          /* Bumping the quantity moves the row, so it loses its tick the same
+             way an edit through updateLine would. */
           return prev.map((line) =>
             line.key === existing.key
-              ? { ...line, quantity: String(toCount(line.quantity) + 1) }
+              ? {
+                  ...line,
+                  quantity: String(toCount(line.quantity) + 1),
+                  checked: false,
+                }
               : line,
           );
         }
@@ -2279,6 +2381,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             baseUnitName: preferred?.unitName ?? null,
             fieldReasons: {},
             checked: false,
+            baseChecked: false,
             isNew: true,
           },
         ];
@@ -2642,10 +2745,27 @@ function EditInner({ quotation, onClose, onSaved }) {
   const discountRemarkMissing = discountEntered > 0 && !discountRemark.trim();
   const discountOverTotal = discountEntered > totals.beforeDiscount;
 
-  const checkableLines = lines.filter((line) => !line.isNew);
-  const checkedCount = checkableLines.filter((line) => line.checked).length;
+  /* Every row the delivery manager has to account for — special plants carry
+     their own tick too, so a quotation made only of barcoded plants can still
+     reach "everything checked". Rows added in this session are excluded: they
+     are not on the server yet, so there is nothing to tick off against. */
+  const checkableRows = useMemo(
+    () => [
+      ...lines.filter((line) => !line.isNew),
+      ...specials
+        .filter((special) => !special.isNew)
+        .map((special) => ({ ...special, isSpecial: true })),
+    ],
+    [lines, specials],
+  );
+  const checkedCount = checkableRows.filter((row) => row.checked).length;
   const allChecked =
-    checkableLines.length > 0 && checkedCount === checkableLines.length;
+    checkableRows.length > 0 && checkedCount === checkableRows.length;
+
+  /* The invoice needs a delivery-side user, every row ticked, and nothing left
+     unsaved. `showChecks` already carries the role gate — whoever owns the
+     boxes is whoever can invoice. */
+  const canInvoice = showChecks;
 
   const working = saving || busy !== null;
 
@@ -2694,36 +2814,45 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       setLevel(nextLevel);
 
-      setLines((prev) => {
-        const checkedMap = new Map(
-          prev.map((line) => [
-            `${line.plantId}:${line.unitId ?? 0}`,
-            line.checked,
-          ]),
-        );
-        const offerMap = new Map(
-          prev.map((line) => [
-            `${line.plantId}:${line.unitId ?? 0}`,
-            { offerDiscount: line.offerDiscount, offerKey: line.offerKey },
-          ]),
-        );
-
-        return (payload.plantList || []).map((row) => {
-          const rebuilt = lineFromReservation(row, nextIsDraft);
-          const id = `${rebuilt.plantId}:${rebuilt.unitId ?? 0}`;
-          const offer = offerMap.get(id);
-          return {
-            ...rebuilt,
-            checked: checkedMap.get(id) ?? false,
-            offerDiscount: offer?.offerDiscount,
-            offerKey: offer?.offerKey,
-          };
-        });
-      });
-
-      const nextSpecials = (payload.specialPlantList || []).map(
-        specialFromRecord,
+      /* Rows are rebuilt from the echo, but two things only this screen knows
+         are carried across: the offer figures (display-only, never saved) and
+         the delivery tick *when the server did not echo one back*. Without
+         that fallback a backend that ignores isPlantChecked would wipe the
+         operator's ticks on every save. */
+      const carried = new Map(
+        lines.map((line) => [`${line.plantId}:${line.unitId ?? 0}`, line]),
       );
+
+      const nextLines = (payload.plantList || []).map((row) => {
+        const rebuilt = lineFromReservation(row, nextIsDraft);
+        const id = `${rebuilt.plantId}:${rebuilt.unitId ?? 0}`;
+        const previous = carried.get(id);
+        const echoed = row?.plantChecked ?? row?.isPlantChecked;
+        const checked = echoed == null ? !!previous?.checked : !!echoed;
+        return {
+          ...rebuilt,
+          checked,
+          /* Just saved, so this tick is the row's new resting state — and
+             what the row is ordered by from here on. */
+          baseChecked: checked,
+          offerDiscount: previous?.offerDiscount,
+          offerKey: previous?.offerKey,
+        };
+      });
+      setLines(nextLines);
+
+      const carriedSpecials = new Map(
+        specials.map((special) => [special.barcodeId, special]),
+      );
+      const nextSpecials = (payload.specialPlantList || []).map((row) => {
+        const rebuilt = specialFromRecord(row);
+        const echoed = row?.plantChecked ?? row?.isPlantChecked;
+        const checked =
+          echoed == null
+            ? !!carriedSpecials.get(rebuilt.barcodeId)?.checked
+            : !!echoed;
+        return { ...rebuilt, checked, baseChecked: checked };
+      });
       setSpecials(nextSpecials);
 
       const nextDiscount = toMoney(payload.additionalDiscount);
@@ -2751,11 +2880,12 @@ function EditInner({ quotation, onClose, onSaved }) {
         (payload.invoiceUpdateDetailList || []).map(auditFromRecord),
       );
 
-      /* The saved document becomes the new baseline, so the screen is clean. */
+      /* The saved document becomes the new baseline, so the screen is clean.
+         It is built from the very arrays that went into state — rebuilding it
+         from the payload again would miss any tick carried over above and
+         leave the screen permanently dirty. */
       baselineRef.current = stateSignatureOf(
-        (payload.plantList || []).map((row) =>
-          lineFromReservation(row, nextIsDraft),
-        ),
+        nextLines,
         nextDiscountText,
         nextRemark,
         nextTransportText,
@@ -2764,7 +2894,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         nextSpecials,
       );
     },
-    [level, userId],
+    [level, userId, lines, specials],
   );
 
   /* ── save ────────────────────────────────────────────────────────────
@@ -2817,11 +2947,45 @@ function EditInner({ quotation, onClose, onSaved }) {
         packingName: line.packingName,
         packingCharge: toMoney(line.packingCharge),
         selectedByCustomer: line.selectedByCustomer,
+        /* The delivery tick. Both spellings go out for the same reason
+             `specialPlant`/`isSpecialPlant` do below: which one Jackson binds
+             depends on the ObjectMapper's handling of Lombok's
+             isPlantChecked(). Drop whichever one the backend does not read. */
+        plantChecked: !!line.checked,
+        isPlantChecked: !!line.checked,
         reason: lineChanged(line) ? reasonForLine(line) : null,
       })),
       specialPlantList: specials.map((special) => ({
         barcodeId: special.barcodeId,
+        plantChecked: !!special.checked,
+        isPlantChecked: !!special.checked,
       })),
+      /* The delivery tick of every surviving row in one flat list — regular
+         lines first, then specials — so the backend can settle the ticks in a
+         single pass without having to read them off two differently shaped
+         lists. Every row is listed on every save, ticked or not: an absent
+         entry means the row is gone, never that its tick was left alone.
+         Rows are identified the same way removals are (plantId for a regular
+         line, barcode for a special), and both Jackson spellings of each
+         boolean go out for the same reason they do everywhere else here. */
+      plantCheckedList: [
+        ...lines.map((line) => ({
+          plantId: line.plantId,
+          barcodeId: null,
+          specialPlant: false,
+          isSpecialPlant: false,
+          plantChecked: !!line.checked,
+          isPlantChecked: !!line.checked,
+        })),
+        ...specials.map((special) => ({
+          plantId: null,
+          barcodeId: special.barcodeId ?? null,
+          specialPlant: true,
+          isSpecialPlant: true,
+          plantChecked: !!special.checked,
+          isPlantChecked: !!special.checked,
+        })),
+      ],
       additionalDiscount: discountAmount,
       additionalDiscountRemark:
         discountAmount > 0 ? discountRemark.trim() : null,
@@ -2880,6 +3044,13 @@ function EditInner({ quotation, onClose, onSaved }) {
       } else {
         // No echo from the server: settle locally so the screen goes clean.
         setLines((prev) => prev.map(settleLine));
+        setSpecials((prev) =>
+          prev.map((special) => ({
+            ...special,
+            baseChecked: !!special.checked,
+            isNew: false,
+          })),
+        );
         setAdvanceLedger((prev) => {
           const others = prev.filter(
             (row) => norm(row?.emailId) !== norm(userId),
@@ -3122,6 +3293,9 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const runInvoice = useCallback(async () => {
     if (working) return;
+    /* Belt and braces behind the disabled button — sales never invoices, and
+       an invoice is never generated over a part-picked order. */
+    if (!canInvoice || !allChecked) return;
 
     if (dirty) {
       handleSave();
@@ -3145,7 +3319,15 @@ function EditInner({ quotation, onClose, onSaved }) {
     setNotice("Invoice generated.");
     setPdf({ kind: "invoice", title: "Invoice", file: response.payload });
     setBusy(null);
-  }, [working, dirty, handleSave, quotation, onSaved]);
+  }, [
+    working,
+    canInvoice,
+    allChecked,
+    dirty,
+    handleSave,
+    quotation,
+    onSaved,
+  ]);
 
   const saveHint = blockingReason
     ? blockingReason
@@ -3153,9 +3335,11 @@ function EditInner({ quotation, onClose, onSaved }) {
       ? isDraft
         ? "Save your changes before moving this to the loading shade."
         : "Save your changes before generating the invoice."
-      : showChecks && !allChecked
-        ? `Tick every row to generate the invoice. ${checkedCount} of ${checkableLines.length} checked.`
-        : null;
+      : showInvoiceAction && !canInvoice
+        ? "Only the delivery team can tick rows off and generate the invoice."
+        : showChecks && !allChecked
+          ? `Tick every row to generate the invoice. ${checkedCount} of ${checkableRows.length} checked.`
+          : null;
 
   /* ── shared field renderers ──────────────────────────────────────── */
 
@@ -3574,8 +3758,7 @@ function EditInner({ quotation, onClose, onSaved }) {
   const actionField = useCallback(
     (line) => {
       if (line.isSpecial) {
-        if (!canEditTotals) return <Text style={styles.dashText}>—</Text>;
-        return (
+        const removeBtn = !canEditTotals ? null : (
           <Pressable
             style={({ hovered, pressed }) => [
               styles.deleteBtn,
@@ -3590,13 +3773,31 @@ function EditInner({ quotation, onClose, onSaved }) {
             <Ionicons name="trash-outline" size={16} color={C.RED} />
           </Pressable>
         );
+
+        /* A special plant is ticked off like any other row — it is a plant
+           that has to physically leave the shade. */
+        if (showChecks && !line.isNew) {
+          return (
+            <View style={styles.actionStack}>
+              {checkBox(
+                line.checked,
+                () => toggleCheck(line),
+                `Check ${line.plantName}`,
+              )}
+              {removeBtn}
+            </View>
+          );
+        }
+        return removeBtn ?? <Text style={styles.dashText}>—</Text>;
       }
-      if (showChecks) {
+      /* A row added in this session has nothing on the server to tick off
+         against, so it gets no box until it has been saved. */
+      if (showChecks && !line.isNew) {
         return (
           <View style={styles.actionStack}>
             {checkBox(
               line.checked,
-              () => toggleCheck(line.key),
+              () => toggleCheck(line),
               `Check ${line.plantName}`,
             )}
             {canEditLines ? deleteButton(line) : null}
@@ -3839,7 +4040,10 @@ function EditInner({ quotation, onClose, onSaved }) {
   );
 
   const tableRows = useMemo(
-    () => [...lines, ...specials.map((sp) => ({ ...sp, isSpecial: true }))],
+    () => [
+      ...sinkChecked(lines),
+      ...sinkChecked(specials).map((sp) => ({ ...sp, isSpecial: true })),
+    ],
     [lines, specials],
   );
 
@@ -3851,7 +4055,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         style={[
           styles.lineCard,
           item.isSpecial && styles.lineCardSpecial,
-          !item.isSpecial && item.checked && styles.lineCardChecked,
+          item.checked && styles.lineCardChecked,
           !item.isSpecial && lineChanged(item) && styles.lineCardDirty,
         ]}
       >
@@ -4371,12 +4575,13 @@ function EditInner({ quotation, onClose, onSaved }) {
         ) : null}
 
         {/* ── scrollable body ──
-           The search dropdown is a sibling of the body scroller, absolutely
-           positioned over its top edge, rather than a child of the search
-           box. Android will not deliver touches to the part of a child that
-           sits outside its parent's bounds, so hanging the list off the short
-           toolbar left it visible but unscrollable. */}
-        <View style={styles.bodyZone}>
+           The search dropdown is not a child of this zone (nor of the search
+           box) — it hangs off the card, further down, and only borrows this
+           zone's y offset. See the dropdown for the reasoning. */}
+        <View
+          style={styles.bodyZone}
+          onLayout={(event) => setBodyTop(event.nativeEvent.layout.y)}
+        >
           <ScrollView
             ref={bodyScrollRef}
             style={styles.bodyScroll}
@@ -4384,7 +4589,9 @@ function EditInner({ quotation, onClose, onSaved }) {
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
           >
-            {showChecks && lines.length > 0 ? (
+            {/* Picking progress is worth seeing for anyone working a shade
+                quotation, even the roles that cannot tick a box themselves. */}
+            {showInvoiceAction && checkableRows.length > 0 ? (
               <View style={styles.checkStrip}>
                 <Ionicons
                   name={allChecked ? "checkmark-circle" : "ellipse-outline"}
@@ -4393,8 +4600,10 @@ function EditInner({ quotation, onClose, onSaved }) {
                 />
                 <Text style={styles.checkStripText}>
                   {allChecked
-                    ? "Every row checked. The invoice is ready."
-                    : `${checkedCount} of ${checkableLines.length} rows checked`}
+                    ? canInvoice
+                      ? "Every row checked. The invoice is ready."
+                      : "Every row checked. The delivery team can invoice it."
+                    : `${checkedCount} of ${checkableRows.length} rows checked`}
                 </Text>
               </View>
             ) : null}
@@ -4452,96 +4661,6 @@ function EditInner({ quotation, onClose, onSaved }) {
               </View>
             ) : null}
           </ScrollView>
-
-          {canEditTotals && showResults ? (
-            <View style={styles.results}>
-              <ScrollView
-                style={styles.resultsScroll}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator
-              >
-                {searching && results.length === 0 ? (
-                  <View style={styles.resultLoading}>
-                    <ActivityIndicator color={C.NAVY} />
-                    <Text style={styles.resultLoadingText}>
-                      Searching the catalogue…
-                    </Text>
-                  </View>
-                ) : null}
-
-                {!searching && results.length === 0 ? (
-                  <Text style={styles.resultEmpty}>
-                    No plants match “{term.trim()}”. Try a shorter name.
-                  </Text>
-                ) : null}
-
-                {results.map((plant) => {
-                  const inventory = plant.inventoryList || [];
-                  const stock = inventory.reduce(
-                    (sum, row) => sum + (row.quantity || 0),
-                    0,
-                  );
-                  const availableUnits = inventory.filter(
-                    (row) => (row.quantity || 0) > 0,
-                  ).length;
-
-                  return (
-                    <Pressable
-                      key={plant.plantId}
-                      style={({ pressed, hovered }) => [
-                        styles.resultCard,
-                        hovered && styles.resultCardHover,
-                        pressed && styles.resultCardPressed,
-                      ]}
-                      onPress={() => addPlant(plant)}
-                    >
-                      <View style={styles.resultIcon}>
-                        <Ionicons
-                          name="leaf-outline"
-                          size={17}
-                          color={C.NAVY}
-                        />
-                      </View>
-
-                      <View style={styles.fill}>
-                        <Text style={styles.resultName} numberOfLines={1}>
-                          {plant.plantName}
-                        </Text>
-
-                        <View style={styles.chipRow}>
-                          <View style={styles.chip}>
-                            <Text style={styles.chipText}>
-                              {plant.size || "No size"}
-                            </Text>
-                          </View>
-                          <View style={styles.chip}>
-                            <Text style={styles.chipText}>
-                              {formatNumber(stock)} in stock
-                            </Text>
-                          </View>
-                          <View style={styles.chip}>
-                            <Text style={styles.chipText}>
-                              {availableUnits} unit
-                              {availableUnits === 1 ? "" : "s"}
-                            </Text>
-                          </View>
-                        </View>
-                      </View>
-
-                      <View style={styles.resultPriceWrap}>
-                        <Text style={styles.resultPrice}>
-                          {formatAmount(priceOf(plant))}
-                        </Text>
-                        <Text style={styles.resultPriceLabel}>per plant</Text>
-                      </View>
-
-                      <Ionicons name="add-circle" size={22} color={C.GREEN} />
-                    </Pressable>
-                  );
-                })}
-              </ScrollView>
-            </View>
-          ) : null}
         </View>
 
         {/* ── totals + actions ── */}
@@ -4911,20 +5030,21 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </Pressable>
                 ) : null}
 
-                {showChecks ? (
+                {showInvoiceAction ? (
                   <Pressable
                     style={({ hovered, pressed }) => [
                       styles.primaryButton,
                       styles.invoiceButton,
                       (hovered || pressed) &&
+                        canInvoice &&
                         allChecked &&
                         !dirty &&
                         styles.invoiceButtonHover,
-                      (!allChecked || working || dirty) &&
+                      (!canInvoice || !allChecked || working || dirty) &&
                         styles.primaryButtonDisabled,
                     ]}
                     onPress={runInvoice}
-                    disabled={!allChecked || working || dirty}
+                    disabled={!canInvoice || !allChecked || working || dirty}
                   >
                     {busy === "invoice" ? (
                       <ActivityIndicator color="#FFFFFF" />
@@ -5047,11 +5167,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                   label: busy === "shade" ? "PROCESSING..." : "Process",
                 });
               }
-              if (showChecks) {
+              if (showInvoiceAction) {
                 gridButtons.push({
                   key: "invoice",
                   kind: "invoice",
-                  disabled: !allChecked || working || dirty,
+                  disabled: !canInvoice || !allChecked || working || dirty,
                   loading: busy === "invoice",
                   onPress: runInvoice,
                   icon: "receipt-outline",
@@ -5189,6 +5309,102 @@ function EditInner({ quotation, onClose, onSaved }) {
 
           {saveHint ? <Text style={styles.saveHint}>{saveHint}</Text> : null}
         </View>
+
+        {/* ── search results ──
+            Parented to the card and painted last, so it lies over the footer
+            dock instead of being cut off at the body zone's bottom edge on a
+            short window. It cannot hang off the search box or the body zone:
+            Android only delivers touches to the part of a child that falls
+            inside its parent's own bounds, so a list overflowing either of
+            those still drew in full but went dead to gestures below the fold.
+            The card is the full height of the screen, so every row stays
+            inside its parent and stays tappable. `bodyTop` puts it back
+            directly under the toolbar. */}
+        {canEditTotals && showResults ? (
+          <View style={[styles.results, { top: bodyTop }]}>
+            <ScrollView
+              style={styles.resultsScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator
+            >
+              {searching && results.length === 0 ? (
+                <View style={styles.resultLoading}>
+                  <ActivityIndicator color={C.NAVY} />
+                  <Text style={styles.resultLoadingText}>
+                    Searching the catalogue…
+                  </Text>
+                </View>
+              ) : null}
+
+              {!searching && results.length === 0 ? (
+                <Text style={styles.resultEmpty}>
+                  No plants match “{term.trim()}”. Try a shorter name.
+                </Text>
+              ) : null}
+
+              {results.map((plant) => {
+                const inventory = plant.inventoryList || [];
+                const stock = inventory.reduce(
+                  (sum, row) => sum + (row.quantity || 0),
+                  0,
+                );
+                const availableUnits = inventory.filter(
+                  (row) => (row.quantity || 0) > 0,
+                ).length;
+
+                return (
+                  <Pressable
+                    key={plant.plantId}
+                    style={({ pressed, hovered }) => [
+                      styles.resultCard,
+                      hovered && styles.resultCardHover,
+                      pressed && styles.resultCardPressed,
+                    ]}
+                    onPress={() => addPlant(plant)}
+                  >
+                    <View style={styles.resultIcon}>
+                      <Ionicons name="leaf-outline" size={17} color={C.NAVY} />
+                    </View>
+
+                    <View style={styles.fill}>
+                      <Text style={styles.resultName} numberOfLines={1}>
+                        {plant.plantName}
+                      </Text>
+
+                      <View style={styles.chipRow}>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {plant.size || "No size"}
+                          </Text>
+                        </View>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {formatNumber(stock)} in stock
+                          </Text>
+                        </View>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {availableUnits} unit
+                            {availableUnits === 1 ? "" : "s"}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    <View style={styles.resultPriceWrap}>
+                      <Text style={styles.resultPrice}>
+                        {formatAmount(priceOf(plant))}
+                      </Text>
+                      <Text style={styles.resultPriceLabel}>per plant</Text>
+                    </View>
+
+                    <Ionicons name="add-circle" size={22} color={C.GREEN} />
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
+        ) : null}
       </View>
 
       {renderPicker()}
