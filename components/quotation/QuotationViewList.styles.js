@@ -424,6 +424,14 @@ const makeStyles = ({ width, isTablet, isDesktop, isCardMode }) => {
       color: NAVY,
       fontVariant: ["tabular-nums"],
     },
+    /* Discoverability hint for the double-tap-to-edit gesture on cards. */
+    cardHint: {
+      fontSize: 10.5,
+      fontWeight: "700",
+      letterSpacing: 0.3,
+      color: PLACEHOLDER,
+      textTransform: "uppercase",
+    },
     cardActions: {
       flexDirection: "row",
       gap: 8,

@@ -3,8 +3,8 @@
     "name": "Sales App",
     "slug": "sqa-app",
     "version": "1.0.0",
-    "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "orientation": "default",
+    "icon": "./assets/images/app_icon.png",
     "scheme": "sqaapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
@@ -13,8 +13,8 @@
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "backgroundImage": "./assets/images/app_logo.png"
+        "foregroundImage": "./assets/images/adaptive-foreground.png",
+        "backgroundColor": "#021F63"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
@@ -29,12 +29,15 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
+          "image": "./assets/images/logo.png",
+          "imageWidth": 176,
           "resizeMode": "contain",
           "backgroundColor": "#ffffff",
-          "dark": {
-            "backgroundColor": "#000000"
+          "ios": {
+            "image": "./assets/images/logo.png",
+            "imageWidth": 220,
+            "resizeMode": "contain",
+            "backgroundColor": "#ffffff"
           }
         }
       ],
@@ -43,6 +46,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "eefd0283-9033-4489-b686-d17b8a988497"
+      }
     }
   }
 }

@@ -60,7 +60,10 @@ const fileNameFrom = (headers, fallback) => {
 /**
  * Download Quotation PDF
  */
-export const downloadQuotationPdf = async (quotationId, { signal } = {}) => {
+export const downloadQuotationPdf = async (
+  quotationId,
+  { type = "Quotation", signal } = {},
+) => {
   if (!quotationId) {
     return {
       status: "FAILURE",
@@ -70,7 +73,7 @@ export const downloadQuotationPdf = async (quotationId, { signal } = {}) => {
 
   try {
     const response = await axiosClient.get(QUOTATION_PDF_URL, {
-      params: { quotationId },
+      params: { quotationId, type },
       responseType: "blob",
       headers: {
         Accept: `${PDF_TYPE}, application/json`,
@@ -79,7 +82,7 @@ export const downloadQuotationPdf = async (quotationId, { signal } = {}) => {
     });
 
     const blob = response.data;
-    const type = String(blob?.type || "").toLowerCase();
+    const contentType = String(blob?.type || "").toLowerCase();
 
     if (!blob || blob.size === 0) {
       return {
@@ -88,7 +91,7 @@ export const downloadQuotationPdf = async (quotationId, { signal } = {}) => {
       };
     }
 
-    if (type && !type.includes("pdf")) {
+    if (contentType && !contentType.includes("pdf")) {
       const text = await blobToText(blob);
       return {
         status: "FAILURE",

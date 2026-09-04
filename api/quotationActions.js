@@ -23,14 +23,11 @@ const fileNameFrom = (headers, fallback) => {
   }
 };
 
-const toPdfPayload = (response, fallbackName) => {
-  const blob = new Blob([response.data], { type: PDF_TYPE });
-  return {
-    blob,
-    mimeType: PDF_TYPE,
-    fileName: fileNameFrom(response.headers, fallbackName),
-  };
-};
+const toPdfPayload = (response, fallbackName) => ({
+  blob: response.data,
+  mimeType: PDF_TYPE,
+  fileName: fileNameFrom(response.headers, fallbackName),
+});
 
 export const moveToLoadingShade = async (quotationId) => {
   if (!quotationId) {
@@ -39,10 +36,10 @@ export const moveToLoadingShade = async (quotationId) => {
   try {
     const response = await axiosClient.post(MOVE_TO_DELIVERY_SHADE_URL, null, {
       params: { quotationId },
-      responseType: "arraybuffer",
+      responseType: "blob",
       headers: { Accept: `${PDF_TYPE}, application/json` },
     });
-    if (!response.data || response.data.byteLength === 0) {
+    if (!response.data || response.data.size === 0) {
       return {
         status: "FAILURE",
         message: "The server returned an empty file.",
@@ -64,10 +61,10 @@ export const convertToInvoice = async (quotationId) => {
   try {
     const response = await axiosClient.post(CONVERT_TO_INVOICE_URL, null, {
       params: { quotationId },
-      responseType: "arraybuffer",
+      responseType: "blob",
       headers: { Accept: `${PDF_TYPE}, application/json` },
     });
-    if (!response.data || response.data.byteLength === 0) {
+    if (!response.data || response.data.size === 0) {
       return {
         status: "FAILURE",
         message: "The server returned an empty file.",

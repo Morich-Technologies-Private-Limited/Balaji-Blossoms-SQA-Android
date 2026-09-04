@@ -40,13 +40,13 @@ import makeStyles from "./QuotationViewList.styles";
 const LEVELS = [
   { key: "ALL", label: "All" },
   { key: "DRAFT", label: "Draft" },
-  { key: "DELIVERY_SHADE", label: "Delivery shade" },
+  { key: "DELIVERY_SHADE", label: "Loading shade" },
   { key: "INVOICE_GENERATED", label: "Invoiced" },
 ];
 
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
-  DELIVERY_SHADE: { label: "Delivery shade", tint: "#0F4776" },
+  DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Invoiced", tint: "#5B8E2E" },
 };
 
@@ -56,6 +56,9 @@ const BP_WIDE = 940; // every column
 const BP_MID = 780; // mobile no. moves into the panel
 const BP_COMPACT = 620; // sno moves into the panel
 // below BP_COMPACT the list renders as cards
+
+/* How close two taps on the same card must be (ms) to count as a double tap. */
+const DOUBLE_TAP_MS = 280;
 
 const formatDate = (value) => {
   if (!value) return "—";
@@ -121,13 +124,15 @@ const levelOf = (item) =>
 
 /* ── share chooser ─────────────────────────────────────────────────────
    A small sheet offered when the operator taps Send on a row, or automatically
-   after a level change. It only picks *what* to share — Quotation or Collector
-   Sheet — and hands the choice back; the download and the actual share are
-   driven by the parent. */
+   after a level change. It only picks *what* to share — Quotation, Pre-Invoice
+   or Collector Sheet — and hands the choice back; the download and the actual
+   share are driven by the parent. Pre-Invoice is offered only when the parent
+   says so (fully paid, non-empty, not yet invoiced). */
 function ShareKindModal({
   styles,
   quotationLine,
   isInvoice,
+  showPreInvoice,
   busyKind,
   onPick,
   onClose,
@@ -143,13 +148,21 @@ function ShareKindModal({
         ? "The customer-facing invoice PDF"
         : "The customer-facing quotation PDF",
     },
+    showPreInvoice && {
+      /* Internal chooser key only — the value the backend receives is the
+         `type` query param set in pickShareKind ("Pre-Invoice"). */
+      key: "pre_invoice",
+      icon: "receipt-outline",
+      title: "Pre-Invoice",
+      subtitle: "Payment complete — the pre-invoice PDF",
+    },
     {
       key: "collector",
       icon: "clipboard-outline",
       title: "Collector Sheet",
       subtitle: "The picking / collection sheet",
     },
-  ];
+  ].filter(Boolean);
 
   return (
     <Modal transparent animationType="fade" visible onRequestClose={onClose}>
@@ -236,6 +249,10 @@ function ShareKindModal({
  * Android back, or a finalizing action) the edited quotation is refetched so
  * the row always reflects the server's latest copy.
  *
+ * Card interaction (phones): a single tap toggles the expand panel; a double
+ * tap opens the edit modal for that quotation. On the desktop table the row's
+ * Edit icon is used instead.
+ *
  * Auto-share on level change: the editor is opened against a known level
  * (DRAFT / DELIVERY_SHADE / INVOICE_GENERATED). When it closes we refetch the
  * quotation, and if the level has moved on (e.g. moved to the loading shade or
@@ -243,9 +260,10 @@ function ShareKindModal({
  * quotation so the operator can hand over the fresh document. No level change,
  * no popup — a plain close is silent.
  *
- * Send opens the same chooser: the operator shares either the Quotation PDF or
- * the Collector Sheet PDF. The chosen PDF is downloaded and handed to the
- * shared PdfShareSheet. If a parent passes `onSend`, that takes over instead.
+ * Send opens the same chooser: the operator shares the Quotation PDF, the
+ * Collector Sheet PDF, or — for a fully paid, not-yet-invoiced quotation — the
+ * Pre-Invoice PDF. The chosen PDF is downloaded and handed to the shared
+ * PdfShareSheet. If a parent passes `onSend`, that takes over instead.
  */
 function QuotationViewList(
   { mode = "user", title, subtitle, onSelect, onUpdate, onSend },
@@ -284,12 +302,37 @@ function QuotationViewList(
   const [shareBusyKind, setShareBusyKind] = useState(null);
   const [pdf, setPdf] = useState(null);
 
+  /* Tracks the last card tap so a second tap on the same card within
+     DOUBLE_TAP_MS is recognised as a double tap. */
+  const lastTapRef = useRef({ id: null, time: 0 });
+
   const resolvedUserId = currentUser?.emailId;
   const resolvedUnitId = currentUser?.unitId;
 
   const toggleRow = useCallback((id) => {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
+
+  /* Card press: single tap toggles the expand panel, double tap opens Edit.
+     The expand toggle still fires on the first tap of a double tap, so the
+     panel state flips and then the modal opens over it — kept intentionally
+     so single-tap expand stays instant with no debounce lag. */
+  const handleCardPress = useCallback(
+    (item) => {
+      const now = Date.now();
+      const { id, time } = lastTapRef.current;
+
+      if (id === item.quotationId && now - time < DOUBLE_TAP_MS) {
+        lastTapRef.current = { id: null, time: 0 };
+        setEditing(item);
+        return;
+      }
+
+      lastTapRef.current = { id: item.quotationId, time: now };
+      toggleRow(item.quotationId);
+    },
+    [toggleRow],
+  );
 
   /* The hosting screen owns the "New quotation" button in the page header and
      opens the create modal through this handle. */
@@ -432,7 +475,9 @@ function QuotationViewList(
       const response =
         kind === "collector"
           ? await downloadCollectionSheetPdf(id)
-          : await downloadQuotationPdf(id);
+          : kind === "pre_invoice"
+            ? await downloadQuotationPdf(id, { type: "Pre-Invoice" })
+            : await downloadQuotationPdf(id);
 
       setShareBusyKind(null);
 
@@ -441,7 +486,9 @@ function QuotationViewList(
           response?.message ||
             (kind === "collector"
               ? "The collector sheet could not be downloaded."
-              : "The quotation PDF could not be downloaded."),
+              : kind === "pre_invoice"
+                ? "The pre-invoice PDF could not be downloaded."
+                : "The quotation PDF could not be downloaded."),
         );
         return;
       }
@@ -450,9 +497,11 @@ function QuotationViewList(
       const isInvoice = shareTarget.level === "INVOICE_GENERATED";
       const docLabel = isCollector
         ? "Collector sheet"
-        : isInvoice
-          ? "Invoice"
-          : "Quotation";
+        : kind === "pre_invoice"
+          ? "Pre-Invoice"
+          : isInvoice
+            ? "Invoice"
+            : "Quotation";
       const quotationLine = `QTN-${id}${
         shareTarget.customerName ? ` · ${shareTarget.customerName}` : ""
       }`;
@@ -803,7 +852,7 @@ function QuotationViewList(
 
     return (
       <Pressable
-        onPress={() => toggleRow(item.quotationId)}
+        onPress={() => handleCardPress(item)}
         style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
       >
         <View style={styles.cardTop}>
@@ -860,6 +909,9 @@ function QuotationViewList(
             </>
           ) : null}
         </View>
+
+        {/* Hint so the double-tap-to-edit gesture is discoverable. */}
+        <Text style={styles.cardHint}>Double-tap to edit</Text>
 
         {/* View button removed — cards now offer Edit and Send only. */}
         <View style={styles.cardActions}>
@@ -1054,6 +1106,13 @@ function QuotationViewList(
           styles={styles}
           quotationLine={shareLine}
           isInvoice={shareTarget.level === "INVOICE_GENERATED"}
+          /* Pre-Invoice is only meaningful once the quotation is fully paid,
+             actually has a value, and has not already become an invoice. */
+          showPreInvoice={
+            Number(shareTarget.remainingPayment || 0) === 0 &&
+            Number(shareTarget.totalAmount || 0) > 0 &&
+            shareTarget.level !== "INVOICE_GENERATED"
+          }
           busyKind={shareBusyKind}
           onPick={pickShareKind}
           onClose={closeShare}

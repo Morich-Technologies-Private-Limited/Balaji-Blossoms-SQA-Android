@@ -78,17 +78,36 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
 
     /* ── header ────────────────────────────────────────────────────── */
     header: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: large ? 12 : 10,
       paddingHorizontal: gutter,
       paddingTop: large ? 14 : 11,
       paddingBottom: large ? 14 : 10,
       borderBottomWidth: 1,
       borderBottomColor: BORDER,
+      gap: 6,
     },
-    headerTitles: { flex: 1, minWidth: 0 },
+    /* Just [back] [name] [doc] [close] — nothing here competes with the name
+       for width except two icon buttons, so it never has to truncate. */
+    headerTopRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: large ? 12 : 10,
+    },
+    /* QTN id + status pills + date, free to wrap under the name instead of
+       squeezing it. */
+    headerMetaRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      justifyContent: "space-between",
+      rowGap: 6,
+      columnGap: 10,
+      /* Lines up with the name above it: iconBtn width (38) + the top row's
+         gap. */
+      paddingLeft: 38 + (large ? 12 : 10),
+    },
     title: {
+      flex: 1,
+      minWidth: 0,
       fontSize: isDesktop ? 22 : isTablet ? 20 : 18,
       fontWeight: "800",
       letterSpacing: -0.4,
@@ -98,10 +117,10 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       fontSize: isDesktop ? 13.5 : 12.5,
       fontWeight: "500",
       color: "#5A7391",
-      marginTop: 2,
     },
     headerMeta: {
       flexDirection: "row",
+      flexWrap: "wrap",
       alignItems: "center",
       gap: large ? 10 : 8,
     },
@@ -109,52 +128,57 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     levelPill: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 6,
-      paddingHorizontal: 11,
-      paddingVertical: 6,
+      gap: large ? 5 : 4,
+      paddingHorizontal: large ? 9 : 6,
+      paddingVertical: large ? 5 : 3,
       borderRadius: 999,
       borderWidth: 1,
     },
-    levelDot: { height: 6, width: 6, borderRadius: 3 },
+    levelDot: { height: 5, width: 5, borderRadius: 2.5 },
     levelPillText: {
-      fontSize: 10.5,
+      fontSize: large ? 10 : 8.5,
       fontWeight: "800",
-      letterSpacing: 0.6,
+      letterSpacing: 0.4,
       textTransform: "uppercase",
     },
     dirtyPill: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 6,
-      paddingHorizontal: 11,
-      paddingVertical: 6,
+      gap: large ? 5 : 4,
+      paddingHorizontal: large ? 9 : 6,
+      paddingVertical: large ? 5 : 3,
       borderRadius: 999,
       backgroundColor: ALERT_SOFT,
       borderWidth: 1,
       borderColor: ALERT_LINE,
     },
-    dirtyDot: { height: 6, width: 6, borderRadius: 3, backgroundColor: ALERT },
+    dirtyDot: {
+      height: 5,
+      width: 5,
+      borderRadius: 2.5,
+      backgroundColor: ALERT,
+    },
     dirtyText: {
-      fontSize: 10.5,
+      fontSize: large ? 10 : 8.5,
       fontWeight: "800",
-      letterSpacing: 0.6,
+      letterSpacing: 0.4,
       color: ALERT,
     },
     savedPill: {
       flexDirection: "row",
       alignItems: "center",
-      gap: 6,
-      paddingHorizontal: 11,
-      paddingVertical: 6,
+      gap: large ? 5 : 4,
+      paddingHorizontal: large ? 9 : 6,
+      paddingVertical: large ? 5 : 3,
       borderRadius: 999,
       backgroundColor: GREEN_SOFT,
       borderWidth: 1,
       borderColor: GREEN_LINE,
     },
     savedText: {
-      fontSize: 10.5,
+      fontSize: large ? 10 : 8.5,
       fontWeight: "800",
-      letterSpacing: 0.6,
+      letterSpacing: 0.4,
       color: GREEN_DEEP,
     },
     dateWrap: { flexDirection: "row", alignItems: "center", gap: 6 },
@@ -202,24 +226,6 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       paddingVertical: 0,
       ...noOutline,
     },
-    addButton: {
-      height: 46,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 8,
-      paddingHorizontal: large ? 20 : 14,
-      borderRadius: 11,
-      backgroundColor: NAVY,
-    },
-    addButtonHover: { backgroundColor: NAVY_DEEP },
-    addButtonPressed: { backgroundColor: NAVY_DEEP },
-    addButtonText: {
-      fontSize: 13,
-      fontWeight: "800",
-      letterSpacing: 0.8,
-      color: SURFACE,
-    },
 
     /* ── check progress strip (delivery shade) ─────────────────────── */
     checkStrip: {
@@ -249,19 +255,43 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
 
     /* ── search results ────────────────────────────────────────────── */
+    /* The dropdown is anchored to the card, not to the search box or the body
+       zone, and that is deliberate. Android only dispatches touches to the
+       part of a child that falls inside its parent's own bounds — an absolute
+       child hanging out of the ~70pt toolbar still *draws* in full but
+       everything below the toolbar is dead to gestures, so the list could not
+       be scrolled and only its first row could be tapped. The body zone fixed
+       the touches but clipped the list at the footer dock. The card is the
+       full height of the screen: every row stays inside its parent, and
+       nothing below cuts the list short.
+
+       `top` is set inline from the body zone's measured offset. The zIndex and
+       elevation sit above everything the card holds (toolbar 20, footer dock
+       unset) so the list covers the footer's buttons rather than sliding under
+       them — RN needs both: zIndex orders on web and iOS, elevation on
+       Android. */
     results: {
       position: "absolute",
-      top: 52,
-      left: 0,
-      right: 0,
+      left: gutter,
+      right: gutter,
       maxHeight: large ? 340 : 280,
       backgroundColor: SURFACE,
       borderRadius: 14,
       borderWidth: 1,
       borderColor: BORDER,
       overflow: "hidden",
-      zIndex: 30,
+      zIndex: 100,
       ...shadow(0.14, 24, 10),
+      /* After the spread on purpose — shadow() sets its own elevation. */
+      ...(web ? null : { elevation: 24 }),
+    },
+    /* The height cap has to live on the scroller itself. A ScrollView doesn't
+       shrink (flexShrink defaults to 0), so with the cap only on the wrapper it
+       lays out at full content height and `overflow: hidden` just clips the
+       overflowing rows — they can't be scrolled to. */
+    resultsScroll: {
+      maxHeight: large ? 340 : 280,
+      flexGrow: 0,
     },
     resultCard: {
       flexDirection: "row",
@@ -307,8 +337,25 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     resultLoadingText: { fontSize: 13, color: FAINT },
 
     /* ── scrollable body ───────────────────────────────────────────── */
+    /* Measured (onLayout) to give the search dropdown its top offset — the
+       dropdown itself hangs off the card, so this zone must not clip it. */
+    bodyZone: { flex: 1, position: "relative" },
     bodyScroll: { flex: 1 },
     bodyContent: { flexGrow: 1, paddingBottom: 4 },
+    /* One wrapper around everything the body scrolls, so a single row can be
+       measured against the scrolled content — see `scrollRowIntoView`. */
+    bodyContentInner: { flexGrow: 1 },
+
+    /* ── opening state ─────────────────────────────────────────────────
+       Held until the access check answers, so the grid never opens on the
+       wrong surface and swaps under the operator. Its caption reuses
+       `loadingText`, further down with the picker sheet's own spinner. */
+    loadingBody: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 12,
+    },
 
     /* ── table ─────────────────────────────────────────────────────── */
     tableWrap: {
@@ -386,6 +433,14 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       backgroundColor: FILL_DEEP,
     },
     metaTagText: { fontSize: 10.5, fontWeight: "700", color: "#5A6B80" },
+    /* the pre-discount price, struck through inline beside the price it was
+       reduced to — same tag, so it needs no marginTop of its own */
+    metaTagStrike: {
+      fontSize: 10.5,
+      fontWeight: "700",
+      color: FAINT,
+      textDecorationLine: "line-through",
+    },
     /* the SPECIAL flag on barcode-scanned rows, shown inline in the table */
     specialTag: {
       flexDirection: "row",
@@ -501,6 +556,7 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       borderColor: BORDER_STRONG,
       paddingHorizontal: 11,
       gap: 4,
+      overflow: "hidden",
     },
     qtyBoxWarn: { borderColor: ALERT, backgroundColor: "#FFF8F5" },
     qtyBoxDirty: { borderColor: ORANGE, backgroundColor: "#FFFAF4" },
@@ -513,7 +569,10 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       paddingVertical: 0,
       ...noOutline,
     },
-    qtyUnit: { fontSize: 11.5, fontWeight: "600", color: FAINT },
+    /* A caption below the box, not an inline sibling of the input — inline
+       was fixed-width and didn't shrink, so on narrow cards it spilled past
+       this column into the next field. */
+    qtyUnit: { fontSize: 10.5, color: FAINT, marginTop: 4 },
     qtyHint: { fontSize: 10.5, color: FAINT, marginTop: 4 },
     qtyHintMoved: {
       fontSize: 10.5,
@@ -710,7 +769,12 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       alignItems: "center",
       gap: 6,
     },
-    plantNameInline: { maxWidth: "58%", flexShrink: 1 },
+    /* No width cap and no line clamp: a long varietal name — "Chrysanthemum
+       (Shevanti) White · 6\"" — has to read in full. Left free to shrink, it
+       takes the whole first line of the wrapping row and wraps onto a second
+       line, pushing the subtitle and tags below it; short names still sit
+       inline with them as before. */
+    plantNameInline: { flexShrink: 1 },
     plantSubInline: { fontSize: 11, color: "#8A97A8" },
     /* line total, tucked onto the end of the header row instead of its own
        footer band lower in the card */
@@ -985,6 +1049,44 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     moneyReadItem: { flexDirection: "row", alignItems: "center", gap: 6 },
     moneyReadText: { fontSize: 13, fontWeight: "600", color: "#334155" },
 
+    /* Advance ledger table: Name / Amount / Collection date / Mode. */
+    advanceTable: {
+      borderWidth: 1,
+      borderColor: BORDER,
+      borderRadius: 10,
+      overflow: "hidden",
+    },
+    advanceTableRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      borderTopWidth: 1,
+      borderTopColor: BORDER,
+      gap: 6,
+    },
+    advanceTableRowHead: {
+      borderTopWidth: 0,
+      backgroundColor: FILL,
+    },
+    advanceTableCellName: { flex: 1.3 },
+    advanceTableCellAmount: { flex: 1 },
+    advanceTableCellDate: { flex: 1 },
+    advanceTableCellMode: { flex: 0.9 },
+    advanceTableHeadText: {
+      fontSize: 10.5,
+      fontWeight: "700",
+      color: MUTED,
+      textTransform: "uppercase",
+      letterSpacing: 0.3,
+    },
+    advanceTableCellText: {
+      fontSize: 12.5,
+      fontWeight: "600",
+      color: TEXT,
+    },
+    advanceTableCellMuted: { color: FAINT, fontWeight: "500" },
+
     /* On large screens the metric strip and the buttons share one row.
        The metric strip itself lays its items out horizontally so the whole
        footer stays a slim band (see reference image 2). */
@@ -1123,6 +1225,107 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       textAlign: large ? "right" : "center",
     },
 
+    /* Collapses the totals (plant types / quantity / packing / grand total /
+       …) out of view; the action buttons stay put either way. */
+    summaryToggle: {
+      alignSelf: large ? "flex-end" : "center",
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      paddingVertical: 5,
+      paddingHorizontal: 10,
+      borderRadius: 8,
+    },
+    summaryToggleHover: { backgroundColor: NAVY_TINT },
+    summaryToggleText: {
+      fontSize: 11.5,
+      fontWeight: "800",
+      letterSpacing: 0.2,
+      color: NAVY,
+    },
+
+    /* ── compact portrait grid ────────────────────────────────────────
+       Below the `large` breakpoint the metrics and the action buttons are
+       laid out as one fixed 4-column grid instead of a tall stack, so the
+       whole footer reads as two rows (see reference photo) no matter how
+       many optional totals (special / transport / discount / advance) are
+       showing. Rows are explicit Views (not flex-wrap) so a short trailing
+       row shares its width evenly instead of leaving dead cells, and every
+       cell's height is capped by metricGridCell's minHeight — nothing here
+       is allowed to stretch to fill the screen. */
+    metricGridBox: {
+      borderRadius: 11,
+      backgroundColor: FILL,
+      borderWidth: 1,
+      borderColor: BORDER,
+      overflow: "hidden",
+    },
+    metricGridRow: {
+      flexDirection: "row",
+    },
+    metricGridRowDivider: {
+      borderTopWidth: 1,
+      borderTopColor: BORDER,
+    },
+    metricGridCell: {
+      flex: 1,
+      minHeight: 56,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingVertical: 8,
+      paddingHorizontal: 4,
+    },
+    metricGridCellDivider: {
+      borderRightWidth: 1,
+      borderRightColor: BORDER,
+    },
+    metricGridLabel: {
+      fontSize: 8,
+      fontWeight: "800",
+      letterSpacing: 0.2,
+      color: MUTED,
+      textTransform: "uppercase",
+      textAlign: "center",
+    },
+    metricGridValue: {
+      fontSize: 12,
+      fontWeight: "800",
+      letterSpacing: -0.2,
+      color: TEXT,
+      marginTop: 2,
+      textAlign: "center",
+    },
+    metricGridValueGrand: { fontSize: 13, color: GREEN },
+    metricGridValueRemaining: { color: ORANGE },
+    metricGridUnit: { fontSize: 7.5, color: FAINT, textAlign: "center" },
+    /* Positioned to fill metricGridCell exactly (that cell's own height is
+       already capped by minHeight above) rather than sizing via height:
+       "100%", which — against an auto-height parent — resolves against the
+       nearest ancestor with a definite height instead and was what produced
+       the runaway-tall button seen in testing. */
+    metricGridBtn: {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 3,
+      paddingHorizontal: 4,
+    },
+    metricGridBtnGhost: { backgroundColor: SURFACE },
+    metricGridBtnPrimary: { backgroundColor: NAVY },
+    metricGridBtnInvoice: { backgroundColor: GREEN },
+    metricGridBtnDisabled: { backgroundColor: "#DDE3EA" },
+    metricGridBtnLabel: {
+      fontSize: 8.5,
+      fontWeight: "800",
+      letterSpacing: 0.2,
+      textAlign: "center",
+    },
+
     /* ── sheets ────────────────────────────────────────────────────── */
     sheetBackdrop: {
       flex: 1,
@@ -1143,6 +1346,10 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       paddingBottom: large ? 8 : 20,
       overflow: "hidden",
     },
+    /* Same reason as resultsScroll: without flexShrink the option list lays out
+       at full content height next to the header and the sheet's maxHeight just
+       clips the tail of the list instead of letting it scroll. */
+    sheetScroll: { flexShrink: 1, minHeight: 0 },
     sheetHeader: {
       paddingHorizontal: 20,
       paddingTop: 18,
@@ -1536,6 +1743,8 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     },
     reasonChipHover: { borderColor: NAVY, backgroundColor: NAVY_TINT },
     reasonChipText: { fontSize: 12, fontWeight: "700", color: "#475569" },
+    reasonChipActive: { borderColor: NAVY, backgroundColor: NAVY_TINT },
+    reasonChipTextActive: { color: NAVY },
 
     reasonActions: {
       flexShrink: 0,

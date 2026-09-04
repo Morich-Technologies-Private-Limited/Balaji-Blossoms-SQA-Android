@@ -126,12 +126,125 @@ export default function makeStyles({ width, height, isTablet, isDesktop }) {
       paddingVertical: 0,
       outlineStyle: "none",
     },
+    inputWrapHover: {
+      borderColor: NAVY,
+    },
+    inputWrapDisabled: {
+      backgroundColor: "#F8FAFC",
+    },
     errorText: {
       position: "absolute",
       left: 2,
       bottom: -14,
       fontSize: 11,
       color: RED,
+    },
+
+    /* select trigger — same shell as an input, value instead of a TextInput */
+    selectValue: {
+      flex: 1,
+      minWidth: 0,
+      fontSize: 15,
+      color: TEXT,
+    },
+    selectPlaceholder: {
+      color: PLACEHOLDER,
+    },
+
+    /* option picker dialog (state / city) */
+    pickerCard: {
+      width: "100%",
+      maxWidth: 460,
+      maxHeight: Math.max(280, height * 0.72),
+      backgroundColor: SURFACE,
+      borderRadius: 20,
+      overflow: "hidden",
+      shadowColor: "#0F172A",
+      shadowOpacity: 0.18,
+      shadowRadius: 28,
+      shadowOffset: { width: 0, height: 12 },
+      elevation: 10,
+    },
+    pickerHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingHorizontal: 18,
+      paddingTop: 18,
+      paddingBottom: 12,
+    },
+    pickerTitle: {
+      flex: 1,
+      fontSize: 17,
+      fontWeight: "700",
+      color: TEXT,
+    },
+    pickerSearch: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      height: fieldHeight,
+      marginHorizontal: 18,
+      marginBottom: 12,
+      paddingHorizontal: 12,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: BORDER,
+      backgroundColor: SURFACE,
+    },
+    pickerList: {
+      flexGrow: 0,
+    },
+    pickerOption: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingHorizontal: 18,
+      paddingVertical: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: "#F1F5F9",
+    },
+    pickerOptionHover: {
+      backgroundColor: `${NAVY}0D`,
+    },
+    pickerOptionText: {
+      flex: 1,
+      minWidth: 0,
+      fontSize: 15,
+      color: TEXT,
+    },
+    pickerOptionTextActive: {
+      color: NAVY,
+      fontWeight: "700",
+    },
+    pickerBadge: {
+      fontSize: 9.5,
+      fontWeight: "800",
+      letterSpacing: 0.6,
+      color: NAVY,
+      backgroundColor: `${NAVY}14`,
+      paddingHorizontal: 6,
+      paddingVertical: 3,
+      borderRadius: 999,
+      overflow: "hidden",
+    },
+    pickerState: {
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 10,
+      paddingHorizontal: 18,
+      paddingVertical: 28,
+    },
+    pickerStateText: {
+      fontSize: 13.5,
+      color: MUTED,
+      textAlign: "center",
+    },
+    pickerRetry: {
+      fontSize: 13,
+      fontWeight: "700",
+      letterSpacing: 0.4,
+      color: NAVY,
     },
 
     /* banner */

@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -18,23 +19,37 @@ import { fetchPackingList } from "../../api/fetchPacking";
 import { getQuotation } from "../../api/fetchQuotation";
 import { getApplicableOffer } from "../../api/getOffer";
 import { getQuotationAccess } from "../../api/getQuotationAccess";
+import { getQuotationEditLevels } from "../../api/getQuotationEditLevels";
 import { getSpecialPlantByBarcodeId } from "../../api/getSpecialPlant";
 import { searchPlants } from "../../api/plantApi";
 import {
   convertToInvoice,
   moveToLoadingShade,
 } from "../../api/quotationActions.js";
+import {
+  fetchAllUnits,
+  fetchPlantInventoryConfig,
+  INVENTORY_MODES,
+} from "../../api/unitApi";
 import { updateQuotationPlants } from "../../api/updateQuotation";
 
 import PdfShareSheet from "../../utility/PdfShareSheet";
-import { getCurrentUser } from "../../utility/secureStorage";
+import { getCurrentRole, getCurrentUser } from "../../utility/secureStorage";
 import makeStyles from "./Edit.styles";
 
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
-  DELIVERY_SHADE: { label: "Delivery shade", tint: "#0F4776" },
+  DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Invoiced", tint: "#16A34A" },
 };
+
+/** Which levels a role may edit when /quotation/editLevel can't be reached —
+    the rule the app carried before the endpoint existed. Loading shade belongs
+    to the delivery team; everyone else edits in Draft only. */
+const fallbackEditLevels = (role) =>
+  role === "DELIVERY_MANAGER" || role === "ADMIN"
+    ? ["DRAFT", "DELIVERY_SHADE"]
+    : ["DRAFT"];
 
 const SEARCH_DEBOUNCE = 350;
 const NO_PACKING = { packingId: null, packingName: "No packing", price: 0 };
@@ -51,8 +66,27 @@ const CHOICE_OPTIONS = [
   { value: true, label: "Yes", hint: "The customer asked for it" },
 ];
 
+/* Advance payments are collected as CASH, UPI or CHEQUE. */
+const TRANSACTION_MODES = [
+  { value: "CASH", label: "Cash" },
+  { value: "UPI", label: "UPI" },
+  { value: "CHEQUE", label: "Cheque" },
+  { value: "CARD", label: "Card" },
+  { value: "BANK_TRANSFER", label: "Bank transfer" },
+  { value: "DD", label: "DD" },
+];
+
+const transactionModeLabel = (value) =>
+  TRANSACTION_MODES.find((option) => option.value === value)?.label ||
+  value ||
+  "";
+
 /* Offered in the reason popups as one-tap fills. */
-const REASON_PRESETS = [];
+const REASON_PRESETS = [
+  "Plant variety not available",
+  "Changes made on customer request",
+  "Quantity not sufficient",
+];
 
 /* Breakpoints measured on the table container.
    Columns are dropped in reverse order of importance as space runs out, and
@@ -148,8 +182,9 @@ const listPriceOf = (source) =>
   toMoney(source?.price ?? source?.plantPrice ?? source?.unitPrice ?? 0);
 
 /** Offer discount is a flat amount off the unit price, fetched per quantity.
-    Display only: it never changes the saved quotation or the billed amount, and
-    it is not applied to special plants. */
+    Display only: it is never sent back on save, and it is not applied to
+    special plants. It does drive the row amount and the totals on screen, so
+    what the operator reads matches the cut price shown in the price column. */
 const offerDiscountOf = (line) => Math.max(0, toMoney(line?.offerDiscount));
 const effectivePriceOf = (line) =>
   Math.max(0, toMoney(line?.price) - offerDiscountOf(line));
@@ -161,18 +196,74 @@ const specialFromRecord = (record) => ({
   barcodeId: record?.barcodeId,
   plantName: record?.plantName || "Special plant",
   price: toMoney(record?.price),
+  /* Kept unparsed on purpose: `null` (no discount on this plant) has to stay
+     distinguishable from a real 0, which toMoney would also produce. */
+  discountPrice: record?.discountPrice ?? null,
   unitId: record?.unitId ?? null,
   unitName: record?.unitName ?? null,
   status: record?.status ?? null,
   arrivalDate: record?.arrivalDate ?? null,
   departureDate: record?.departureDate ?? null,
+  /* The delivery tick, and the saved tick this row is ordered by. */
+  checked: rowChecked(record),
+  baseChecked: rowChecked(record),
+  /* Scanned in during this session, so the server has never seen it. Set at
+     the barcode-add site rather than through a second parameter here: this
+     function is passed straight to .map(), which would feed the array index
+     into any extra argument. */
+  isNew: false,
 });
 
+/** What a special plant actually costs. `discountPrice` is the already-final
+    figure the backend worked out, so the screen only ever chooses between it
+    and the list price — it never applies a percentage itself. An absent
+    discountPrice means the plant isn't discounted. */
+const specialPriceOf = (special) =>
+  special?.discountPrice != null
+    ? toMoney(special.discountPrice)
+    : toMoney(special?.price);
+
+/** True only when there is a discount worth showing the customer. */
+const specialDiscounted = (special) =>
+  special?.discountPrice != null &&
+  specialPriceOf(special) < toMoney(special?.price);
+
+/** Identifies a removed row to the backend. A regular line is known by its
+    plantId, a special plant by the barcode on the physical item. */
+const removalIdOf = (row) =>
+  row?.isSpecial
+    ? { plantId: null, barcodeId: row.barcodeId ?? null, isSpecialPlant: true }
+    : { plantId: row?.plantId, barcodeId: null, isSpecialPlant: false };
+
 /** Jackson serialises `isSelectedByCustomer` both ways depending on config.
-    Unlike before, an absent value now means NO — new rows are the nursery's
-    until somebody says otherwise. */
+    An absent value means YES — rows are the customer's pick until somebody
+    says otherwise. */
 const chosenByCustomer = (source) =>
-  source?.selectedByCustomer ?? source?.isSelectedByCustomer ?? false;
+  source?.selectedByCustomer ?? source?.isSelectedByCustomer ?? true;
+
+/** The delivery tick saved against a row. Same Jackson quirk as
+    chosenByCustomer — Lombok's isPlantChecked() serialises as either
+    `plantChecked` or `isPlantChecked` depending on the ObjectMapper — so both
+    spellings are read. Absent means untouched, i.e. not checked. */
+const rowChecked = (source) =>
+  !!(source?.plantChecked ?? source?.isPlantChecked ?? false);
+
+/** Units are listed in the order the company set on them, not the order the
+    inventory or the API happened to return. A unit with no sequence sorts
+    after every ordered one, then by name, so the tail is at least stable. */
+const bySequence = (a, b) => {
+  const left = a?.sequence ?? Number.MAX_SAFE_INTEGER;
+  const right = b?.sequence ?? Number.MAX_SAFE_INTEGER;
+  if (left !== right) return left - right;
+  return String(a?.unitName || "").localeCompare(String(b?.unitName || ""));
+};
+
+/** The unit a plant should be selected on when nothing else has decided.
+    Same Jackson quirk as chosenByCustomer: Lombok turns a primitive
+    `isDefaultForPlantSelection` into isDefaultForPlantSelection(), which
+    serialises as either name depending on the ObjectMapper. */
+const isDefaultUnitForPlants = (unit) =>
+  !!(unit?.defaultForPlantSelection ?? unit?.isDefaultForPlantSelection);
 
 const subtitleOf = (source, seedling) =>
   source?.botanicalName ||
@@ -185,18 +276,33 @@ const subtitleOf = (source, seedling) =>
 const plantTitleWithSize = (line) =>
   line.size ? `${line.plantName} · ${line.size}` : line.plantName;
 
+/** How many plants a line comes to — trays × tray size for a seedling. This is
+    a head count for display (the seedling maths column, the quantity hint, the
+    quantity metric); it is never what the line is billed on. */
 const derivedQuantity = (line) => {
   const entered = toCount(line.quantity);
   const traySize = toCount(line.traySize);
   return line.seedling && traySize > 0 ? entered * traySize : entered;
 };
 
-const lineAmount = (line) => derivedQuantity(line) * toMoney(line.price);
+/** What a line is billed on. A seedling is priced per tray, so its billable
+    count is the tray count as entered — trayReserved in Draft, trayDelivered
+    once past it — and never the plants-per-tray total. Everything else is
+    priced per plant, where the two are the same number. */
+const billableQuantity = (line) => toCount(line.quantity);
+
+/** line.price is already the after-discount unit price (see priceOf), and the
+    offer is a further flat cut off it — so the row is billed on the same
+    effective price the price column shows struck through. */
+const lineAmount = (line) => billableQuantity(line) * effectivePriceOf(line);
 
 const linePacking = (line) =>
   toCount(line.quantity) * toMoney(line.packingCharge);
 
 const unitWord = (line) => (line.seedling ? "trays" : "plants");
+
+/** What one unit of price buys — a seedling is priced per tray, not per plant. */
+const priceUnitWord = (line) => (line.seedling ? "tray" : "plant");
 
 /* ── per-row change detection ────────────────────────────────────────
    Each row remembers the values it was last saved with (the `base*` fields).
@@ -282,6 +388,30 @@ const fieldDelta = (line, field) => {
   }
 };
 
+/* The fields that describe what physically leaves the shade. Moving any of
+   them invalidates the delivery manager's tick — whatever was counted out
+   against the old figures no longer matches the row — so the row drops back to
+   unchecked and has to be picked and ticked again. Note this is about the
+   *patch*, not the baseline: putting a value back the way it was still clears
+   the tick, because the row still has to be re-verified against the shelf. */
+const PICK_FIELDS = [
+  "quantity",
+  "unitId",
+  "packingName",
+  "packingCharge",
+  "selectedByCustomer",
+];
+
+/** Does this patch actually move a pick field to a different value? Patches
+    that only carry background data (an inventory list, a backfilled price, a
+    reason) leave the tick alone. */
+const patchTouchesPick = (line, patch) =>
+  PICK_FIELDS.some(
+    (field) =>
+      field in patch &&
+      String(patch[field] ?? "") !== String(line[field] ?? ""),
+  );
+
 /** Everything the save call cares about, flattened so it can be compared. */
 const signatureOf = (lines) =>
   JSON.stringify(
@@ -292,25 +422,36 @@ const signatureOf = (lines) =>
       line.packingName,
       toMoney(line.packingCharge),
       line.selectedByCustomer ? 1 : 0,
+      /* The delivery tick is saved state, so ticking a box on its own makes
+         the screen dirty and Save is offered — a partly ticked list is a
+         legitimate thing to put on the server. */
+      line.checked ? 1 : 0,
     ]),
   );
 
 /** The whole saveable document: the lines, the special plants, plus the
     quotation-level money fields. Used for change tracking so a discount, a
     transport edit, an advance payment, or a scanned special plant alone still
-    counts as dirty. */
+    counts as dirty.
+
+    `advance` / `advanceMode` describe only the acting user's own row in the
+    advance ledger — every collector's row is tracked and saved separately,
+    so nobody's edit can be a no-op that silently drops someone else's row. */
 const stateSignatureOf = (
   lines,
   discount,
   remark,
   transport,
   advance,
+  advanceMode,
   specials,
 ) =>
   `${signatureOf(lines)}|${toMoney(discount)}|${String(
     remark ?? "",
-  ).trim()}|${toMoney(transport)}|${toMoney(advance)}|${(specials || [])
-    .map((special) => special.barcodeId)
+  ).trim()}|${toMoney(transport)}|${toMoney(advance)}|${advanceMode || ""}|${(
+    specials || []
+  )
+    .map((special) => `${special.barcodeId}:${special.checked ? 1 : 0}`)
     .sort()
     .join(",")}`;
 
@@ -333,11 +474,15 @@ const lineFromReservation = (reservation, isDraft) => {
     key: nextKey(),
     plantId: reservation.plantId,
     plantName: reservation.plantName,
+    /* the group this plant hangs off — offers are looked up by it */
+    parentGroupName: reservation.parentGroupName ?? null,
     plantSubtitle: subtitleOf(reservation, seedling),
     size: reservation.size,
     plantType: reservation.plantType,
     seedling,
-    price: listPriceOf(reservation),
+    /* Billed at the discounted price when there is one; the list price is kept
+       alongside so the price cell can strike it through. */
+    price: priceOf(reservation),
     listPrice: listPriceOf(reservation),
     traySize: reservation.traySize ?? null,
     unitId: reservation.unitId ?? null,
@@ -363,7 +508,13 @@ const lineFromReservation = (reservation, isDraft) => {
     baseUnitName: reservation.unitName ?? null,
     /* per-field reasons, gathered inline as each field is edited */
     fieldReasons: {},
-    checked: false,
+    /* The delivery tick comes back from the server, so reopening a quotation
+       shows exactly what the delivery manager had already ticked.
+       `baseChecked` is the last *saved* tick and is what the row is ordered
+       by — rows only move to the bottom once the tick is on the server, so a
+       row never jumps out from under the finger that just ticked it. */
+    checked: rowChecked(reservation),
+    baseChecked: rowChecked(reservation),
     isNew: false,
   };
 };
@@ -378,9 +529,22 @@ const settleLine = (line) => ({
   baseSelectedByCustomer: !!line.selectedByCustomer,
   baseUnitId: line.unitId ?? null,
   baseUnitName: line.unitName ?? null,
+  baseChecked: !!line.checked,
   fieldReasons: {},
+  choiceFollowsUnit: false,
   isNew: false,
 });
+
+/** Rows already ticked off on the server sink to the bottom, so reopening a
+    part-picked quotation shows what is still outstanding first. The key is
+    `baseChecked` — the *saved* tick — so a box ticked here and now does not
+    make its row jump away from under the finger that ticked it; the list
+    settles into its new order on the next save or reopen. Order within each
+    half is untouched, so nothing else moves. */
+const sinkChecked = (rows) => [
+  ...rows.filter((row) => !row.baseChecked),
+  ...rows.filter((row) => row.baseChecked),
+];
 
 /** Audit rows come back on the quotation; normalise the shapes we might get. */
 const auditFromRecord = (record, index) => ({
@@ -393,11 +557,21 @@ const auditFromRecord = (record, index) => ({
 
 /* ── row ───────────────────────────────────────────────────────────── */
 
-const TableRow = memo(function TableRow({ item, index, columns, styles }) {
+const TableRow = memo(function TableRow({
+  item,
+  index,
+  columns,
+  styles,
+  registerRow,
+}) {
   const dirty = !item.isSpecial && lineChanged(item);
 
   return (
-    <View style={styles.rowGroup}>
+    <View
+      ref={(node) => registerRow(item.key, node)}
+      collapsable={false}
+      style={styles.rowGroup}
+    >
       <View
         style={[
           styles.row,
@@ -496,15 +670,29 @@ function TransportModal({ styles, initialTransport, onApply, onClose }) {
 }
 
 /* ── advance payment modal ───────────────────────────────────────────
-   One field: an advance already collected from the customer. It reduces the
-   remaining payable, but never the grand total itself. */
-function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
+   The advance is a ledger, one row per collector, and this modal only ever
+   edits the row belonging to the person currently signed in — nobody can
+   touch a colleague's collection. `otherTotal` is what everyone else has
+   already collected, shown for context and folded into the grand-total cap. */
+function AdvanceModal({
+  styles,
+  grand,
+  otherTotal,
+  entries,
+  initialAdvance,
+  initialMode,
+  collectorName,
+  onApply,
+  onClose,
+}) {
   const C = styles.colors;
   const [advance, setAdvance] = useState(initialAdvance);
+  const [mode, setMode] = useState(initialMode || "CASH");
 
   const value = toMoney(advance);
-  const overTotal = value > grand;
-  const remaining = Math.max(0, grand - value);
+  const combined = otherTotal + value;
+  const overTotal = combined > grand;
+  const remaining = Math.max(0, grand - combined);
 
   return (
     <Modal transparent animationType="fade" visible onRequestClose={onClose}>
@@ -513,11 +701,100 @@ function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
           <View style={styles.sheetHeader}>
             <Text style={styles.sheetTitle}>Advance payment</Text>
             <Text style={styles.sheetSubtitle}>
-              Amount already collected from the customer
+              Your collection as {collectorName || "the signed-in user"}
             </Text>
           </View>
 
           <View style={styles.adjustBody}>
+            {entries && entries.length > 0 ? (
+              <View style={styles.adjustField}>
+                <View style={styles.moneyHead}>
+                  <Ionicons name="people-outline" size={15} color={C.MUTED} />
+                  <Text style={styles.moneyLabel}>Advance ledger</Text>
+                </View>
+                <View style={styles.advanceTable}>
+                  <View
+                    style={[styles.advanceTableRow, styles.advanceTableRowHead]}
+                  >
+                    <Text
+                      style={[
+                        styles.advanceTableHeadText,
+                        styles.advanceTableCellName,
+                      ]}
+                    >
+                      Name
+                    </Text>
+                    <Text
+                      style={[
+                        styles.advanceTableHeadText,
+                        styles.advanceTableCellAmount,
+                      ]}
+                    >
+                      Amount
+                    </Text>
+                    <Text
+                      style={[
+                        styles.advanceTableHeadText,
+                        styles.advanceTableCellDate,
+                      ]}
+                    >
+                      Collection date
+                    </Text>
+                    <Text
+                      style={[
+                        styles.advanceTableHeadText,
+                        styles.advanceTableCellMode,
+                      ]}
+                    >
+                      Mode
+                    </Text>
+                  </View>
+                  {entries.map((row) => (
+                    <View key={row.key} style={styles.advanceTableRow}>
+                      <Text
+                        style={[
+                          styles.advanceTableCellText,
+                          styles.advanceTableCellName,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {row.name}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.advanceTableCellText,
+                          styles.advanceTableCellAmount,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {formatAmount(row.amount)}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.advanceTableCellText,
+                          styles.advanceTableCellDate,
+                          !row.date && styles.advanceTableCellMuted,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {row.date ? formatDate(row.date) : "—"}
+                      </Text>
+                      <Text
+                        style={[
+                          styles.advanceTableCellText,
+                          styles.advanceTableCellMode,
+                          !row.mode && styles.advanceTableCellMuted,
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {row.mode || "—"}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            ) : null}
+
             <View style={styles.adjustField}>
               <View style={styles.moneyHead}>
                 <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
@@ -542,7 +819,7 @@ function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
 
               {overTotal ? (
                 <Text style={styles.adjustError}>
-                  The advance is more than the grand total (
+                  The combined advance is more than the grand total (
                   {formatAmount(grand)}).
                 </Text>
               ) : (
@@ -553,6 +830,42 @@ function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
                   </Text>
                 </View>
               )}
+            </View>
+
+            <View style={styles.adjustField}>
+              <View style={styles.moneyHead}>
+                <Ionicons name="card-outline" size={15} color={C.NAVY} />
+                <Text style={styles.moneyLabel}>Collected via</Text>
+              </View>
+              <View style={styles.reasonChipRow}>
+                {TRANSACTION_MODES.map((option) => {
+                  const active = option.value === mode;
+                  return (
+                    <Pressable
+                      key={option.value}
+                      style={({ hovered, pressed }) => [
+                        styles.reasonChip,
+                        active && styles.reasonChipActive,
+                        (hovered || pressed) &&
+                          !active &&
+                          styles.reasonChipHover,
+                      ]}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: active }}
+                      onPress={() => setMode(option.value)}
+                    >
+                      <Text
+                        style={[
+                          styles.reasonChipText,
+                          active && styles.reasonChipTextActive,
+                        ]}
+                      >
+                        {option.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
             </View>
           </View>
 
@@ -573,7 +886,7 @@ function AdvanceModal({ styles, grand, initialAdvance, onApply, onClose }) {
                 (hovered || pressed) && !overTotal && styles.primaryButtonHover,
                 overTotal && styles.primaryButtonDisabled,
               ]}
-              onPress={() => onApply(value > 0 ? String(value) : "")}
+              onPress={() => onApply(value > 0 ? String(value) : "", mode)}
               disabled={overTotal}
             >
               <Text style={styles.modalApplyText}>APPLY</Text>
@@ -943,6 +1256,21 @@ function FieldReasonModal({ styles, request, onSubmit, onCancel }) {
                     </Text>
                   </View>
                 </View>
+
+                <View style={styles.reasonChipRow}>
+                  {REASON_PRESETS.map((preset) => (
+                    <Pressable
+                      key={preset}
+                      style={({ hovered, pressed }) => [
+                        styles.reasonChip,
+                        (hovered || pressed) && styles.reasonChipHover,
+                      ]}
+                      onPress={() => setReason(preset)}
+                    >
+                      <Text style={styles.reasonChipText}>{preset}</Text>
+                    </Pressable>
+                  ))}
+                </View>
               </View>
             </ScrollView>
 
@@ -1173,7 +1501,14 @@ function DeleteReasonModal({
 /* ── close confirmation ──────────────────────────────────────────────
    Gates the back / close buttons whenever there are unsaved changes, so
    nothing is discarded by accident. */
-function CloseConfirmModal({ styles, busy, error, onSave, onDiscard, onCancel }) {
+function CloseConfirmModal({
+  styles,
+  busy,
+  error,
+  onSave,
+  onDiscard,
+  onCancel,
+}) {
   const C = styles.colors;
 
   return (
@@ -1183,7 +1518,10 @@ function CloseConfirmModal({ styles, busy, error, onSave, onDiscard, onCancel })
       visible
       onRequestClose={busy ? () => {} : onCancel}
     >
-      <Pressable style={styles.sheetBackdrop} onPress={busy ? undefined : onCancel}>
+      <Pressable
+        style={styles.sheetBackdrop}
+        onPress={busy ? undefined : onCancel}
+      >
         <Pressable style={styles.sheet} onPress={() => {}}>
           <View style={styles.sheetHeader}>
             <Text style={styles.sheetTitle}>Unsaved changes</Text>
@@ -1249,7 +1587,9 @@ function CloseConfirmModal({ styles, busy, error, onSave, onDiscard, onCancel })
  *
  * Access: on open the screen calls /check/access. Anything other than an
  * explicit EDIT grant — including a failed lookup — defaults to READ, which is
- * fully read-only (same surface as an invoiced quotation).
+ * fully read-only (same surface as an invoiced quotation). At DELIVERY_SHADE
+ * the grant is not enough on its own: only a DELIVERY_MANAGER or an ADMIN can
+ * edit there, everyone else is read-only.
  *
  * Level drives the editable surface. In Draft the grid is fully editable and
  * nothing is audited. Once the quotation leaves Draft every change is history:
@@ -1258,7 +1598,20 @@ function CloseConfirmModal({ styles, busy, error, onSave, onDiscard, onCancel })
  * at save. Deletes past Draft are gated by their own reason modal. Once
  * invoiced — or when access is READ — the screen is read-only.
  *
- * `selectedByCustomer` is a Yes / No dropdown. New rows default to No.
+ * `selectedByCustomer` is a Yes / No dropdown. New rows default to Yes.
+ *
+ * Loading shade ticks: in DELIVERY_SHADE every saved row — special plants
+ * included — carries a tick box, but only for the delivery team
+ * (DELIVERY_MANAGER / ADMIN); every other role sees the tick state read-only.
+ * A tick is ordinary unsaved state: pressing a box makes the screen dirty and
+ * enables SAVE CHANGES, and nothing reaches the server until that is pressed.
+ * The tick is then saved state (isPlantChecked), so a part-picked list comes
+ * back exactly as it was left, with the rows already ticked off moved to the
+ * bottom. Editing what a row *is* — quantity, unit, packing or customer
+ * choice — clears its tick, so a row that moved after being counted out has to
+ * be picked again. GENERATE INVOICE is shown to everyone who can work a shade
+ * quotation but only enables for the delivery team, once every row is ticked
+ * and nothing is unsaved.
  *
  * Saving is deliberately inert: SAVE CHANGES, MOVE TO LOADING SHADE and
  * GENERATE INVOICE all call `updateQuotationPlants` and stop. The modal never
@@ -1289,32 +1642,57 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   /* Access control. Starts READ so the screen is locked until the check
      resolves; only an explicit EDIT grant unlocks editing. `accessResolved`
-     avoids a flash of an editable grid before the answer lands. */
+     avoids a flash of an editable grid before the answer lands.
+
+     A SALES-role user gets EDIT on every quotation, not just their own — the
+     sales team works each other's quotations (add/remove plants, quantities,
+     move to shade, add their own advance payment). That does not extend to
+     someone else's already-collected advance row: that lock is keyed to the
+     collecting user's email, not the access level, so it holds regardless
+     of role. */
   const [access, setAccess] = useState("READ");
   const [accessResolved, setAccessResolved] = useState(false);
-  const canEdit = access === "EDIT";
+  const [role, setRole] = useState(null);
+
+  /* Which quotation levels this role may edit. Served by /quotation/editLevel
+     so the role→level matrix lives in one place on the backend; null until it
+     resolves, and it falls back to the app's own rule if the call fails. */
+  const [editLevels, setEditLevels] = useState(null);
 
   const isDraft = level === "DRAFT";
   const isDelivery = level === "DELIVERY_SHADE";
   const isInvoiced = level === "INVOICE_GENERATED";
 
+  /* The level gate. Whether this role can work a quotation at this level is
+     the backend's call — a level absent from the list is read-only for this
+     user, whatever the access grant says. INVOICE_GENERATED is never in the
+     list, so an invoiced quotation locks here too. */
+  const allowedEditLevels = editLevels ?? fallbackEditLevels(role);
+  const levelEditable = allowedEditLevels.includes(level);
+  /* Locked by level rather than by grant — worth its own message, and only
+     once the answer has actually landed. */
+  const lockedToLevel = accessResolved && !levelEditable && !isInvoiced;
+  const canEdit = (access === "EDIT" || role === "SALES") && levelEditable;
+
   /* Editing needs BOTH an EDIT grant and a non-invoiced level. READ collapses
      the whole screen to the same read-only surface as an invoice. */
   const canEditLines = canEdit && !isInvoiced; // quantities, units, packing, add/remove
   const canEditTotals = canEdit && !isInvoiced; // discount, transport, specials
-  const showChecks = canEdit && isDelivery; // tick boxes live in the action column
+
+  /* Ticking rows off is the delivery team's job, so the boxes belong to them
+     alone. ADMIN counts as delivery here for the same reason it does in
+     fallbackEditLevels — it is the app's super-user and is otherwise the one
+     role that could reach the loading shade with no way to invoice out of it.
+     Anyone else working a shade quotation (sales, chiefly) sees the rows and
+     the tick state, but read-only: no boxes to press. */
+  const isDeliveryTeam = role === "DELIVERY_MANAGER" || role === "ADMIN";
+  const showChecks = canEdit && isDelivery && isDeliveryTeam; // tick boxes live in the action column
+  /* The invoice button is rendered for everyone who can work a shade
+     quotation, so the flow reads the same for all of them — but only the
+     delivery team can ever press it. */
+  const showInvoiceAction = canEdit && isDelivery;
   /* Draft is not history. Nothing before this point is audited or reasoned. */
   const auditActive = !isDraft;
-
-  /* The advance is only editable in Draft, and even then only in two cases:
-     nothing has been collected yet (advancePayment == 0), or it was collected
-     today and is still same-day editable (advancePaymentDate is today). Once
-     the quotation leaves Draft, or an advance was taken on an earlier day, it
-     is locked. */
-  const advanceUnlocked =
-    toMoney(quotation?.advancePayment) === 0 ||
-    isToday(quotation?.advancePaymentDate);
-  const canEditAdvance = canEditTotals && isDraft && advanceUnlocked;
 
   const levelMeta = LEVEL_META[level] || {
     label: level || "—",
@@ -1353,13 +1731,24 @@ function EditInner({ quotation, onClose, onSaved }) {
     const value = toMoney(quotation?.transportationCost);
     return value > 0 ? String(value) : "";
   });
-  const [advance, setAdvance] = useState(() => {
-    const value = toMoney(quotation?.advancePayment);
-    return value > 0 ? String(value) : "";
-  });
+  /* The advance is a ledger, one row per collector (emailId, collectorName,
+     amount, collectionDate, transactionMode). `advance` / `advanceMode` hold
+     only the signed-in user's own draft row — which row that is depends on
+     `userId`, resolved asynchronously in the bootstrap effect below, so both
+     start empty and are hydrated (along with the baseline) once it resolves. */
+  const [advanceLedger, setAdvanceLedger] = useState(
+    () => quotation?.advancePaymentList || [],
+  );
+  const [advance, setAdvance] = useState("");
+  const [advanceMode, setAdvanceMode] = useState("CASH");
   const [transportOpen, setTransportOpen] = useState(false);
   const [discountOpen, setDiscountOpen] = useState(false);
   const [advanceOpen, setAdvanceOpen] = useState(false);
+
+  /* The totals (plant types / quantity / packing / grand total / …) can be
+     tucked away to save space; the action buttons stay put either way since
+     they're how the screen is actually operated. */
+  const [summaryOpen, setSummaryOpen] = useState(true);
 
   /* Audit history, refreshed from every save response. Kept in state because
      the save response still carries it, but it is not rendered on this screen. */
@@ -1367,31 +1756,97 @@ function EditInner({ quotation, onClose, onSaved }) {
     (quotation?.invoiceUpdateDetailList || []).map(auditFromRecord),
   );
 
+  /* Corrected once the signed-in user's own advance row is known — see the
+     bootstrap effect. Until then `advance`/`advanceMode` are still at their
+     empty defaults, so this matches and nothing reads as falsely dirty. */
   const baselineRef = useRef(
     stateSignatureOf(
       initialLines,
       quotation?.additionalDiscount,
       quotation?.additionalDiscountRemark,
       quotation?.transportationCost,
-      quotation?.advancePayment,
+      "",
+      "CASH",
       initialSpecials,
     ),
   );
 
   const [packings, setPackings] = useState([]);
+  /* Which units a row may sit on. On (AVAILABLE_UNIT) is the long-standing
+     flow: only the units that actually stock the plant. Off (ANY_UNIT) opens
+     the picker up to every unit in the company. The backend decides — the
+     default here holds if the config call fails. */
+  const [takePlantFromAvailableUnit, setTakePlantFromAvailableUnit] =
+    useState(true);
+  const [allUnits, setAllUnits] = useState(null);
   const [term, setTerm] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
+  /* Where the body zone starts inside the card. The search dropdown is parented
+     to the card, not to the body zone, so it needs that offset to sit right
+     under the toolbar — see the dropdown itself for why. */
+  const [bodyTop, setBodyTop] = useState(0);
   const [picker, setPicker] = useState(null);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(null); // "shade" | "invoice" | "pdf" | null
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [userId, setUserId] = useState(null);
+  const [userName, setUserName] = useState(null);
   const [pdf, setPdf] = useState(null);
+
+  /* My own row in the advance ledger, and what everyone else has collected.
+     A row is only editable by the collector it belongs to, and only while
+     it's still same-day editable — never collected yet, or collected earlier
+     today. A row collected on an earlier day is locked, mirroring the
+     backend's rule. */
+  const myAdvanceEntry = useMemo(
+    () =>
+      advanceLedger.find((row) => norm(row?.emailId) === norm(userId)) || null,
+    [advanceLedger, userId],
+  );
+  const otherAdvanceTotal = useMemo(
+    () =>
+      advanceLedger
+        .filter((row) => norm(row?.emailId) !== norm(userId))
+        .reduce((sum, row) => sum + toMoney(row?.amount), 0),
+    [advanceLedger, userId],
+  );
+  const advanceUnlocked =
+    !myAdvanceEntry || isSameDay(myAdvanceEntry.collectionDate, new Date());
+  const canEditAdvance = canEditTotals && isDraft && advanceUnlocked;
+
+  /* One line per collector, for "who collected what" display. */
+  const advanceBreakdown = useMemo(
+    () =>
+      advanceLedger
+        .filter((row) => toMoney(row?.amount) > 0)
+        .map((row, index) => {
+          const mine = norm(row?.emailId) === norm(userId);
+          return {
+            key: row?.emailId || `advance-row-${index}`,
+            mine,
+            name: mine
+              ? "You"
+              : row?.collectorName || row?.emailId || "Unknown",
+            amount: toMoney(row?.amount),
+            date: row?.collectionDate || null,
+            mode: transactionModeLabel(row?.transactionMode),
+          };
+        }),
+    [advanceLedger, userId],
+  );
 
   /* The delete reason modal is a gate in front of a pending delete. */
   const [pendingDelete, setPendingDelete] = useState(null);
+
+  /* Every removal of a row the server already knows about, banked until the
+     next successful save carries it away as plantRemovalDtoList. Dropping a
+     row out of `lines` / `specials` only tells the backend that it is gone —
+     the DTO is what carries *why*, which is why a Draft removal is recorded
+     here too even though it collects no reason. Rows added in this session
+     are never listed: the server never had them. */
+  const [removals, setRemovals] = useState([]);
 
   /* Gates the back / close buttons: shown instead of closing immediately
      whenever there are unsaved changes, so a save or a discard is explicit. */
@@ -1403,24 +1858,143 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const searchTimer = useRef(null);
   const searchRef = useRef(null);
+  const bodyScrollRef = useRef(null);
+  /* Live quantity inputs, keyed by line key, so a freshly added row can be
+     focused the moment it mounts — see `addPlant`. Entries are removed on
+     unmount, so a deleted line leaves nothing behind. */
+  const qtyInputRefs = useRef(new Map());
+
+  /* ── keeping one row in view ─────────────────────────────────────────
+     The body scroll has to be driven by hand in two places, and both are the
+     same move: pull a single row back into the visible part of the list.
+
+     · A plant that was just added is not necessarily at the bottom — rows
+       already ticked off on the server sink below it and the special plants
+       come after those — so "scroll to the end" lands past it.
+     · The row being typed into goes under the keyboard: the activity is
+       adjustResize, so the keyboard opening shrinks this scroll around
+       whatever was already on screen rather than moving it.
+
+     Rows register themselves here as they mount, and are measured against
+     `scrollContentRef` — the one wrapper holding everything the body
+     scrolls — so the offset that comes back is already in scroll
+     coordinates. */
+  const rowRefs = useRef(new Map());
+  const scrollContentRef = useRef(null);
+  const viewportRef = useRef(0);
+  const scrollYRef = useRef(0);
+  /* The row whose field currently holds the caret, so the keyboard opening
+     knows which one it has to keep clear of. */
+  const focusedRowKeyRef = useRef(null);
+
+  const registerRow = useCallback((key, node) => {
+    if (node) rowRefs.current.set(key, node);
+    else rowRefs.current.delete(key);
+  }, []);
+
+  const scrollRowIntoView = useCallback((key, { padding = 14 } = {}) => {
+    const row = key == null ? null : rowRefs.current.get(key);
+    const content = scrollContentRef.current;
+    const scroll = bodyScrollRef.current;
+    if (!row?.measureLayout || !content || !scroll) return;
+
+    row.measureLayout(
+      content,
+      (_x, y, _width, height) => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        const top = scrollYRef.current;
+        const bottom = top + viewport;
+
+        /* Below the fold: bring its bottom edge up. Above it: bring its top
+           edge down. Already fully on screen: leave the scroll alone. */
+        let next = null;
+        if (y + height + padding > bottom)
+          next = y + height + padding - viewport;
+        else if (y - padding < top) next = y - padding;
+        if (next == null) return;
+
+        scroll.scrollTo({ y: Math.max(0, next), animated: true });
+      },
+      () => {},
+    );
+  }, []);
+
+  /* Every editable field on a row reports its focus here, so the keyboard
+     handlers below know what to keep visible. */
+  const onRowFieldFocus = useCallback(
+    (key) => {
+      focusedRowKeyRef.current = key;
+      scrollRowIntoView(key);
+    },
+    [scrollRowIntoView],
+  );
+
+  const onRowFieldBlur = useCallback((key) => {
+    if (focusedRowKeyRef.current === key) focusedRowKeyRef.current = null;
+  }, []);
+
+  const onBodyScroll = useCallback((event) => {
+    scrollYRef.current = event.nativeEvent.contentOffset.y;
+  }, []);
+
+  /* The scroll shrinking is the keyboard arriving — the moment the row being
+     edited can end up underneath it. */
+  const onBodyLayout = useCallback(
+    (event) => {
+      const height = Math.round(event.nativeEvent.layout.height);
+      const previous = viewportRef.current;
+      viewportRef.current = height;
+      if (height < previous && focusedRowKeyRef.current != null) {
+        const key = focusedRowKeyRef.current;
+        requestAnimationFrame(() => scrollRowIntoView(key));
+      }
+    },
+    [scrollRowIntoView],
+  );
 
   /* ── access check ─────────────────────────────────────────────────
      Runs once on open. Any non-EDIT answer (including an error or a missing
-     payload) leaves access at READ, so the safe default is read-only. */
+     payload) leaves access at READ, so the safe default is read-only — the
+     SALES-role override in `canEdit` above still applies on top of this. */
   useEffect(() => {
     let alive = true;
     (async () => {
-      const id = quotation?.quotationId;
-      if (id == null) {
+      try {
+        const id = quotation?.quotationId;
+        /* The role is needed before the level list can be asked for, so it is
+           resolved first; the two server calls then run together. */
+        const currentRole = await getCurrentRole();
+        if (!alive) return;
+        setRole(currentRole || null);
+
+        const [response, levelResponse] = await Promise.all([
+          id == null ? Promise.resolve(null) : getQuotationAccess(id),
+          currentRole
+            ? getQuotationEditLevels(currentRole)
+            : Promise.resolve(null),
+        ]);
+        if (!alive) return;
+
+        const granted =
+          response?.status === "SUCCESS" ? response.payload?.accessLevel : null;
+        setAccess(granted === "EDIT" ? "EDIT" : "READ");
+
+        /* An empty list is a real answer — this role edits nothing — but a
+           failed call is not, and falls back to the app's own rule so a
+           backend outage doesn't lock the floor out of every quotation. */
+        const levels =
+          levelResponse?.status === "SUCCESS" &&
+          Array.isArray(levelResponse.payload)
+            ? levelResponse.payload.map((name) => String(name).toUpperCase())
+            : fallbackEditLevels(currentRole);
+        setEditLevels(levels);
+      } finally {
+        /* The screen is held on a spinner until this flips, so it has to flip
+           even when the lookup threw — a stored user that won't parse leaves
+           the operator on read-only, never on a spinner that never ends. */
         if (alive) setAccessResolved(true);
-        return;
       }
-      const response = await getQuotationAccess(id);
-      if (!alive) return;
-      const granted =
-        response?.status === "SUCCESS" ? response.payload?.accessLevel : null;
-      setAccess(granted === "EDIT" ? "EDIT" : "READ");
-      setAccessResolved(true);
     })();
     return () => {
       alive = false;
@@ -1436,14 +2010,38 @@ function EditInner({ quotation, onClose, onSaved }) {
         fetchPackingList(),
       ]);
       if (!alive) return;
-      setUserId(user?.emailId || null);
+      const email = user?.emailId || null;
+      setUserId(email);
+      setUserName(user?.name || null);
       if (packingResponse?.status === "SUCCESS") {
         setPackings(packingResponse.payload || []);
       }
+
+      /* Now that the signed-in user is known, pull their own row (if any)
+         out of the advance ledger and correct the baseline to match, so the
+         screen doesn't read as dirty before anything has actually changed. */
+      const mine = (quotation?.advancePaymentList || []).find(
+        (row) => norm(row?.emailId) === norm(email),
+      );
+      const mineAmount = toMoney(mine?.amount);
+      const mineText = mineAmount > 0 ? String(mineAmount) : "";
+      const mineMode = mine?.transactionMode || "CASH";
+      setAdvance(mineText);
+      setAdvanceMode(mineMode);
+      baselineRef.current = stateSignatureOf(
+        initialLines,
+        quotation?.additionalDiscount,
+        quotation?.additionalDiscountRemark,
+        quotation?.transportationCost,
+        mineText,
+        mineMode,
+        initialSpecials,
+      );
     })();
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* ── plant search ────────────────────────────────────────────────── */
@@ -1469,53 +2067,146 @@ function EditInner({ quotation, onClose, onSaved }) {
     };
   }, [term]);
 
-  /* ── offer lookup (display only) ─────────────────────────────────── */
+  /* ── offer lookup (display only) ─────────────────────────────────────
+     Offers are cut group-wise. Every line under the same parent group pools
+     its quantity into a single lookup — Rose Blue 10 + Rose White 30 asks for
+     "Rose" at 40 — and the one discount that comes back is then applied to
+     each of those lines individually. */
   const offerCache = useRef(new Map());
 
+  /* syncOffers reads the lines through a ref so it can stay a stable callback:
+     it is fired from the debounce below, from field blurs, from the keyboard
+     closing, and from the header refresh button. */
+  const linesRef = useRef(lines);
   useEffect(() => {
-    let alive = true;
-    const timer = setTimeout(async () => {
-      const pending = lines.filter(
-        (line) =>
-          line.plantId != null &&
-          toCount(line.quantity) > 0 &&
-          line.offerKey !== `${line.plantId}:${toCount(line.quantity)}`,
-      );
-      if (pending.length === 0) return;
+    linesRef.current = lines;
+  }, [lines]);
 
-      const resolved = await Promise.all(
-        pending.map(async (line) => {
-          const qty = toCount(line.quantity);
-          const key = `${line.plantId}:${qty}`;
+  const [offersBusy, setOffersBusy] = useState(false);
+  /* Blur, keyboard-dismiss and the debounce can all land within a few ms of
+     each other, so only the newest run is allowed to write its result back. */
+  const offerRunRef = useRef(0);
+  const offerAliveRef = useRef(true);
+  useEffect(
+    () => () => {
+      offerAliveRef.current = false;
+    },
+    [],
+  );
+
+  /* `force` is the header button: it drops the cache and re-asks for every
+     group, so a discount changed on the server since this screen opened is
+     picked up. Without it a group is only re-asked when its pooled total
+     moved. */
+  const syncOffers = useCallback(async ({ force = false } = {}) => {
+    const run = ++offerRunRef.current;
+    const current = linesRef.current;
+
+    /* Pool the quantities of every line sharing a parent group. `quantity` is
+       the right figure for both kinds of row, not derivedQuantity: a seedling
+       is always dealt in trays, so its offer brackets on the tray count and
+       must not be expanded to plants. */
+    const totals = new Map();
+    current.forEach((line) => {
+      const group = line.parentGroupName;
+      const qty = toCount(line.quantity);
+      if (!group || line.plantId == null || qty <= 0) return;
+      totals.set(group, (totals.get(group) ?? 0) + qty);
+    });
+
+    if (force) offerCache.current.clear();
+
+    /* Every group is revalidated on every pass, not just the ones whose own
+       pooled total moved. Filtering to moved groups looked like a saving but
+       dropped changes on the floor: a group whose quantities all fall to zero
+       leaves `totals` altogether, so it was never in the pending list and its
+       lines kept the discount they earned at the old quantity.
+
+       Re-asking for everything costs nothing when nothing moved — the cache
+       keys on group:total, so only a total this screen has not seen before
+       reaches the network. */
+    const wanted = [...totals];
+    const needsNetwork = wanted.some(
+      ([group, total]) =>
+        offerCache.current.get(`${group}:${total}`) === undefined,
+    );
+    if (needsNetwork) setOffersBusy(true);
+
+    const resolved = new Map(
+      await Promise.all(
+        wanted.map(async ([group, total]) => {
+          const key = `${group}:${total}`;
           let value = offerCache.current.get(key);
           if (value === undefined) {
-            const response = await getApplicableOffer(line.plantId, qty);
+            const response = await getApplicableOffer(group, total);
             value =
               response?.status === "SUCCESS"
                 ? toMoney(response.payload?.discount)
                 : 0;
             offerCache.current.set(key, value);
           }
-          return { key: line.key, offerKey: key, discount: value };
+          return [group, { offerKey: key, discount: value }];
         }),
-      );
+      ),
+    );
 
-      if (!alive) return;
-      setLines((prev) =>
-        prev.map((line) => {
-          const hit = resolved.find((r) => r.key === line.key);
-          return hit
-            ? { ...line, offerDiscount: hit.discount, offerKey: hit.offerKey }
-            : line;
-        }),
-      );
-    }, SEARCH_DEBOUNCE);
+    /* superseded by a newer run — that one owns the spinner and the write */
+    if (!offerAliveRef.current || run !== offerRunRef.current) return;
 
-    return () => {
-      alive = false;
-      clearTimeout(timer);
-    };
-  }, [lines]);
+    setOffersBusy(false);
+    setLines((prev) => {
+      let moved = false;
+      const next = prev.map((line) => {
+        const hit = resolved.get(line.parentGroupName);
+        /* No entry means the group earns nothing right now — either it pooled
+           to zero or it never qualified. Either way the line must be cleared,
+           not left alone. */
+        const discount = hit ? hit.discount : 0;
+        const offerKey = hit ? hit.offerKey : null;
+        if (
+          toMoney(line.offerDiscount) === toMoney(discount) &&
+          (line.offerKey ?? null) === offerKey
+        )
+          return line;
+        moved = true;
+        return { ...line, offerDiscount: discount, offerKey };
+      });
+      /* The same array back when nothing actually changed. The debounce below
+         watches `lines`, so handing it a fresh array every pass would have it
+         re-arm itself forever. */
+      return moved ? next : prev;
+    });
+  }, []);
+
+  /* Debounced catch-all so offers still settle while the user keeps typing. */
+  useEffect(() => {
+    const timer = setTimeout(() => syncOffers(), SEARCH_DEBOUNCE);
+    return () => clearTimeout(timer);
+  }, [lines, syncOffers]);
+
+  /* Tapping away from a field, or hitting Done, closes the keyboard — refresh
+     right then rather than making the user wait out the debounce. */
+  useEffect(() => {
+    const sub = Keyboard.addListener("keyboardDidHide", () => syncOffers());
+    return () => sub.remove();
+  }, [syncOffers]);
+
+  /* Belt and braces next to the body scroll's own onLayout: a keyboard that
+     reports itself without the scroll relaying out — a height change while it
+     is already up, chiefly — still has to leave the edited row on screen. */
+  useEffect(() => {
+    const sub = Keyboard.addListener("keyboardDidShow", () => {
+      if (focusedRowKeyRef.current != null)
+        scrollRowIntoView(focusedRowKeyRef.current);
+    });
+    return () => sub.remove();
+  }, [scrollRowIntoView]);
+
+  /** Header refresh: drop the keyboard, then re-ask for every group. */
+  const refreshCalculations = useCallback(() => {
+    Keyboard.dismiss();
+    syncOffers({ force: true });
+  }, [syncOffers]);
 
   /* A transient success banner clears itself. */
   useEffect(() => {
@@ -1524,9 +2215,18 @@ function EditInner({ quotation, onClose, onSaved }) {
     return () => clearTimeout(timer);
   }, [notice]);
 
+  /* Every user-driven line edit funnels through here, which is also where the
+     delivery tick is invalidated: change what the row is (quantity, unit,
+     packing, customer choice) and the tick comes off, so nothing that moved
+     after being counted out can slip into an invoice still ticked. */
   const updateLine = useCallback((key, patch) => {
     setLines((prev) =>
-      prev.map((line) => (line.key === key ? { ...line, ...patch } : line)),
+      prev.map((line) => {
+        if (line.key !== key) return line;
+        const next = { ...line, ...patch };
+        if (line.checked && patchTouchesPick(line, patch)) next.checked = false;
+        return next;
+      }),
     );
   }, []);
 
@@ -1534,23 +2234,23 @@ function EditInner({ quotation, onClose, onSaved }) {
     setLines((prev) => prev.filter((line) => line.key !== key));
   }, []);
 
-  const toggleCheck = useCallback((key) => {
-    setLines((prev) =>
-      prev.map((line) =>
-        line.key === key ? { ...line, checked: !line.checked } : line,
-      ),
-    );
+  /* Special plants carry their own tick (isPlantChecked on the reservation),
+     so the toggle dispatches on which list the row lives in. */
+  const toggleCheck = useCallback((row) => {
+    const flip = (item) =>
+      item.key === row.key ? { ...item, checked: !item.checked } : item;
+    if (row.isSpecial) setSpecials((prev) => prev.map(flip));
+    else setLines((prev) => prev.map(flip));
   }, []);
 
   const toggleCheckAll = useCallback(() => {
-    setLines((prev) => {
-      const checkable = prev.filter((line) => !line.isNew);
-      const next = !checkable.every((line) => line.checked);
-      return prev.map((line) =>
-        line.isNew ? line : { ...line, checked: next },
-      );
-    });
-  }, []);
+    const allOn = (rows) => rows.every((row) => row.isNew || row.checked);
+    const next = !(allOn(lines) && allOn(specials));
+    const set = (rows) =>
+      rows.map((row) => (row.isNew ? row : { ...row, checked: next }));
+    setLines(set);
+    setSpecials(set);
+  }, [lines, specials]);
 
   /* ── per-field reason handling ───────────────────────────────────────
      `commitFieldEdit` is called from a field's onBlur. Past Draft, if the
@@ -1647,6 +2347,15 @@ function EditInner({ quotation, onClose, onSaved }) {
               ...line,
               unitId: snap.unitId ?? null,
               unitName: snap.unitName ?? null,
+              /* If the choice only moved because this unit pick moved it, it
+                 rode in on the pick and goes back out with it — otherwise the
+                 row keeps a default belonging to a unit it is no longer on. */
+              ...(line.choiceFollowsUnit
+                ? {
+                    selectedByCustomer: !!snap.selectedByCustomer,
+                    choiceFollowsUnit: false,
+                  }
+                : null),
               fieldReasons: nextReasons,
             };
           case "packing":
@@ -1676,23 +2385,69 @@ function EditInner({ quotation, onClose, onSaved }) {
   const addPlant = useCallback(
     (plant) => {
       const inventory = plant.inventoryList || [];
+
+      /* The unit flagged isDefaultForPlantSelection is the company's standing
+         answer to which unit a plant comes from, so it is the first choice —
+         ahead of even the quotation's own unit. Preferred as its inventory row
+         when it holds the plant, so the new line still picks up traySize and
+         the available figure. In AVAILABLE_UNIT mode it counts only when it
+         does hold the plant: the picker lists nothing else there, so defaulting
+         to it otherwise would strand the row on a unit the operator cannot
+         see in the list. */
+      const flagged = (allUnits || []).find(isDefaultUnitForPlants);
+      const flaggedStock = flagged
+        ? inventory.find((row) => row.unitId === flagged.unitId)
+        : null;
+
       const preferred =
+        flaggedStock ||
+        (flagged && !takePlantFromAvailableUnit ? flagged : null) ||
         inventory.find((row) => row.unitId === quotation?.unitId) ||
+        /* ANY_UNIT: the quotation's own unit is still preferred even when it
+           holds none of this plant — falling through to whichever unit happens
+           to have stock would move the row somewhere unexpected. */
+        (takePlantFromAvailableUnit
+          ? null
+          : (allUnits || []).find(
+              (unit) => unit.unitId === quotation?.unitId,
+            )) ||
         inventory.find((row) => (row.quantity || 0) > 0) ||
-        inventory[0] ||
+        [...inventory].sort(bySequence)[0] ||
         null;
 
-      setLines((prev) => {
-        const existing = prev.find(
-          (line) =>
-            line.plantId === plant.plantId &&
-            line.unitId === (preferred?.unitId ?? null),
-        );
+      /* The unit decides the selected-by-customer starting point here for the
+         same reason it does in chooseUnit — a row should never open on a
+         default its unit disagrees with. `preferred` may be an inventory row,
+         which carries no default, so it is looked up by unitId. */
+      const preferredUnit = (allUnits || []).find(
+        (unit) => unit.unitId === preferred?.unitId,
+      );
 
+      /* Checked against the live `lines` state (not `prev` inside the updater
+         below) so the caller can know, synchronously, whether this tap grew
+         the list or just bumped an existing row's quantity — that's what
+         decides whether there's anything new at the bottom to scroll to. */
+      const existing = lines.find(
+        (line) =>
+          line.plantId === plant.plantId &&
+          line.unitId === (preferred?.unitId ?? null),
+      );
+
+      /* Minted out here rather than inside the updater so the row can be
+         addressed — focused — once it has mounted. */
+      const newKey = existing ? null : nextKey();
+
+      setLines((prev) => {
         if (existing) {
+          /* Bumping the quantity moves the row, so it loses its tick the same
+             way an edit through updateLine would. */
           return prev.map((line) =>
             line.key === existing.key
-              ? { ...line, quantity: String(toCount(line.quantity) + 1) }
+              ? {
+                  ...line,
+                  quantity: String(toCount(line.quantity) + 1),
+                  checked: false,
+                }
               : line,
           );
         }
@@ -1707,14 +2462,15 @@ function EditInner({ quotation, onClose, onSaved }) {
         return [
           ...prev,
           {
-            key: nextKey(),
+            key: newKey,
             plantId: plant.plantId,
             plantName: plant.plantName,
+            parentGroupName: plant.parentGroupName ?? null,
             plantSubtitle: subtitleOf(plant, seedling),
             size: plant.size,
             plantType: plant.plantType,
             seedling,
-            price: listPriceOf(plant),
+            price: priceOf(plant),
             listPrice: listPriceOf(plant),
             traySize: preferred?.traySize ?? null,
             unitId: preferred?.unitId ?? null,
@@ -1728,16 +2484,20 @@ function EditInner({ quotation, onClose, onSaved }) {
             packingCharge,
             packingManual: false,
             packingCustom: false,
-            /* new rows are the nursery's until told otherwise */
-            selectedByCustomer: false,
+            /* the unit's default, or the customer's pick when no unit
+               record says otherwise */
+            selectedByCustomer: preferredUnit
+              ? chosenByCustomer(preferredUnit)
+              : true,
             baseQuantity: "0",
             basePackingName: packingName,
             basePackingCharge: packingCharge,
-            baseSelectedByCustomer: false,
+            baseSelectedByCustomer: true,
             baseUnitId: preferred?.unitId ?? null,
             baseUnitName: preferred?.unitName ?? null,
             fieldReasons: {},
             checked: false,
+            baseChecked: false,
             isNew: true,
           },
         ];
@@ -1745,8 +2505,33 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       setTerm("");
       setResults([]);
+
+      /* A brand-new row lands at the end of the lines — which is *not* the
+         end of the list: the rows already ticked off on the server sink
+         below it and the special plants come after those, so scrolling to
+         the bottom used to land past the new row and leave the operator
+         hunting for it. Scroll to the row itself instead, then put the caret
+         straight into its quantity box: adding a plant is always followed by
+         typing how many, so there is no reason to make the operator tap for
+         it. The delay gives the new row a chance to lay out and register
+         both its refs first. */
+      setTimeout(() => {
+        /* A tap that only bumped an existing row is scrolled to as well —
+           otherwise nothing visibly happens — but its box is left alone:
+           the quantity was just incremented, and focusing selects the lot
+           ready to be typed over. */
+        const key = existing ? existing.key : newKey;
+        scrollRowIntoView(key, { padding: 16 });
+        if (!existing) qtyInputRefs.current.get(newKey)?.focus();
+      }, 60);
     },
-    [quotation?.unitId],
+    [
+      quotation?.unitId,
+      lines,
+      takePlantFromAvailableUnit,
+      allUnits,
+      scrollRowIntoView,
+    ],
   );
 
   /* ── special plants (barcode) ────────────────────────────────────── */
@@ -1771,41 +2556,87 @@ function EditInner({ quotation, onClose, onSaved }) {
         };
       }
 
-      setSpecials((prev) => [...prev, specialFromRecord(response.payload)]);
+      setSpecials((prev) => [
+        ...prev,
+        { ...specialFromRecord(response.payload), isNew: true },
+      ]);
       return { ok: true, plant: response.payload };
     },
     [specials],
   );
 
-  const removeSpecial = useCallback((key) => {
-    setSpecials((prev) => prev.filter((special) => special.key !== key));
+  /* ── unit source ─────────────────────────────────────────────────────
+     The full unit list is fetched once per screen and shared by every row's
+     picker; the ref holds the in-flight promise so two rows opening at the
+     same time still make one call. */
+  const unitsRequest = useRef(null);
+
+  const loadAllUnits = useCallback(() => {
+    if (!unitsRequest.current) {
+      unitsRequest.current = fetchAllUnits().then((response) => {
+        const list =
+          response?.status === "SUCCESS" ? response.payload || [] : [];
+        setAllUnits(list);
+        return list;
+      });
+    }
+    return unitsRequest.current;
   }, []);
 
-  const focusSearch = useCallback(() => {
-    searchRef.current?.focus?.();
-  }, []);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const mode = await fetchPlantInventoryConfig();
+      /* An unreadable config leaves the stricter default in place. */
+      if (!alive || !mode) return;
+      const available = mode === INVENTORY_MODES.AVAILABLE_UNIT;
+      setTakePlantFromAvailableUnit(available);
+      /* Warm the cache now, in either mode. ANY_UNIT needs the list to default
+         a newly added plant to the quotation's own unit, and both modes need
+         it for the display sequence and the selected-by-customer default — a
+         plant's inventoryList carries neither. */
+      loadAllUnits();
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [loadAllUnits]);
 
   /* ── pickers ─────────────────────────────────────────────────────── */
   const openUnitPicker = useCallback(
     async (line) => {
-      setPicker({ type: "unit", key: line.key, loading: !line.inventoryList });
-      if (line.inventoryList) return;
-
-      const response = await searchPlants(line.plantName, 20);
-      const match =
-        response?.status === "SUCCESS"
-          ? (response.payload || []).find((p) => p.plantId === line.plantId)
-          : null;
-
-      updateLine(line.key, {
-        inventoryList: match?.inventoryList || [],
-        ...(match && !line.price ? { price: listPriceOf(match) } : null),
+      const needsUnits = !takePlantFromAvailableUnit && allUnits === null;
+      setPicker({
+        type: "unit",
+        key: line.key,
+        loading: !line.inventoryList || needsUnits,
       });
+      if (line.inventoryList && !needsUnits) return;
+
+      /* Both modes want the plant's inventory: ANY_UNIT lists every unit but
+         still shows the stock figures against the ones that carry it. */
+      const unitsTask = needsUnits ? loadAllUnits() : null;
+
+      if (!line.inventoryList) {
+        const response = await searchPlants(line.plantName, 20);
+        const match =
+          response?.status === "SUCCESS"
+            ? (response.payload || []).find((p) => p.plantId === line.plantId)
+            : null;
+
+        updateLine(line.key, {
+          inventoryList: match?.inventoryList || [],
+          ...(match && !line.price ? { price: priceOf(match) } : null),
+        });
+      }
+
+      await unitsTask;
       setPicker((prev) =>
         prev && prev.key === line.key ? { ...prev, loading: false } : prev,
       );
     },
-    [updateLine],
+    [updateLine, takePlantFromAvailableUnit, allUnits, loadAllUnits],
   );
 
   const openPackingPicker = useCallback((key) => {
@@ -1814,11 +2645,28 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const chooseUnit = useCallback(
     (line, inventory) => {
+      /* Each unit carries its own selected-by-customer default, and every unit
+         change re-applies it — including a change back to a unit the row was
+         on earlier. An operator who wants something else sets it on the choice
+         field afterwards; the unit only ever decides the starting point.
+         `choiceFollowsUnit` marks that the flip came from here rather than
+         from the operator, so it is reasoned under the unit rather than
+         demanding a second reason nothing prompts for. */
+      const fallsOut =
+        inventory.defaultSelectedByCustomer != null &&
+        !!inventory.defaultSelectedByCustomer !== !!line.selectedByCustomer;
+
       updateLine(line.key, {
         unitId: inventory.unitId,
         unitName: inventory.unitName,
         traySize: inventory.traySize ?? line.traySize,
         available: inventory.quantity ?? null,
+        ...(fallsOut
+          ? {
+              selectedByCustomer: !!inventory.defaultSelectedByCustomer,
+              choiceFollowsUnit: true,
+            }
+          : null),
       });
       setPicker(null);
       /* A picker selection is an immediate, discrete edit — reason it now. */
@@ -1859,7 +2707,12 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const chooseChoice = useCallback(
     (line, option) => {
-      updateLine(line.key, { selectedByCustomer: option.value });
+      /* The operator has taken the choice over from the unit default, so it
+         is their edit now and carries its own reason. */
+      updateLine(line.key, {
+        selectedByCustomer: option.value,
+        choiceFollowsUnit: false,
+      });
       setPicker(null);
       setTimeout(() => commitFieldEdit(line.key, "choice"), 0);
     },
@@ -1870,6 +2723,53 @@ function EditInner({ quotation, onClose, onSaved }) {
     () => lines.find((line) => line.key === picker?.key) || null,
     [lines, picker],
   );
+
+  /* What the unit picker offers for the row it is open on. AVAILABLE_UNIT
+     draws from the plant's inventory; ANY_UNIT lists every unit with the
+     inventory merged in, so a unit that doesn't carry the plant is still
+     selectable and simply reads as having none.
+
+     Either way the options are ordered by the unit's own sequence and carry
+     its selected-by-customer default, both of which live only on the unit
+     record — the plant's inventoryList has neither, so it is matched up by
+     unitId. */
+  const unitOptions = useMemo(() => {
+    const inventory = activeLine?.inventoryList || [];
+    const unitById = new Map(
+      (allUnits || []).map((unit) => [unit.unitId, unit]),
+    );
+
+    if (takePlantFromAvailableUnit) {
+      return inventory
+        .map((row) => {
+          const unit = unitById.get(row.unitId);
+          return {
+            ...row,
+            sequence: unit?.sequence ?? null,
+            /* null, not a guess, when the unit list hasn't landed: choosing
+               this option then leaves the row's own choice alone. */
+            defaultSelectedByCustomer: unit ? chosenByCustomer(unit) : null,
+          };
+        })
+        .sort(bySequence);
+    }
+
+    const stockByUnit = new Map(inventory.map((row) => [row.unitId, row]));
+    return (allUnits || [])
+      .map((unit) => {
+        const stock = stockByUnit.get(unit.unitId);
+        return {
+          unitId: unit.unitId,
+          unitName: unit.unitName,
+          quantity: stock?.quantity ?? 0,
+          traySize: stock?.traySize ?? null,
+          stocked: !!stock,
+          sequence: unit.sequence ?? null,
+          defaultSelectedByCustomer: chosenByCustomer(unit),
+        };
+      })
+      .sort(bySequence);
+  }, [activeLine, takePlantFromAvailableUnit, allUnits]);
 
   /* ── totals ──────────────────────────────────────────────────────── */
   const totals = useMemo(() => {
@@ -1883,14 +2783,14 @@ function EditInner({ quotation, onClose, onSaved }) {
       packing += linePacking(line);
     });
 
-    const special = specials.reduce((sum, sp) => sum + toMoney(sp.price), 0);
+    const special = specials.reduce((sum, sp) => sum + specialPriceOf(sp), 0);
 
     const subtotal = plantAmount + packing + special;
     const transportValue = toMoney(transport);
     const beforeDiscount = subtotal + transportValue;
     const discountValue = Math.min(toMoney(discount), beforeDiscount);
     const grand = beforeDiscount - discountValue;
-    const advanceValue = Math.min(toMoney(advance), grand);
+    const advanceValue = Math.min(otherAdvanceTotal + toMoney(advance), grand);
 
     return {
       rows: lines.length,
@@ -1907,7 +2807,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       advance: advanceValue,
       remaining: Math.max(0, grand - advanceValue),
     };
-  }, [lines, specials, discount, transport, advance]);
+  }, [lines, specials, discount, transport, advance, otherAdvanceTotal]);
 
   /* ── change tracking ─────────────────────────────────────────────── */
   const dirty = useMemo(
@@ -1918,9 +2818,18 @@ function EditInner({ quotation, onClose, onSaved }) {
         discountRemark,
         transport,
         advance,
+        advanceMode,
         specials,
       ) !== baselineRef.current,
-    [lines, discount, discountRemark, transport, advance, specials],
+    [
+      lines,
+      discount,
+      discountRemark,
+      transport,
+      advance,
+      advanceMode,
+      specials,
+    ],
   );
 
   const changedLines = useMemo(() => lines.filter(lineChanged), [lines]);
@@ -1930,7 +2839,11 @@ function EditInner({ quotation, onClose, onSaved }) {
   );
 
   /* Past Draft, every changed field must carry a reason before saving. New
-     rows are exempt (they need no per-field reason). */
+     rows are exempt (they need no per-field reason), and so is a choice that
+     only moved because the unit under it moved — the operator never edited
+     it, nothing prompts for it, and the unit's own reason already covers it.
+     Without this exemption a unit change whose default differs would lock the
+     Save button with no way to clear it. */
   const missingFieldReason = useMemo(() => {
     if (!auditActive) return false;
     return lines.some((line) => {
@@ -1938,6 +2851,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       return ["quantity", "unit", "packing", "choice"].some(
         (field) =>
           fieldChanged(line, field) &&
+          !(field === "choice" && line.choiceFollowsUnit) &&
           !String(line.fieldReasons?.[field] || "").trim(),
       );
     });
@@ -1945,30 +2859,51 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const discountEntered = toMoney(discount);
   const transportEntered = toMoney(transport);
-  const advanceEntered = toMoney(advance);
+  /* The combined advance across every collector, capped at the grand total —
+     what the operator actually sees as "advance received". */
+  const advanceEntered = totals.advance;
   const discountRemarkMissing = discountEntered > 0 && !discountRemark.trim();
   const discountOverTotal = discountEntered > totals.beforeDiscount;
 
-  const checkableLines = lines.filter((line) => !line.isNew);
-  const checkedCount = checkableLines.filter((line) => line.checked).length;
+  /* Every row the delivery manager has to account for — special plants carry
+     their own tick too, so a quotation made only of barcoded plants can still
+     reach "everything checked". Rows added in this session are excluded: they
+     are not on the server yet, so there is nothing to tick off against. */
+  const checkableRows = useMemo(
+    () => [
+      ...lines.filter((line) => !line.isNew),
+      ...specials
+        .filter((special) => !special.isNew)
+        .map((special) => ({ ...special, isSpecial: true })),
+    ],
+    [lines, specials],
+  );
+  const checkedCount = checkableRows.filter((row) => row.checked).length;
   const allChecked =
-    checkableLines.length > 0 && checkedCount === checkableLines.length;
+    checkableRows.length > 0 && checkedCount === checkableRows.length;
+
+  /* The invoice needs a delivery-side user, every row ticked, and nothing left
+     unsaved. `showChecks` already carries the role gate — whoever owns the
+     boxes is whoever can invoice. */
+  const canInvoice = showChecks;
 
   const working = saving || busy !== null;
 
-  const blockingReason = !canEdit
-    ? "You have read-only access to this quotation."
-    : !userId
-      ? "Signed-in user not found. Sign in again to save."
-      : incomplete
-        ? "Every row needs a unit and a quantity above zero."
-        : missingFieldReason
-          ? "Add a reason for every changed field before saving."
-          : discountRemarkMissing
-            ? "Add a remark for the additional discount."
-            : discountOverTotal
-              ? "The discount is more than the order total."
-              : null;
+  const blockingReason = lockedToLevel
+    ? `Your role cannot edit a quotation at ${levelMeta.label.toLowerCase()}.`
+    : !canEdit
+      ? "You have read-only access to this quotation."
+      : !userId
+        ? "Signed-in user not found. Sign in again to save."
+        : incomplete
+          ? "Every row needs a unit and a quantity above zero."
+          : missingFieldReason
+            ? "Add a reason for every changed field before saving."
+            : discountRemarkMissing
+              ? "Add a remark for the additional discount."
+              : discountOverTotal
+                ? "The discount is more than the order total."
+                : null;
 
   const canSave = dirty && !working && !blockingReason;
 
@@ -1983,8 +2918,9 @@ function EditInner({ quotation, onClose, onSaved }) {
     setDiscountOpen(false);
   }, []);
 
-  const applyAdvance = useCallback((value) => {
+  const applyAdvance = useCallback((value, mode) => {
     setAdvance(value);
+    setAdvanceMode(mode);
     setAdvanceOpen(false);
   }, []);
 
@@ -1998,36 +2934,45 @@ function EditInner({ quotation, onClose, onSaved }) {
 
       setLevel(nextLevel);
 
-      setLines((prev) => {
-        const checkedMap = new Map(
-          prev.map((line) => [
-            `${line.plantId}:${line.unitId ?? 0}`,
-            line.checked,
-          ]),
-        );
-        const offerMap = new Map(
-          prev.map((line) => [
-            `${line.plantId}:${line.unitId ?? 0}`,
-            { offerDiscount: line.offerDiscount, offerKey: line.offerKey },
-          ]),
-        );
-
-        return (payload.plantList || []).map((row) => {
-          const rebuilt = lineFromReservation(row, nextIsDraft);
-          const id = `${rebuilt.plantId}:${rebuilt.unitId ?? 0}`;
-          const offer = offerMap.get(id);
-          return {
-            ...rebuilt,
-            checked: checkedMap.get(id) ?? false,
-            offerDiscount: offer?.offerDiscount,
-            offerKey: offer?.offerKey,
-          };
-        });
-      });
-
-      const nextSpecials = (payload.specialPlantList || []).map(
-        specialFromRecord,
+      /* Rows are rebuilt from the echo, but two things only this screen knows
+         are carried across: the offer figures (display-only, never saved) and
+         the delivery tick *when the server did not echo one back*. Without
+         that fallback a backend that ignores isPlantChecked would wipe the
+         operator's ticks on every save. */
+      const carried = new Map(
+        lines.map((line) => [`${line.plantId}:${line.unitId ?? 0}`, line]),
       );
+
+      const nextLines = (payload.plantList || []).map((row) => {
+        const rebuilt = lineFromReservation(row, nextIsDraft);
+        const id = `${rebuilt.plantId}:${rebuilt.unitId ?? 0}`;
+        const previous = carried.get(id);
+        const echoed = row?.plantChecked ?? row?.isPlantChecked;
+        const checked = echoed == null ? !!previous?.checked : !!echoed;
+        return {
+          ...rebuilt,
+          checked,
+          /* Just saved, so this tick is the row's new resting state — and
+             what the row is ordered by from here on. */
+          baseChecked: checked,
+          offerDiscount: previous?.offerDiscount,
+          offerKey: previous?.offerKey,
+        };
+      });
+      setLines(nextLines);
+
+      const carriedSpecials = new Map(
+        specials.map((special) => [special.barcodeId, special]),
+      );
+      const nextSpecials = (payload.specialPlantList || []).map((row) => {
+        const rebuilt = specialFromRecord(row);
+        const echoed = row?.plantChecked ?? row?.isPlantChecked;
+        const checked =
+          echoed == null
+            ? !!carriedSpecials.get(rebuilt.barcodeId)?.checked
+            : !!echoed;
+        return { ...rebuilt, checked, baseChecked: checked };
+      });
       setSpecials(nextSpecials);
 
       const nextDiscount = toMoney(payload.additionalDiscount);
@@ -2035,31 +2980,41 @@ function EditInner({ quotation, onClose, onSaved }) {
       const nextRemark = payload.additionalDiscountRemark || "";
       const nextTransport = toMoney(payload.transportationCost);
       const nextTransportText = nextTransport > 0 ? String(nextTransport) : "";
-      const nextAdvance = toMoney(payload.advancePayment);
+
+      const nextLedger = payload.advancePaymentList || [];
+      const mine = nextLedger.find(
+        (row) => norm(row?.emailId) === norm(userId),
+      );
+      const nextAdvance = toMoney(mine?.amount);
       const nextAdvanceText = nextAdvance > 0 ? String(nextAdvance) : "";
+      const nextAdvanceMode = mine?.transactionMode || "CASH";
 
       setDiscount(nextDiscountText);
       setDiscountRemark(nextRemark);
       setTransport(nextTransportText);
+      setAdvanceLedger(nextLedger);
       setAdvance(nextAdvanceText);
+      setAdvanceMode(nextAdvanceMode);
 
       setAuditTrail(
         (payload.invoiceUpdateDetailList || []).map(auditFromRecord),
       );
 
-      /* The saved document becomes the new baseline, so the screen is clean. */
+      /* The saved document becomes the new baseline, so the screen is clean.
+         It is built from the very arrays that went into state — rebuilding it
+         from the payload again would miss any tick carried over above and
+         leave the screen permanently dirty. */
       baselineRef.current = stateSignatureOf(
-        (payload.plantList || []).map((row) =>
-          lineFromReservation(row, nextIsDraft),
-        ),
+        nextLines,
         nextDiscountText,
         nextRemark,
         nextTransportText,
         nextAdvanceText,
+        nextAdvanceMode,
         nextSpecials,
       );
     },
-    [level],
+    [level, userId, lines, specials],
   );
 
   /* ── save ────────────────────────────────────────────────────────────
@@ -2068,108 +3023,205 @@ function EditInner({ quotation, onClose, onSaved }) {
      Per-field reasons now live on each line (line.fieldReasons). At save, each
      changed field's reason is joined into a single per-row reason string sent
      with that row. Draft is never audited, so no reasons are attached there. */
-  const persist = useCallback(
-    async ({ deleteReason } = {}) => {
-      if (blockingReason) {
-        setError(blockingReason);
-        return null;
-      }
-
-      setError(null);
-      setNotice(null);
-      setSaving(true);
-
-      const discountAmount = toMoney(discount);
-      const transportAmount = toMoney(transport);
-      const advanceAmount = toMoney(advance);
-
-      const reasonForLine = (line) => {
-        if (!auditActive || line.isNew) return null;
-        const parts = ["quantity", "unit", "packing", "choice"]
-          .filter((field) => fieldChanged(line, field))
-          .map((field) => {
-            const r = String(line.fieldReasons?.[field] || "").trim();
-            return r ? `${FIELD_META[field].label}: ${r}` : null;
-          })
-          .filter(Boolean);
-        return parts.length > 0 ? parts.join(" · ") : null;
-      };
-
-      const body = {
-        plantList: lines.map((line) => ({
-          plantId: line.plantId,
-          // Unchanged contract: seedlings still send the tray count.
-          quantityReserved: toCount(line.quantity),
-          unitId: line.unitId,
-          unitName: line.unitName,
-          packingId: line.packingId ?? null,
-          packingName: line.packingName,
-          packingCharge: toMoney(line.packingCharge),
-          selectedByCustomer: line.selectedByCustomer,
-          reason: lineChanged(line) ? reasonForLine(line) : null,
-        })),
-        specialPlantList: specials.map((special) => ({
-          barcodeId: special.barcodeId,
-        })),
-        additionalDiscount: discountAmount,
-        additionalDiscountRemark:
-          discountAmount > 0 ? discountRemark.trim() : null,
-        transportationCost: transportAmount,
-        advanceAmount,
-        /* Delete reasons aren't tied to a surviving row, so they ride along at
-           the document level when a removal triggered this save. */
-        deleteReason: deleteReason || null,
-      };
-
-      const response = await updateQuotationPlants(
-        quotation.quotationId,
-        userId,
-        body,
-      );
-
-      setSaving(false);
-
-      if (response?.status === "SUCCESS") {
-        const payload = response.payload;
-
-        if (payload) {
-          rehydrate(payload);
-        } else {
-          // No echo from the server: settle locally so the screen goes clean.
-          setLines((prev) => prev.map(settleLine));
-          baselineRef.current = stateSignatureOf(
-            lines.map(settleLine),
-            discount,
-            discountRemark,
-            transport,
-            advance,
-            specials,
-          );
-        }
-
-        setNotice(response.message || "Quotation saved.");
-        onSaved?.(payload ?? true, { source: "save", keepOpen: true });
-        return payload ?? true;
-      }
-
-      setError(response?.message || "Could not save the quotation.");
+  const persist = useCallback(async () => {
+    if (blockingReason) {
+      setError(blockingReason);
       return null;
-    },
-    [
-      blockingReason,
-      lines,
-      specials,
-      quotation,
+    }
+
+    setError(null);
+    setNotice(null);
+    setSaving(true);
+
+    const discountAmount = toMoney(discount);
+    const transportAmount = toMoney(transport);
+    const advanceAmount = toMoney(advance);
+
+    const reasonForLine = (line) => {
+      if (!auditActive || line.isNew) return null;
+      const parts = ["quantity", "unit", "packing", "choice"]
+        .filter((field) => fieldChanged(line, field))
+        .map((field) => {
+          const r = String(line.fieldReasons?.[field] || "").trim();
+          if (r) return `${FIELD_META[field].label}: ${r}`;
+          /* Unreasoned because the operator never touched it — say so
+               rather than letting the flip go into the audit unexplained. */
+          if (field === "choice" && line.choiceFollowsUnit)
+            return `${FIELD_META.choice.label}: default for ${
+              line.unitName || "the selected unit"
+            }`;
+          return null;
+        })
+        .filter(Boolean);
+      return parts.length > 0 ? parts.join(" · ") : null;
+    };
+
+    const body = {
+      plantList: lines.map((line) => ({
+        plantId: line.plantId,
+        // Unchanged contract: seedlings still send the tray count.
+        quantityReserved: toCount(line.quantity),
+        unitId: line.unitId,
+        unitName: line.unitName,
+        packingId: line.packingId ?? null,
+        packingName: line.packingName,
+        packingCharge: toMoney(line.packingCharge),
+        selectedByCustomer: line.selectedByCustomer,
+        /* The delivery tick. Both spellings go out for the same reason
+             `specialPlant`/`isSpecialPlant` do below: which one Jackson binds
+             depends on the ObjectMapper's handling of Lombok's
+             isPlantChecked(). Drop whichever one the backend does not read. */
+        plantChecked: !!line.checked,
+        isPlantChecked: !!line.checked,
+        reason: lineChanged(line) ? reasonForLine(line) : null,
+      })),
+      specialPlantList: specials.map((special) => ({
+        barcodeId: special.barcodeId,
+        plantChecked: !!special.checked,
+        isPlantChecked: !!special.checked,
+      })),
+      /* The delivery tick of every surviving row in one flat list — regular
+         lines first, then specials — so the backend can settle the ticks in a
+         single pass without having to read them off two differently shaped
+         lists. Every row is listed on every save, ticked or not: an absent
+         entry means the row is gone, never that its tick was left alone.
+         Rows are identified the same way removals are (plantId for a regular
+         line, barcode for a special), and both Jackson spellings of each
+         boolean go out for the same reason they do everywhere else here. */
+      plantCheckedList: [
+        ...lines.map((line) => ({
+          plantId: line.plantId,
+          barcodeId: null,
+          specialPlant: false,
+          isSpecialPlant: false,
+          plantChecked: !!line.checked,
+          isPlantChecked: !!line.checked,
+        })),
+        ...specials.map((special) => ({
+          plantId: null,
+          barcodeId: special.barcodeId ?? null,
+          specialPlant: true,
+          isSpecialPlant: true,
+          plantChecked: !!special.checked,
+          isPlantChecked: !!special.checked,
+        })),
+      ],
+      additionalDiscount: discountAmount,
+      additionalDiscountRemark:
+        discountAmount > 0 ? discountRemark.trim() : null,
+      transportationCost: transportAmount,
+      /* The flat advanceAmount field is gone — the backend only reads the
+           ledger now. Only the signed-in user's own row is ever sent, so a
+           save can never touch a colleague's collected advance; resending an
+           unchanged amount is a no-op on the server. */
+      advanceTransactionList: userId
+        ? [
+            {
+              emailId: userId,
+              collectorName: userName || userId,
+              amount: advanceAmount,
+              transactionMode: advanceMode,
+            },
+          ]
+        : [],
+      /* Every row that left the quotation since the last save, each with the
+           reason it left. This replaces the old document-level deleteReason,
+           which could only ever describe one removal and lost the reason
+           entirely once a second row went in the same save.
+
+           `specialPlant` is the name Jackson derives from Lombok's
+           isSpecialPlant()/setSpecialPlant() pair on a primitive boolean;
+           `isSpecialPlant` is sent alongside it because this codebase has
+           already been bitten by that mapping going both ways depending on
+           the ObjectMapper config (see chosenByCustomer). Drop whichever one
+           the backend does not read. */
+      plantRemovalDtoList: removals.map((removal) => ({
+        plantId: removal.plantId,
+        barcodeId: removal.barcodeId,
+        specialPlant: removal.isSpecialPlant,
+        isSpecialPlant: removal.isSpecialPlant,
+        reason: removal.reason,
+      })),
+    };
+
+    const response = await updateQuotationPlants(
+      quotation.quotationId,
       userId,
-      onSaved,
-      discount,
-      discountRemark,
-      transport,
-      advance,
-      auditActive,
-      rehydrate,
-    ],
-  );
+      body,
+    );
+
+    setSaving(false);
+
+    if (response?.status === "SUCCESS") {
+      const payload = response.payload;
+
+      /* Accounted for on the server now — banking them again on the next
+           save would re-report removals the quotation no longer has. */
+      setRemovals([]);
+
+      if (payload) {
+        rehydrate(payload);
+      } else {
+        // No echo from the server: settle locally so the screen goes clean.
+        setLines((prev) => prev.map(settleLine));
+        setSpecials((prev) =>
+          prev.map((special) => ({
+            ...special,
+            baseChecked: !!special.checked,
+            isNew: false,
+          })),
+        );
+        setAdvanceLedger((prev) => {
+          const others = prev.filter(
+            (row) => norm(row?.emailId) !== norm(userId),
+          );
+          if (advanceAmount <= 0) return others;
+          return [
+            ...others,
+            {
+              emailId: userId,
+              collectorName: userName || userId,
+              amount: advanceAmount,
+              collectionDate: new Date().toISOString(),
+              transactionMode: advanceMode,
+            },
+          ];
+        });
+        baselineRef.current = stateSignatureOf(
+          lines.map(settleLine),
+          discount,
+          discountRemark,
+          transport,
+          advance,
+          advanceMode,
+          specials,
+        );
+      }
+
+      setNotice(response.message || "Quotation saved.");
+      onSaved?.(payload ?? true, { source: "save", keepOpen: true });
+      return payload ?? true;
+    }
+
+    setError(response?.message || "Could not save the quotation.");
+    return null;
+  }, [
+    blockingReason,
+    lines,
+    specials,
+    removals,
+    quotation,
+    userId,
+    userName,
+    onSaved,
+    discount,
+    discountRemark,
+    transport,
+    advance,
+    advanceMode,
+    auditActive,
+    rehydrate,
+  ]);
 
   /* Save Changes. All per-field reasons are already gathered inline, so this
      just validates and writes — no summary modal in the way. */
@@ -2213,62 +3265,89 @@ function EditInner({ quotation, onClose, onSaved }) {
     }
   }, [persist, onClose]);
 
+  const bankRemoval = useCallback((row, reason) => {
+    /* Never saved, so there is nothing on the server to account for. */
+    if (row.isNew) return;
+    setRemovals((prev) => [
+      ...prev,
+      { ...removalIdOf(row), reason: reason || null },
+    ]);
+  }, []);
+
   /* Delete. Allowed in Draft and Delivery shade; past Draft it is reasoned via
-     the delete reason modal. */
+     the delete reason modal. Special plants go down the same path — the
+     removal DTO carries a reason for them too, so there is no case for
+     letting a barcode row leave the quotation unexplained. */
   const requestDelete = useCallback(
-    (line) => {
+    (row) => {
       if (working) return;
 
-      /* Draft, or a row added in this session (never saved): just drop it. */
-      if (!auditActive || line.isNew) {
-        dropLine(line.key);
+      /* Draft, or a row added in this session (never saved): just drop it.
+         The drop is still banked (unless it is brand new) so the backend is
+         told what left, even though Draft asks for no reason. */
+      if (!auditActive || row.isNew) {
+        bankRemoval(row, null);
+        if (row.isSpecial)
+          setSpecials((prev) => prev.filter((sp) => sp.key !== row.key));
+        else dropLine(row.key);
         return;
       }
 
       setPendingDelete({
-        lineKey: line.key,
+        rowKey: row.key,
+        isSpecial: !!row.isSpecial,
+        removal: removalIdOf(row),
         request: {
-          summary: `${line.plantName} will be removed from this quotation and the removal recorded.`,
-          title: line.plantName,
-          detail: `${formatNumber(toCount(line.quantity))} ${unitWord(
-            line,
-          )} · ${line.unitName || "no unit"} · ${formatAmount(
-            lineAmount(line),
-          )}`,
+          summary: `${row.plantName} will be removed from this quotation and the removal recorded.`,
+          title: row.plantName,
+          detail: row.isSpecial
+            ? `${row.barcodeId || "no barcode"} · ${
+                row.unitName || "no unit"
+              } · ${formatAmount(specialPriceOf(row))}`
+            : `${formatNumber(toCount(row.quantity))} ${unitWord(row)} · ${
+                row.unitName || "no unit"
+              } · ${formatAmount(lineAmount(row))}`,
         },
       });
     },
-    [working, auditActive, dropLine],
+    [working, auditActive, dropLine, bankRemoval],
   );
 
-  /* The delete reason modal hands its reason back here. The row is dropped, the
-     resulting document is saved, and the modal closes only if the save
-     succeeds. `pendingDeleteReason` stages the save so it runs against the new
-     line list once state has committed. */
-  const [pendingDeleteReason, setPendingDeleteReason] = useState(null);
+  /* The delete reason modal hands its reason back here. The row is dropped and
+     banked, the resulting document is saved, and the modal closes only if the
+     save succeeds. `pendingRemovalSave` stages the save so it runs against the
+     new row lists — and the new removal list — once state has committed. */
+  const [pendingRemovalSave, setPendingRemovalSave] = useState(null);
 
   const submitDelete = useCallback(
     (reason) => {
       const action = pendingDelete;
       if (!action) return;
-      setLines((prev) => prev.filter((line) => line.key !== action.lineKey));
+      if (action.isSpecial) {
+        setSpecials((prev) => prev.filter((sp) => sp.key !== action.rowKey));
+      } else {
+        setLines((prev) => prev.filter((line) => line.key !== action.rowKey));
+      }
+      setRemovals((prev) => [
+        ...prev,
+        { ...action.removal, reason: reason || null },
+      ]);
       setTimeout(() => {
-        setPendingDeleteReason({ reason });
+        setPendingRemovalSave({ at: Date.now() });
       }, 0);
     },
     [pendingDelete],
   );
 
   useEffect(() => {
-    if (!pendingDeleteReason) return;
-    const { reason } = pendingDeleteReason;
-    setPendingDeleteReason(null);
+    if (!pendingRemovalSave) return;
+    setPendingRemovalSave(null);
     (async () => {
-      const result = await persist({ deleteReason: reason });
+      const result = await persist();
       if (result) setPendingDelete(null);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingDeleteReason]);
+  }, [pendingRemovalSave]);
 
   /* ── paperwork ───────────────────────────────────────────────────── */
   const openPdf = useCallback(
@@ -2334,6 +3413,9 @@ function EditInner({ quotation, onClose, onSaved }) {
 
   const runInvoice = useCallback(async () => {
     if (working) return;
+    /* Belt and braces behind the disabled button — sales never invoices, and
+       an invoice is never generated over a part-picked order. */
+    if (!canInvoice || !allChecked) return;
 
     if (dirty) {
       handleSave();
@@ -2357,7 +3439,7 @@ function EditInner({ quotation, onClose, onSaved }) {
     setNotice("Invoice generated.");
     setPdf({ kind: "invoice", title: "Invoice", file: response.payload });
     setBusy(null);
-  }, [working, dirty, handleSave, quotation, onSaved]);
+  }, [working, canInvoice, allChecked, dirty, handleSave, quotation, onSaved]);
 
   const saveHint = blockingReason
     ? blockingReason
@@ -2365,9 +3447,11 @@ function EditInner({ quotation, onClose, onSaved }) {
       ? isDraft
         ? "Save your changes before moving this to the loading shade."
         : "Save your changes before generating the invoice."
-      : showChecks && !allChecked
-        ? `Tick every row to generate the invoice. ${checkedCount} of ${checkableLines.length} checked.`
-        : null;
+      : showInvoiceAction && !canInvoice
+        ? "Only the delivery team can tick rows off and generate the invoice."
+        : showChecks && !allChecked
+          ? `Tick every row to generate the invoice. ${checkedCount} of ${checkableRows.length} checked.`
+          : null;
 
   /* ── shared field renderers ──────────────────────────────────────── */
 
@@ -2406,7 +3490,12 @@ function EditInner({ quotation, onClose, onSaved }) {
       if (line.isSpecial) {
         return (
           <View style={styles.alignRight}>
-            <Text style={styles.priceText}>{formatAmount(line.price)}</Text>
+            <Text style={styles.priceText}>
+              {formatAmount(specialPriceOf(line))}
+            </Text>
+            {specialDiscounted(line) ? (
+              <Text style={styles.priceStrike}>{formatAmount(line.price)}</Text>
+            ) : null}
           </View>
         );
       }
@@ -2512,21 +3601,34 @@ function EditInner({ quotation, onClose, onSaved }) {
         <View style={styles.cellFill}>
           <View style={[styles.qtyBox, moved && styles.qtyBoxDirty]}>
             <TextInput
+              ref={(node) => {
+                if (node) qtyInputRefs.current.set(line.key, node);
+                else qtyInputRefs.current.delete(line.key);
+              }}
               style={styles.qtyInput}
               value={line.quantity}
               onChangeText={(value) =>
                 updateLine(line.key, { quantity: value.replace(/[^0-9]/g, "") })
               }
-              onBlur={() => commitFieldEdit(line.key, "quantity")}
+              onFocus={() => onRowFieldFocus(line.key)}
+              onBlur={() => {
+                onRowFieldBlur(line.key);
+                commitFieldEdit(line.key, "quantity");
+                syncOffers(); // quantity drives the offer — don't wait it out
+              }}
               keyboardType="number-pad"
               selectTextOnFocus
               placeholder="0"
               placeholderTextColor={C.FAINT}
             />
-            <Text style={styles.qtyUnit}>
-              {line.seedling ? "Trays" : "Plants"}
-            </Text>
           </View>
+
+          {/* Below the box, not inline beside the input — inline was wide
+             enough to spill past this column into the next field on narrow
+             cards. */}
+          <Text style={styles.qtyUnit} numberOfLines={1}>
+            {line.seedling ? "Trays" : "Plants"}
+          </Text>
 
           {derived}
 
@@ -2542,7 +3644,17 @@ function EditInner({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [styles, C, isDraft, lineEditable, updateLine, commitFieldEdit],
+    [
+      styles,
+      C,
+      isDraft,
+      lineEditable,
+      updateLine,
+      commitFieldEdit,
+      syncOffers,
+      onRowFieldFocus,
+      onRowFieldBlur,
+    ],
   );
 
   const packingField = useCallback(
@@ -2651,7 +3763,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                     packingCharge: value.replace(/[^0-9.]/g, ""),
                   })
                 }
-                onBlur={() => commitFieldEdit(line.key, "packing")}
+                onFocus={() => onRowFieldFocus(line.key)}
+                onBlur={() => {
+                  onRowFieldBlur(line.key);
+                  commitFieldEdit(line.key, "packing");
+                }}
                 keyboardType="decimal-pad"
                 selectTextOnFocus
                 placeholder="0"
@@ -2684,6 +3800,8 @@ function EditInner({ quotation, onClose, onSaved }) {
       updateLine,
       packings,
       commitFieldEdit,
+      onRowFieldFocus,
+      onRowFieldBlur,
     ],
   );
 
@@ -2770,8 +3888,7 @@ function EditInner({ quotation, onClose, onSaved }) {
   const actionField = useCallback(
     (line) => {
       if (line.isSpecial) {
-        if (!canEditTotals) return <Text style={styles.dashText}>—</Text>;
-        return (
+        const removeBtn = !canEditTotals ? null : (
           <Pressable
             style={({ hovered, pressed }) => [
               styles.deleteBtn,
@@ -2781,18 +3898,36 @@ function EditInner({ quotation, onClose, onSaved }) {
             hitSlop={6}
             accessibilityRole="button"
             accessibilityLabel={`Remove special plant ${line.barcodeId}`}
-            onPress={() => removeSpecial(line.key)}
+            onPress={() => requestDelete(line)}
           >
             <Ionicons name="trash-outline" size={16} color={C.RED} />
           </Pressable>
         );
+
+        /* A special plant is ticked off like any other row — it is a plant
+           that has to physically leave the shade. */
+        if (showChecks && !line.isNew) {
+          return (
+            <View style={styles.actionStack}>
+              {checkBox(
+                line.checked,
+                () => toggleCheck(line),
+                `Check ${line.plantName}`,
+              )}
+              {removeBtn}
+            </View>
+          );
+        }
+        return removeBtn ?? <Text style={styles.dashText}>—</Text>;
       }
-      if (showChecks) {
+      /* A row added in this session has nothing on the server to tick off
+         against, so it gets no box until it has been saved. */
+      if (showChecks && !line.isNew) {
         return (
           <View style={styles.actionStack}>
             {checkBox(
               line.checked,
-              () => toggleCheck(line.key),
+              () => toggleCheck(line),
               `Check ${line.plantName}`,
             )}
             {canEditLines ? deleteButton(line) : null}
@@ -2809,7 +3944,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       checkBox,
       toggleCheck,
       deleteButton,
-      removeSpecial,
+      requestDelete,
       styles,
       C,
     ],
@@ -2855,7 +3990,10 @@ function EditInner({ quotation, onClose, onSaved }) {
         align: "left",
         render: (line) => (
           <View style={styles.cellFill}>
-            <Text style={styles.plantName} numberOfLines={1}>
+            {/* Unclamped — the plant column is the flexible one and rows are
+                already variable height, so a long name wraps inside the
+                column rather than being cut off. */}
+            <Text style={styles.plantName}>
               {line.isSpecial ? line.plantName : plantTitleWithSize(line)}
             </Text>
             <Text style={styles.plantSub} numberOfLines={1}>
@@ -2873,7 +4011,8 @@ function EditInner({ quotation, onClose, onSaved }) {
               {!line.isSpecial && !showPrice ? (
                 <View style={styles.metaTag}>
                   <Text style={styles.metaTagText}>
-                    {formatAmount(effectivePriceOf(line))} / plant
+                    {formatAmount(effectivePriceOf(line))} /{" "}
+                    {priceUnitWord(line)}
                   </Text>
                 </View>
               ) : null}
@@ -2896,7 +4035,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       showPrice && {
         key: "price",
         label: "Price",
-        sublabel: "per plant",
+        sublabel: "per tray or plant",
         size: w.price,
         align: "right",
         render: (line) => priceBlock(line),
@@ -2978,7 +4117,9 @@ function EditInner({ quotation, onClose, onSaved }) {
         align: "right",
         render: (line) => (
           <Text style={styles.amountText} numberOfLines={1}>
-            {formatAmount(line.isSpecial ? line.price : lineAmount(line))}
+            {formatAmount(
+              line.isSpecial ? specialPriceOf(line) : lineAmount(line),
+            )}
           </Text>
         ),
       },
@@ -3023,13 +4164,17 @@ function EditInner({ quotation, onClose, onSaved }) {
         index={index}
         columns={columns}
         styles={styles}
+        registerRow={registerRow}
       />
     ),
-    [columns, styles],
+    [columns, styles, registerRow],
   );
 
   const tableRows = useMemo(
-    () => [...lines, ...specials.map((sp) => ({ ...sp, isSpecial: true }))],
+    () => [
+      ...sinkChecked(lines),
+      ...sinkChecked(specials).map((sp) => ({ ...sp, isSpecial: true })),
+    ],
     [lines, specials],
   );
 
@@ -3038,10 +4183,12 @@ function EditInner({ quotation, onClose, onSaved }) {
     (item, index) => (
       <View
         key={item.key}
+        ref={(node) => registerRow(item.key, node)}
+        collapsable={false}
         style={[
           styles.lineCard,
           item.isSpecial && styles.lineCardSpecial,
-          !item.isSpecial && item.checked && styles.lineCardChecked,
+          item.checked && styles.lineCardChecked,
           !item.isSpecial && lineChanged(item) && styles.lineCardDirty,
         ]}
       >
@@ -3063,10 +4210,7 @@ function EditInner({ quotation, onClose, onSaved }) {
             {/* Name, subtitle, price and any tag all flow in one row to keep
                each card compact — several cards should fit on one screen. */}
             <View style={styles.cardHeaderRow}>
-              <Text
-                style={[styles.plantName, styles.plantNameInline]}
-                numberOfLines={1}
-              >
+              <Text style={[styles.plantName, styles.plantNameInline]}>
                 {item.isSpecial ? item.plantName : plantTitleWithSize(item)}
               </Text>
               <Text style={styles.plantSubInline} numberOfLines={1}>
@@ -3083,9 +4227,17 @@ function EditInner({ quotation, onClose, onSaved }) {
               <View style={styles.metaTag}>
                 <Text style={styles.metaTagText}>
                   {formatAmount(
-                    item.isSpecial ? item.price : effectivePriceOf(item),
+                    item.isSpecial
+                      ? specialPriceOf(item)
+                      : effectivePriceOf(item),
                   )}{" "}
-                  / plant
+                  / {item.isSpecial ? "plant" : priceUnitWord(item)}
+                  {specialDiscounted(item) ? (
+                    <Text style={styles.metaTagStrike}>
+                      {"  "}
+                      {formatAmount(item.price)}
+                    </Text>
+                  ) : null}
                 </Text>
               </View>
               {!item.isSpecial && lineChanged(item) ? (
@@ -3103,7 +4255,9 @@ function EditInner({ quotation, onClose, onSaved }) {
               {/* Line total sits at the end of the header row, after every
                  tag, instead of its own footer band lower in the card. */}
               <Text style={styles.cardHeaderAmount} numberOfLines={1}>
-                {formatAmount(item.isSpecial ? item.price : lineAmount(item))}
+                {formatAmount(
+                  item.isSpecial ? specialPriceOf(item) : lineAmount(item),
+                )}
               </Text>
             </View>
           </View>
@@ -3155,6 +4309,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       packingField,
       choiceField,
       actionField,
+      registerRow,
     ],
   );
 
@@ -3171,7 +4326,7 @@ function EditInner({ quotation, onClose, onSaved }) {
     const packingMode = picker.type === "packing";
 
     const options = unitMode
-      ? activeLine.inventoryList || []
+      ? unitOptions
       : [
           NO_PACKING,
           ...packings,
@@ -3207,11 +4362,17 @@ function EditInner({ quotation, onClose, onSaved }) {
                 <Text style={styles.loadingText}>Checking stock…</Text>
               </View>
             ) : (
-              <ScrollView keyboardShouldPersistTaps="handled">
+              <ScrollView
+                style={styles.sheetScroll}
+                keyboardShouldPersistTaps="handled"
+                nestedScrollEnabled
+              >
                 {options.length === 0 ? (
                   <Text style={styles.resultEmpty}>
                     {unitMode
-                      ? "This plant is not stocked in any unit."
+                      ? takePlantFromAvailableUnit
+                        ? "This plant is not stocked in any unit."
+                        : "No units found."
                       : "No packing options yet."}
                   </Text>
                 ) : null}
@@ -3286,11 +4447,16 @@ function EditInner({ quotation, onClose, onSaved }) {
                           </Text>
                           <Text style={styles.optionMeta}>
                             {unitMode
-                              ? `${formatNumber(option.quantity ?? 0)} in stock${
-                                  option.traySize
-                                    ? ` · ${option.traySize} per tray`
-                                    : ""
-                                }`
+                              ? /* ANY_UNIT lists units that don't carry the
+                                   plant at all — say so rather than "0 in
+                                   stock", which reads like sold out. */
+                                option.stocked === false
+                                ? "Not stocked here"
+                                : `${formatNumber(option.quantity ?? 0)} in stock${
+                                    option.traySize
+                                      ? ` · ${option.traySize} per tray`
+                                      : ""
+                                  }`
                               : option.size
                                 ? `Fits ${option.size}`
                                 : "No charge"}
@@ -3332,6 +4498,87 @@ function EditInner({ quotation, onClose, onSaved }) {
     quotation?.customerName ? ` · ${quotation.customerName}` : ""
   }`;
 
+  /* The customer name is what an operator actually needs to spot at a
+     glance, so it leads as the header title; "QTN-8 · Edit quotation" moves
+     down to the subtitle instead of pushing the name out of view. */
+  const modeLabel = canEditLines ? "Edit quotation" : "Check quotation";
+  const headerTitle = quotation?.customerName || modeLabel;
+  const headerSubtitle = quotation?.customerName
+    ? `QTN-${quotation?.quotationId} · ${modeLabel}`
+    : `QTN-${quotation?.quotationId}`;
+
+  /* Both halves of the edit gate — the access grant and the levels this role
+     may edit at — come off the network, and until they land the screen cannot
+     know which surface it is. Rendering anyway meant opening on the read-only
+     one and then swapping the whole screen (search bar, dropdowns, delete
+     buttons, action row) under the operator a second later, so the body waits
+     for the answer instead. The header stays put so what is being opened, and
+     the way back out of it, are on screen the whole time. */
+  if (!accessResolved) {
+    return (
+      <View style={styles.screen}>
+        <View style={styles.card}>
+          <View style={styles.header}>
+            <View style={styles.headerTopRow}>
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.iconBtn,
+                  hovered && styles.iconBtnHover,
+                  pressed && styles.iconBtnPressed,
+                ]}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Go back"
+                onPress={onClose}
+              >
+                <Ionicons name="arrow-back" size={19} color={C.NAVY} />
+              </Pressable>
+
+              <Text style={styles.title}>
+                {quotation?.customerName || `QTN-${quotation?.quotationId}`}
+              </Text>
+            </View>
+
+            <View style={styles.headerMetaRow}>
+              <Text style={styles.subtitle} numberOfLines={1}>
+                {`QTN-${quotation?.quotationId}`}
+              </Text>
+
+              <View style={styles.headerMeta}>
+                <View
+                  style={[
+                    styles.levelPill,
+                    {
+                      backgroundColor: `${levelMeta.tint}14`,
+                      borderColor: `${levelMeta.tint}33`,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.levelDot,
+                      { backgroundColor: levelMeta.tint },
+                    ]}
+                  />
+                  <Text
+                    style={[styles.levelPillText, { color: levelMeta.tint }]}
+                  >
+                    {levelMeta.label}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.loadingBody}>
+            <ActivityIndicator size="large" color={C.NAVY} />
+            <Text style={styles.loadingText}>Opening quotation…</Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
   const tableHead = (
     <View style={styles.tableHead}>
       {columns.map((col) => (
@@ -3372,84 +4619,48 @@ function EditInner({ quotation, onClose, onSaved }) {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       <View style={styles.card}>
-        {/* ── header ── */}
+        {/* ── header ──
+           Two rows: the top row is just [back] [name] [doc] [close], so the
+           customer name gets almost the whole header width and is never
+           truncated. Everything else — QTN id, status pills, date — sits on
+           its own row underneath where it's free to wrap or ellipsize
+           without stealing space from the name. */}
         <View style={styles.header}>
-          <Pressable
-            style={({ hovered, pressed }) => [
-              styles.iconBtn,
-              hovered && styles.iconBtnHover,
-              pressed && styles.iconBtnPressed,
-            ]}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="Go back"
-            onPress={requestClose}
-          >
-            <Ionicons name="arrow-back" size={19} color={C.NAVY} />
-          </Pressable>
-
-          <View style={styles.headerTitles}>
-            <Text style={styles.title} numberOfLines={1}>
-              {canEditLines ? "Edit quotation" : "Check quotation"}
-            </Text>
-            <Text style={styles.subtitle} numberOfLines={1}>
-              {quotationLine}
-            </Text>
-          </View>
-
-          <View style={styles.headerMeta}>
-            {/* Read-only badge whenever access is not EDIT (and the check has
-                resolved), so the operator knows why the grid is locked. */}
-            {accessResolved && !canEdit ? (
-              <View
-                style={[
-                  styles.levelPill,
-                  {
-                    backgroundColor: "#94A3B814",
-                    borderColor: "#94A3B833",
-                  },
-                ]}
-              >
-                <Ionicons name="lock-closed" size={12} color="#64748B" />
-                <Text style={[styles.levelPillText, { color: "#64748B" }]}>
-                  READ ONLY
-                </Text>
-              </View>
-            ) : null}
-
-            {dirty ? (
-              <View style={styles.dirtyPill}>
-                <View style={styles.dirtyDot} />
-                <Text style={styles.dirtyText}>UNSAVED</Text>
-              </View>
-            ) : null}
-
-            <View
-              style={[
-                styles.levelPill,
-                {
-                  backgroundColor: `${levelMeta.tint}14`,
-                  borderColor: `${levelMeta.tint}33`,
-                },
+          <View style={styles.headerTopRow}>
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.iconBtn,
+                hovered && styles.iconBtnHover,
+                pressed && styles.iconBtnPressed,
               ]}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Go back"
+              onPress={requestClose}
             >
-              <View
-                style={[styles.levelDot, { backgroundColor: levelMeta.tint }]}
-              />
-              <Text style={[styles.levelPillText, { color: levelMeta.tint }]}>
-                {levelMeta.label}
-              </Text>
-            </View>
+              <Ionicons name="arrow-back" size={19} color={C.NAVY} />
+            </Pressable>
 
-            {large ? (
-              <>
-                <View style={styles.headerDivider} />
-                <View style={styles.dateWrap}>
-                  <Ionicons name="calendar-outline" size={16} color={C.NAVY} />
-                  <Text style={styles.dateText}>{quotationDate}</Text>
-                </View>
-              </>
-            ) : null}
+            <Text style={styles.title}>{headerTitle}</Text>
+
+            <Pressable
+              style={({ hovered, pressed }) => [
+                styles.iconBtn,
+                hovered && styles.iconBtnHover,
+                pressed && styles.iconBtnPressed,
+              ]}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Refresh offers and totals"
+              disabled={working || offersBusy}
+              onPress={refreshCalculations}
+            >
+              {offersBusy ? (
+                <ActivityIndicator color={C.NAVY} />
+              ) : (
+                <Ionicons name="refresh" size={19} color={C.NAVY} />
+              )}
+            </Pressable>
 
             <Pressable
               style={({ hovered, pressed }) => [
@@ -3473,20 +4684,72 @@ function EditInner({ quotation, onClose, onSaved }) {
                 />
               )}
             </Pressable>
+          </View>
 
-            <Pressable
-              style={({ hovered, pressed }) => [
-                styles.iconBtn,
-                hovered && styles.iconBtnHover,
-                pressed && styles.iconBtnPressed,
-              ]}
-              hitSlop={8}
-              accessibilityRole="button"
-              accessibilityLabel="Close"
-              onPress={requestClose}
-            >
-              <Ionicons name="close" size={19} color="#475569" />
-            </Pressable>
+          <View style={styles.headerMetaRow}>
+            <Text style={styles.subtitle} numberOfLines={1}>
+              {headerSubtitle}
+            </Text>
+
+            <View style={styles.headerMeta}>
+              {/* Read-only badge whenever access is not EDIT, so the operator
+                  knows why the grid is locked. Nothing reaches this render
+                  until the check has resolved — see the gate above. */}
+              {!canEdit ? (
+                <View
+                  style={[
+                    styles.levelPill,
+                    {
+                      backgroundColor: "#94A3B814",
+                      borderColor: "#94A3B833",
+                    },
+                  ]}
+                >
+                  <Ionicons name="lock-closed" size={12} color="#64748B" />
+                  <Text style={[styles.levelPillText, { color: "#64748B" }]}>
+                    READ ONLY
+                  </Text>
+                </View>
+              ) : null}
+
+              {dirty ? (
+                <View style={styles.dirtyPill}>
+                  <View style={styles.dirtyDot} />
+                  <Text style={styles.dirtyText}>UNSAVED</Text>
+                </View>
+              ) : null}
+
+              <View
+                style={[
+                  styles.levelPill,
+                  {
+                    backgroundColor: `${levelMeta.tint}14`,
+                    borderColor: `${levelMeta.tint}33`,
+                  },
+                ]}
+              >
+                <View
+                  style={[styles.levelDot, { backgroundColor: levelMeta.tint }]}
+                />
+                <Text style={[styles.levelPillText, { color: levelMeta.tint }]}>
+                  {levelMeta.label}
+                </Text>
+              </View>
+
+              {large ? (
+                <>
+                  <View style={styles.headerDivider} />
+                  <View style={styles.dateWrap}>
+                    <Ionicons
+                      name="calendar-outline"
+                      size={16}
+                      color={C.NAVY}
+                    />
+                    <Text style={styles.dateText}>{quotationDate}</Text>
+                  </View>
+                </>
+              ) : null}
+            </View>
           </View>
         </View>
 
@@ -3513,187 +4776,113 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </Pressable>
                 ) : null}
               </View>
-
-              {showResults ? (
-                <View style={styles.results}>
-                  <ScrollView keyboardShouldPersistTaps="handled">
-                    {searching && results.length === 0 ? (
-                      <View style={styles.resultLoading}>
-                        <ActivityIndicator color={C.NAVY} />
-                        <Text style={styles.resultLoadingText}>
-                          Searching the catalogue…
-                        </Text>
-                      </View>
-                    ) : null}
-
-                    {!searching && results.length === 0 ? (
-                      <Text style={styles.resultEmpty}>
-                        No plants match “{term.trim()}”. Try a shorter name.
-                      </Text>
-                    ) : null}
-
-                    {results.map((plant) => {
-                      const inventory = plant.inventoryList || [];
-                      const stock = inventory.reduce(
-                        (sum, row) => sum + (row.quantity || 0),
-                        0,
-                      );
-                      const availableUnits = inventory.filter(
-                        (row) => (row.quantity || 0) > 0,
-                      ).length;
-
-                      return (
-                        <Pressable
-                          key={plant.plantId}
-                          style={({ pressed, hovered }) => [
-                            styles.resultCard,
-                            hovered && styles.resultCardHover,
-                            pressed && styles.resultCardPressed,
-                          ]}
-                          onPress={() => addPlant(plant)}
-                        >
-                          <View style={styles.resultIcon}>
-                            <Ionicons
-                              name="leaf-outline"
-                              size={17}
-                              color={C.NAVY}
-                            />
-                          </View>
-
-                          <View style={styles.fill}>
-                            <Text style={styles.resultName} numberOfLines={1}>
-                              {plant.plantName}
-                            </Text>
-
-                            <View style={styles.chipRow}>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {plant.size || "No size"}
-                                </Text>
-                              </View>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {formatNumber(stock)} in stock
-                                </Text>
-                              </View>
-                              <View style={styles.chip}>
-                                <Text style={styles.chipText}>
-                                  {availableUnits} unit
-                                  {availableUnits === 1 ? "" : "s"}
-                                </Text>
-                              </View>
-                            </View>
-                          </View>
-
-                          <View style={styles.resultPriceWrap}>
-                            <Text style={styles.resultPrice}>
-                              {formatAmount(priceOf(plant))}
-                            </Text>
-                            <Text style={styles.resultPriceLabel}>
-                              per plant
-                            </Text>
-                          </View>
-
-                          <Ionicons
-                            name="add-circle"
-                            size={22}
-                            color={C.GREEN}
-                          />
-                        </Pressable>
-                      );
-                    })}
-                  </ScrollView>
-                </View>
-              ) : null}
             </View>
-
-            <Pressable
-              style={({ hovered, pressed }) => [
-                styles.addButton,
-                hovered && styles.addButtonHover,
-                pressed && styles.addButtonPressed,
-              ]}
-              onPress={focusSearch}
-            >
-              <Ionicons name="add" size={19} color="#FFFFFF" />
-              {space >= 460 ? (
-                <Text style={styles.addButtonText}>ADD PLANT</Text>
-              ) : null}
-            </Pressable>
           </View>
         ) : null}
 
-        {/* ── scrollable body ── */}
-        <ScrollView
-          style={styles.bodyScroll}
-          contentContainerStyle={styles.bodyContent}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
+        {/* ── scrollable body ──
+           The search dropdown is not a child of this zone (nor of the search
+           box) — it hangs off the card, further down, and only borrows this
+           zone's y offset. See the dropdown for the reasoning. */}
+        <View
+          style={styles.bodyZone}
+          onLayout={(event) => setBodyTop(event.nativeEvent.layout.y)}
         >
-          {showChecks && lines.length > 0 ? (
-            <View style={styles.checkStrip}>
-              <Ionicons
-                name={allChecked ? "checkmark-circle" : "ellipse-outline"}
-                size={18}
-                color={allChecked ? C.GREEN : C.MUTED}
-              />
-              <Text style={styles.checkStripText}>
-                {allChecked
-                  ? "Every row checked. The invoice is ready."
-                  : `${checkedCount} of ${checkableLines.length} rows checked`}
-              </Text>
-            </View>
-          ) : null}
+          <ScrollView
+            ref={bodyScrollRef}
+            style={styles.bodyScroll}
+            contentContainerStyle={styles.bodyContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            scrollEventThrottle={16}
+            onScroll={onBodyScroll}
+            onLayout={onBodyLayout}
+          >
+            {/* Everything the body scrolls sits under this one wrapper so a
+                row can be measured against it — see `scrollRowIntoView`. */}
+            <View
+              ref={scrollContentRef}
+              collapsable={false}
+              style={styles.bodyContentInner}
+            >
+              {/* Picking progress is worth seeing for anyone working a shade
+                quotation, even the roles that cannot tick a box themselves. */}
+              {showInvoiceAction && checkableRows.length > 0 ? (
+                <View style={styles.checkStrip}>
+                  <Ionicons
+                    name={allChecked ? "checkmark-circle" : "ellipse-outline"}
+                    size={18}
+                    color={allChecked ? C.GREEN : C.MUTED}
+                  />
+                  <Text style={styles.checkStripText}>
+                    {allChecked
+                      ? canInvoice
+                        ? "Every row checked. The invoice is ready."
+                        : "Every row checked. The delivery team can invoice it."
+                      : `${checkedCount} of ${checkableRows.length} rows checked`}
+                  </Text>
+                </View>
+              ) : null}
 
-          <View style={styles.tableWrap} onLayout={onTableLayout}>
-            {tableRows.length === 0 ? (
-              <View style={styles.tableShell}>
-                <View style={styles.emptyWrap}>
-                  <View style={styles.emptyIcon}>
-                    <Ionicons name="leaf-outline" size={28} color={C.NAVY} />
+              <View style={styles.tableWrap} onLayout={onTableLayout}>
+                {tableRows.length === 0 ? (
+                  <View style={styles.tableShell}>
+                    <View style={styles.emptyWrap}>
+                      <View style={styles.emptyIcon}>
+                        <Ionicons
+                          name="leaf-outline"
+                          size={28}
+                          color={C.NAVY}
+                        />
+                      </View>
+                      <Text style={styles.emptyTitle}>
+                        No plants on this quotation
+                      </Text>
+                      <Text style={styles.emptyText}>
+                        {canEditTotals
+                          ? "Search above to add the first one."
+                          : "Nothing was reserved against this quotation."}
+                      </Text>
+                    </View>
                   </View>
-                  <Text style={styles.emptyTitle}>
-                    No plants on this quotation
-                  </Text>
-                  <Text style={styles.emptyText}>
-                    {canEditTotals
-                      ? "Search above to add the first one."
-                      : "Nothing was reserved against this quotation."}
-                  </Text>
-                </View>
+                ) : isCardMode ? (
+                  <View style={styles.cardList}>
+                    {tableRows.map((item, index) => renderCard(item, index))}
+                  </View>
+                ) : (
+                  <View style={styles.tableShell}>
+                    {tableHead}
+                    <View style={styles.tableBody}>
+                      {tableRows.map((item, index) => renderRow(item, index))}
+                    </View>
+                  </View>
+                )}
               </View>
-            ) : isCardMode ? (
-              <View style={styles.cardList}>
-                {tableRows.map((item, index) => renderCard(item, index))}
-              </View>
-            ) : (
-              <View style={styles.tableShell}>
-                {tableHead}
-                <View style={styles.tableBody}>
-                  {tableRows.map((item, index) => renderRow(item, index))}
-                </View>
-              </View>
-            )}
-          </View>
 
-          {renderAudit()}
+              {renderAudit()}
 
-          {error ? (
-            <View style={styles.banner}>
-              <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
-              <Text style={styles.bannerText}>{error}</Text>
+              {error ? (
+                <View style={styles.banner}>
+                  <Ionicons
+                    name="alert-circle-outline"
+                    size={17}
+                    color={C.ALERT}
+                  />
+                  <Text style={styles.bannerText}>{error}</Text>
+                </View>
+              ) : notice ? (
+                <View style={[styles.banner, styles.bannerOk]}>
+                  <Ionicons
+                    name="checkmark-circle"
+                    size={17}
+                    color={C.GREEN_DEEP}
+                  />
+                  <Text style={styles.bannerOkText}>{notice}</Text>
+                </View>
+              ) : null}
             </View>
-          ) : notice ? (
-            <View style={[styles.banner, styles.bannerOk]}>
-              <Ionicons
-                name="checkmark-circle"
-                size={17}
-                color={C.GREEN_DEEP}
-              />
-              <Text style={styles.bannerOkText}>{notice}</Text>
-            </View>
-          ) : null}
-        </ScrollView>
+          </ScrollView>
+        </View>
 
         {/* ── totals + actions ── */}
         <View style={styles.footerDock}>
@@ -3802,14 +4991,16 @@ function EditInner({ quotation, onClose, onSaved }) {
               )}
 
               {advanceEntered > 0 && !canEditAdvance ? (
-                /* An advance taken on an earlier day is locked. Show it, with
-                   the date it was collected, but don't allow an edit. */
+                /* Either the quotation has left Draft, or the signed-in
+                   user's own row was collected on an earlier day. Show the
+                   total, with the date only when it's actually theirs to
+                   show, but don't allow an edit. */
                 <View style={[styles.adjustChip, styles.adjustChipLocked]}>
                   <Ionicons name="lock-closed" size={13} color={C.MUTED} />
                   <Text style={styles.adjustChipText} numberOfLines={1}>
                     Advance {formatAmount(advanceEntered)}
-                    {quotation?.advancePaymentDate
-                      ? ` · ${formatDate(quotation.advancePaymentDate)}`
+                    {myAdvanceEntry?.collectionDate
+                      ? ` · ${formatDate(myAdvanceEntry.collectionDate)}`
                       : ""}
                   </Text>
                 </View>
@@ -3879,173 +5070,562 @@ function EditInner({ quotation, onClose, onSaved }) {
             </View>
           ) : null}
 
-          <View style={styles.footerRow}>
-            <View style={styles.metricStrip}>
-              <View style={styles.metric}>
-                <Text style={styles.metricLabel}>Plant types</Text>
-                <Text style={styles.metricValue}>
-                  {formatNumber(totals.rows)}
-                </Text>
-              </View>
-
-              <View style={styles.metric}>
-                <Text style={styles.metricLabel}>Quantity</Text>
-                <Text style={styles.metricValue}>
-                  {formatNumber(totals.quantity)}
-                </Text>
-                <Text style={styles.metricUnit}>plants</Text>
-              </View>
-
-              <View style={styles.metric}>
-                <Text style={styles.metricLabel}>Packing</Text>
-                <Text style={[styles.metricValue, styles.metricWarm]}>
-                  {formatAmount(totals.packing)}
-                </Text>
-              </View>
-
-              {totals.special > 0 ? (
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Special</Text>
-                  <Text style={[styles.metricValue, styles.metricWarm]}>
-                    {formatAmount(totals.special)}
+          {/* Who collected the advance — every ledger row, however many
+              collectors, so it's always clear whose money is whose. */}
+          {advanceBreakdown.length > 0 ? (
+            <View style={styles.moneyReadBar}>
+              {advanceBreakdown.map((row) => (
+                <View key={row.key} style={styles.moneyReadItem}>
+                  <Ionicons
+                    name="person-circle-outline"
+                    size={14}
+                    color={C.NAVY}
+                  />
+                  <Text style={styles.moneyReadText}>
+                    {row.name} · {formatAmount(row.amount)}
+                    {row.mode ? ` · ${row.mode}` : ""}
                   </Text>
                 </View>
-              ) : null}
-
-              {totals.transport > 0 ? (
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Transport</Text>
-                  <Text style={[styles.metricValue, styles.metricWarm]}>
-                    {formatAmount(totals.transport)}
-                  </Text>
-                </View>
-              ) : null}
-
-              {totals.discount > 0 ? (
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Discount</Text>
-                  <Text style={[styles.metricValue, styles.metricDiscount]}>
-                    −{formatAmount(totals.discount)}
-                  </Text>
-                </View>
-              ) : null}
-
-              {totals.advance > 0 ? (
-                <View style={styles.metric}>
-                  <Text style={styles.metricLabel}>Advance</Text>
-                  <Text style={[styles.metricValue, styles.metricDiscount]}>
-                    {formatAmount(totals.advance)}
-                  </Text>
-                  <Text style={styles.metricUnit}>received</Text>
-                </View>
-              ) : null}
-
-              <View style={[styles.metric, styles.metricGrand]}>
-                <Text style={styles.metricGrandLabel}>Grand total</Text>
-                <Text style={styles.metricGrandValue}>
-                  {formatAmount(totals.grand)}
-                </Text>
-              </View>
-
-              {totals.advance > 0 ? (
-                <View style={[styles.metric, styles.metricRemaining]}>
-                  <Text style={styles.metricRemainingLabel}>Remaining</Text>
-                  <Text style={styles.metricRemainingValue}>
-                    {formatAmount(totals.remaining)}
-                  </Text>
-                </View>
-              ) : null}
+              ))}
             </View>
+          ) : null}
 
-            <View style={styles.actionRow}>
-              {canEditLines || canEditTotals || dirty ? (
-                <Pressable
-                  style={({ hovered, pressed }) => [
-                    styles.ghostButton,
-                    (hovered || pressed) && canSave && styles.ghostButtonHover,
-                    !canSave && styles.ghostButtonDisabled,
-                  ]}
-                  onPress={handleSave}
-                  disabled={!canSave}
-                >
-                  {saving ? (
-                    <ActivityIndicator color={C.NAVY} />
-                  ) : (
-                    <Ionicons
-                      name="save-outline"
-                      size={18}
-                      color={canSave ? C.NAVY : "#9CA9B8"}
-                    />
-                  )}
-                  <Text
-                    style={[
-                      styles.ghostTitle,
-                      !canSave && styles.ghostTitleDisabled,
+          <Pressable
+            style={({ hovered, pressed }) => [
+              styles.summaryToggle,
+              (hovered || pressed) && styles.summaryToggleHover,
+            ]}
+            accessibilityRole="button"
+            accessibilityLabel={summaryOpen ? "Hide summary" : "Show summary"}
+            onPress={() => setSummaryOpen((prev) => !prev)}
+          >
+            <Ionicons
+              name={summaryOpen ? "chevron-up" : "chevron-down"}
+              size={14}
+              color={C.NAVY}
+            />
+            <Text style={styles.summaryToggleText}>
+              {summaryOpen ? "Hide summary" : "Show summary"}
+            </Text>
+          </Pressable>
+
+          {!isCardMode ? (
+            <View style={styles.footerRow}>
+              {summaryOpen ? (
+                <View style={styles.metricStrip}>
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Plant types</Text>
+                    <Text style={styles.metricValue}>
+                      {formatNumber(totals.rows)}
+                    </Text>
+                  </View>
+
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Quantity</Text>
+                    <Text style={styles.metricValue}>
+                      {formatNumber(totals.quantity)}
+                    </Text>
+                    <Text style={styles.metricUnit}>plants</Text>
+                  </View>
+
+                  <View style={styles.metric}>
+                    <Text style={styles.metricLabel}>Packing</Text>
+                    <Text style={[styles.metricValue, styles.metricWarm]}>
+                      {formatAmount(totals.packing)}
+                    </Text>
+                  </View>
+
+                  {totals.special > 0 ? (
+                    <View style={styles.metric}>
+                      <Text style={styles.metricLabel}>Special</Text>
+                      <Text style={[styles.metricValue, styles.metricWarm]}>
+                        {formatAmount(totals.special)}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {totals.transport > 0 ? (
+                    <View style={styles.metric}>
+                      <Text style={styles.metricLabel}>Transport</Text>
+                      <Text style={[styles.metricValue, styles.metricWarm]}>
+                        {formatAmount(totals.transport)}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {totals.discount > 0 ? (
+                    <View style={styles.metric}>
+                      <Text style={styles.metricLabel}>Discount</Text>
+                      <Text style={[styles.metricValue, styles.metricDiscount]}>
+                        −{formatAmount(totals.discount)}
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {totals.advance > 0 ? (
+                    <View style={styles.metric}>
+                      <Text style={styles.metricLabel}>Advance</Text>
+                      <Text style={[styles.metricValue, styles.metricDiscount]}>
+                        {formatAmount(totals.advance)}
+                      </Text>
+                      <Text style={styles.metricUnit}>received</Text>
+                    </View>
+                  ) : null}
+
+                  <View style={[styles.metric, styles.metricGrand]}>
+                    <Text style={styles.metricGrandLabel}>Grand total</Text>
+                    <Text style={styles.metricGrandValue}>
+                      {formatAmount(totals.grand)}
+                    </Text>
+                  </View>
+
+                  {totals.advance > 0 ? (
+                    <View style={[styles.metric, styles.metricRemaining]}>
+                      <Text style={styles.metricRemainingLabel}>Remaining</Text>
+                      <Text style={styles.metricRemainingValue}>
+                        {formatAmount(totals.remaining)}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+
+              <View style={styles.actionRow}>
+                {canEditLines || canEditTotals || dirty ? (
+                  <Pressable
+                    style={({ hovered, pressed }) => [
+                      styles.ghostButton,
+                      (hovered || pressed) &&
+                        canSave &&
+                        styles.ghostButtonHover,
+                      !canSave && styles.ghostButtonDisabled,
                     ]}
+                    onPress={handleSave}
+                    disabled={!canSave}
                   >
-                    {saving ? "SAVING…" : "SAVE CHANGES"}
-                  </Text>
-                </Pressable>
-              ) : null}
+                    {saving ? (
+                      <ActivityIndicator color={C.NAVY} />
+                    ) : (
+                      <Ionicons
+                        name="save-outline"
+                        size={18}
+                        color={canSave ? C.NAVY : "#9CA9B8"}
+                      />
+                    )}
+                    <Text
+                      style={[
+                        styles.ghostTitle,
+                        !canSave && styles.ghostTitleDisabled,
+                      ]}
+                    >
+                      {saving ? "SAVING…" : "SAVE CHANGES"}
+                    </Text>
+                  </Pressable>
+                ) : null}
 
-              {canEdit && isDraft ? (
-                <Pressable
-                  style={({ hovered, pressed }) => [
-                    styles.primaryButton,
-                    (hovered || pressed) &&
-                      !working &&
-                      !dirty &&
-                      styles.primaryButtonHover,
-                    (working || dirty) && styles.primaryButtonDisabled,
-                  ]}
-                  onPress={runMove}
-                  disabled={working || dirty}
-                >
-                  {busy === "shade" ? (
-                    <ActivityIndicator color="#FFFFFF" />
-                  ) : (
-                    <Ionicons name="arrow-forward" size={19} color="#FFFFFF" />
-                  )}
-                  <Text style={styles.primaryTitle}>
-                    {busy === "shade" ? "MOVING…" : "MOVE TO LOADING SHADE"}
-                  </Text>
-                </Pressable>
-              ) : null}
+                {canEdit && isDraft ? (
+                  <Pressable
+                    style={({ hovered, pressed }) => [
+                      styles.primaryButton,
+                      (hovered || pressed) &&
+                        !working &&
+                        !dirty &&
+                        styles.primaryButtonHover,
+                      (working || dirty) && styles.primaryButtonDisabled,
+                    ]}
+                    onPress={runMove}
+                    disabled={working || dirty}
+                  >
+                    {busy === "shade" ? (
+                      <ActivityIndicator color="#FFFFFF" />
+                    ) : (
+                      <Ionicons
+                        name="arrow-forward"
+                        size={19}
+                        color="#FFFFFF"
+                      />
+                    )}
+                    <Text style={styles.primaryTitle}>
+                      {busy === "shade" ? "PROCESSING..." : "Process"}
+                    </Text>
+                  </Pressable>
+                ) : null}
 
-              {showChecks ? (
-                <Pressable
-                  style={({ hovered, pressed }) => [
-                    styles.primaryButton,
-                    styles.invoiceButton,
-                    (hovered || pressed) &&
-                      allChecked &&
-                      !dirty &&
-                      styles.invoiceButtonHover,
-                    (!allChecked || working || dirty) &&
-                      styles.primaryButtonDisabled,
-                  ]}
-                  onPress={runInvoice}
-                  disabled={!allChecked || working || dirty}
-                >
-                  {busy === "invoice" ? (
-                    <ActivityIndicator color="#FFFFFF" />
-                  ) : (
-                    <Ionicons
-                      name="receipt-outline"
-                      size={19}
-                      color="#FFFFFF"
-                    />
-                  )}
-                  <Text style={styles.primaryTitle}>
-                    {busy === "invoice" ? "GENERATING…" : "GENERATE INVOICE"}
-                  </Text>
-                </Pressable>
-              ) : null}
+                {showInvoiceAction ? (
+                  <Pressable
+                    style={({ hovered, pressed }) => [
+                      styles.primaryButton,
+                      styles.invoiceButton,
+                      (hovered || pressed) &&
+                        canInvoice &&
+                        allChecked &&
+                        !dirty &&
+                        styles.invoiceButtonHover,
+                      (!canInvoice || !allChecked || working || dirty) &&
+                        styles.primaryButtonDisabled,
+                    ]}
+                    onPress={runInvoice}
+                    disabled={!canInvoice || !allChecked || working || dirty}
+                  >
+                    {busy === "invoice" ? (
+                      <ActivityIndicator color="#FFFFFF" />
+                    ) : (
+                      <Ionicons
+                        name="receipt-outline"
+                        size={19}
+                        color="#FFFFFF"
+                      />
+                    )}
+                    <Text style={styles.primaryTitle}>
+                      {busy === "invoice" ? "GENERATING…" : "GENERATE INVOICE"}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
             </View>
-          </View>
+          ) : (
+            (() => {
+              /* Portrait: metrics + buttons share one fixed 4-column grid so
+                 the footer stays two rows tall instead of stacking every
+                 metric and every button on its own row. */
+              const gridMetrics = [
+                {
+                  key: "types",
+                  label: "Plant types",
+                  value: formatNumber(totals.rows),
+                },
+                {
+                  key: "qty",
+                  label: "Quantity",
+                  value: formatNumber(totals.quantity),
+                  unit: "plants",
+                },
+                {
+                  key: "packing",
+                  label: "Packing",
+                  value: formatAmount(totals.packing),
+                  tone: "warm",
+                },
+                ...(totals.special > 0
+                  ? [
+                      {
+                        key: "special",
+                        label: "Special",
+                        value: formatAmount(totals.special),
+                        tone: "warm",
+                      },
+                    ]
+                  : []),
+                ...(totals.transport > 0
+                  ? [
+                      {
+                        key: "transport",
+                        label: "Transport",
+                        value: formatAmount(totals.transport),
+                        tone: "warm",
+                      },
+                    ]
+                  : []),
+                ...(totals.discount > 0
+                  ? [
+                      {
+                        key: "discount",
+                        label: "Discount",
+                        value: `−${formatAmount(totals.discount)}`,
+                        tone: "discount",
+                      },
+                    ]
+                  : []),
+                ...(totals.advance > 0
+                  ? [
+                      {
+                        key: "advance",
+                        label: "Advance",
+                        value: formatAmount(totals.advance),
+                        unit: "received",
+                        tone: "discount",
+                      },
+                    ]
+                  : []),
+                {
+                  key: "grand",
+                  label: "Grand total",
+                  value: formatAmount(totals.grand),
+                  tone: "grand",
+                },
+                ...(totals.advance > 0
+                  ? [
+                      {
+                        key: "remaining",
+                        label: "Remaining",
+                        value: formatAmount(totals.remaining),
+                        tone: "remaining",
+                      },
+                    ]
+                  : []),
+              ];
+
+              const gridButtons = [];
+              if (canEditLines || canEditTotals || dirty) {
+                gridButtons.push({
+                  key: "save",
+                  kind: "ghost",
+                  disabled: !canSave,
+                  loading: saving,
+                  onPress: handleSave,
+                  icon: "save-outline",
+                  label: saving ? "SAVING…" : "SAVE",
+                });
+              }
+              if (canEdit && isDraft) {
+                gridButtons.push({
+                  key: "move",
+                  kind: "primary",
+                  disabled: working || dirty,
+                  loading: busy === "shade",
+                  onPress: runMove,
+                  icon: "arrow-forward",
+                  label: busy === "shade" ? "PROCESSING..." : "Process",
+                });
+              }
+              if (showInvoiceAction) {
+                gridButtons.push({
+                  key: "invoice",
+                  kind: "invoice",
+                  disabled: !canInvoice || !allChecked || working || dirty,
+                  loading: busy === "invoice",
+                  onPress: runInvoice,
+                  icon: "receipt-outline",
+                  label: busy === "invoice" ? "GENERATING…" : "INVOICE",
+                });
+              }
+
+              const gridCells = [
+                ...(summaryOpen
+                  ? gridMetrics.map((m) => ({ type: "metric", ...m }))
+                  : []),
+                ...gridButtons.map((b) => ({ type: "button", ...b })),
+              ];
+
+              /* Explicit rows of at most 4 cells, each cell sharing its row's
+                 width equally (flex: 1). A short trailing row (e.g. just the
+                 two buttons) fills the row instead of leaving dead cells, and
+                 every cell's height is capped by metricGridCell's minHeight —
+                 nothing here can stretch to fill the screen. */
+              const gridRows = [];
+              for (let i = 0; i < gridCells.length; i += 4) {
+                gridRows.push(gridCells.slice(i, i + 4));
+              }
+
+              return (
+                <View style={styles.metricGridBox}>
+                  {gridRows.map((row, ri) => (
+                    <View
+                      key={ri}
+                      style={[
+                        styles.metricGridRow,
+                        ri > 0 && styles.metricGridRowDivider,
+                      ]}
+                    >
+                      {row.map((cell, ci) => (
+                        <View
+                          key={cell.key}
+                          style={[
+                            styles.metricGridCell,
+                            ci < row.length - 1 && styles.metricGridCellDivider,
+                            cell.type === "button" && { padding: 0 },
+                          ]}
+                        >
+                          {cell.type === "metric" ? (
+                            <>
+                              <Text
+                                style={styles.metricGridLabel}
+                                numberOfLines={1}
+                              >
+                                {cell.label}
+                              </Text>
+                              <Text
+                                style={[
+                                  styles.metricGridValue,
+                                  cell.tone === "warm" && styles.metricWarm,
+                                  cell.tone === "discount" &&
+                                    styles.metricDiscount,
+                                  cell.tone === "grand" &&
+                                    styles.metricGridValueGrand,
+                                  cell.tone === "remaining" &&
+                                    styles.metricGridValueRemaining,
+                                ]}
+                                numberOfLines={1}
+                                adjustsFontSizeToFit
+                              >
+                                {cell.value}
+                              </Text>
+                              {cell.unit ? (
+                                <Text style={styles.metricGridUnit}>
+                                  {cell.unit}
+                                </Text>
+                              ) : null}
+                            </>
+                          ) : (
+                            <Pressable
+                              style={({ hovered, pressed }) => [
+                                styles.metricGridBtn,
+                                cell.kind === "ghost" &&
+                                  styles.metricGridBtnGhost,
+                                cell.kind === "primary" &&
+                                  styles.metricGridBtnPrimary,
+                                cell.kind === "invoice" &&
+                                  styles.metricGridBtnInvoice,
+                                cell.disabled && styles.metricGridBtnDisabled,
+                              ]}
+                              onPress={cell.onPress}
+                              disabled={cell.disabled}
+                            >
+                              {cell.loading ? (
+                                <ActivityIndicator
+                                  color={
+                                    cell.kind === "ghost" ? C.NAVY : "#FFFFFF"
+                                  }
+                                  size="small"
+                                />
+                              ) : (
+                                <Ionicons
+                                  name={cell.icon}
+                                  size={15}
+                                  color={
+                                    cell.disabled
+                                      ? "#9CA9B8"
+                                      : cell.kind === "ghost"
+                                        ? C.NAVY
+                                        : "#FFFFFF"
+                                  }
+                                />
+                              )}
+                              <Text
+                                style={[
+                                  styles.metricGridBtnLabel,
+                                  {
+                                    color: cell.disabled
+                                      ? "#9CA9B8"
+                                      : cell.kind === "ghost"
+                                        ? C.NAVY
+                                        : "#FFFFFF",
+                                  },
+                                ]}
+                                numberOfLines={1}
+                                adjustsFontSizeToFit
+                              >
+                                {cell.label}
+                              </Text>
+                            </Pressable>
+                          )}
+                        </View>
+                      ))}
+                    </View>
+                  ))}
+                </View>
+              );
+            })()
+          )}
 
           {saveHint ? <Text style={styles.saveHint}>{saveHint}</Text> : null}
         </View>
+
+        {/* ── search results ──
+            Parented to the card and painted last, so it lies over the footer
+            dock instead of being cut off at the body zone's bottom edge on a
+            short window. It cannot hang off the search box or the body zone:
+            Android only delivers touches to the part of a child that falls
+            inside its parent's own bounds, so a list overflowing either of
+            those still drew in full but went dead to gestures below the fold.
+            The card is the full height of the screen, so every row stays
+            inside its parent and stays tappable. `bodyTop` puts it back
+            directly under the toolbar. */}
+        {canEditTotals && showResults ? (
+          <View style={[styles.results, { top: bodyTop }]}>
+            <ScrollView
+              style={styles.resultsScroll}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator
+            >
+              {searching && results.length === 0 ? (
+                <View style={styles.resultLoading}>
+                  <ActivityIndicator color={C.NAVY} />
+                  <Text style={styles.resultLoadingText}>
+                    Searching the catalogue…
+                  </Text>
+                </View>
+              ) : null}
+
+              {!searching && results.length === 0 ? (
+                <Text style={styles.resultEmpty}>
+                  No plants match “{term.trim()}”. Try a shorter name.
+                </Text>
+              ) : null}
+
+              {results.map((plant) => {
+                const inventory = plant.inventoryList || [];
+                const stock = inventory.reduce(
+                  (sum, row) => sum + (row.quantity || 0),
+                  0,
+                );
+                const availableUnits = inventory.filter(
+                  (row) => (row.quantity || 0) > 0,
+                ).length;
+
+                return (
+                  <Pressable
+                    key={plant.plantId}
+                    style={({ pressed, hovered }) => [
+                      styles.resultCard,
+                      hovered && styles.resultCardHover,
+                      pressed && styles.resultCardPressed,
+                    ]}
+                    onPress={() => addPlant(plant)}
+                  >
+                    <View style={styles.resultIcon}>
+                      <Ionicons name="leaf-outline" size={17} color={C.NAVY} />
+                    </View>
+
+                    <View style={styles.fill}>
+                      <Text style={styles.resultName} numberOfLines={1}>
+                        {plant.plantName}
+                      </Text>
+
+                      <View style={styles.chipRow}>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {plant.size || "No size"}
+                          </Text>
+                        </View>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {formatNumber(stock)} in stock
+                          </Text>
+                        </View>
+                        <View style={styles.chip}>
+                          <Text style={styles.chipText}>
+                            {availableUnits} unit
+                            {availableUnits === 1 ? "" : "s"}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    <View style={styles.resultPriceWrap}>
+                      <Text style={styles.resultPrice}>
+                        {formatAmount(priceOf(plant))}
+                      </Text>
+                      <Text style={styles.resultPriceLabel}>per plant</Text>
+                    </View>
+
+                    <Ionicons name="add-circle" size={22} color={C.GREEN} />
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
+        ) : null}
       </View>
 
       {renderPicker()}
@@ -4083,7 +5663,11 @@ function EditInner({ quotation, onClose, onSaved }) {
         <AdvanceModal
           styles={styles}
           grand={totals.grand}
+          otherTotal={otherAdvanceTotal}
+          entries={advanceBreakdown}
           initialAdvance={advance}
+          initialMode={advanceMode}
+          collectorName={userName || userId}
           onApply={applyAdvance}
           onClose={() => setAdvanceOpen(false)}
         />

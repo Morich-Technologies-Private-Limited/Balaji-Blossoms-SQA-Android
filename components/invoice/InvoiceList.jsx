@@ -233,7 +233,7 @@ export default function InvoiceList({
       .filter((inv) => {
         if (!term) return true;
         return (
-          String(inv.invoiceId).includes(term) ||
+          String(inv.displayInvoiceId ?? "").includes(term) ||
           String(inv.customerNumber || "").includes(term) ||
           (inv.customerName || "").toLowerCase().includes(term) ||
           (inv.unitName || "").toLowerCase().includes(term) ||
@@ -290,7 +290,7 @@ export default function InvoiceList({
         return;
       }
 
-      const invoiceLine = `INV-${id}${
+      const invoiceLine = `INV-${item.displayInvoiceId ?? id}${
         item.customerName ? ` · ${item.customerName}` : ""
       }`;
 
@@ -464,7 +464,7 @@ export default function InvoiceList({
               {item.customerName || "Unnamed customer"}
             </Text>
             <Text numberOfLines={1} style={styles.cellSub}>
-              INV-{item.invoiceId}
+              INV-{item.displayInvoiceId}
             </Text>
           </View>
         );
@@ -524,6 +524,7 @@ export default function InvoiceList({
         wide: true,
       },
       { label: "Unit", text: item.unitName || "—" },
+      { label: "Company ID", text: String(item.companyId ?? "—") },
       { label: "Transactions", value: String(txnCount) },
     ];
 
@@ -610,7 +611,7 @@ export default function InvoiceList({
               {item.customerName || "Unnamed customer"}
             </Text>
             <Text style={styles.cellSub}>
-              INV-{item.invoiceId} · {formatDate(item.createdAt)}
+              INV-{item.displayInvoiceId} · {formatDate(item.createdAt)}
             </Text>
           </View>
           {statusPill(item)}
@@ -666,6 +667,12 @@ export default function InvoiceList({
               <View style={styles.cardMeta}>
                 <Text style={styles.statLabel}>Unit</Text>
                 <Text style={styles.statText}>{item.unitName || "—"}</Text>
+              </View>
+              <View style={styles.cardMeta}>
+                <Text style={styles.statLabel}>Company ID</Text>
+                <Text style={styles.statText}>
+                  {String(item.companyId ?? "—")}
+                </Text>
               </View>
               <View style={styles.cardMeta}>
                 <Text style={styles.statLabel}>Tally sync</Text>
