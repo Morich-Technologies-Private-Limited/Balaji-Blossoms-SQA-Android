@@ -408,7 +408,8 @@ const PICK_FIELDS = [
 const patchTouchesPick = (line, patch) =>
   PICK_FIELDS.some(
     (field) =>
-      field in patch && String(patch[field] ?? "") !== String(line[field] ?? ""),
+      field in patch &&
+      String(patch[field] ?? "") !== String(line[field] ?? ""),
   );
 
 /** Everything the save call cares about, flattened so it can be compared. */
@@ -556,11 +557,21 @@ const auditFromRecord = (record, index) => ({
 
 /* ── row ───────────────────────────────────────────────────────────── */
 
-const TableRow = memo(function TableRow({ item, index, columns, styles }) {
+const TableRow = memo(function TableRow({
+  item,
+  index,
+  columns,
+  styles,
+  registerRow,
+}) {
   const dirty = !item.isSpecial && lineChanged(item);
 
   return (
-    <View style={styles.rowGroup}>
+    <View
+      ref={(node) => registerRow(item.key, node)}
+      collapsable={false}
+      style={styles.rowGroup}
+    >
       <View
         style={[
           styles.row,
@@ -1853,6 +1864,95 @@ function EditInner({ quotation, onClose, onSaved }) {
      unmount, so a deleted line leaves nothing behind. */
   const qtyInputRefs = useRef(new Map());
 
+  /* ── keeping one row in view ─────────────────────────────────────────
+     The body scroll has to be driven by hand in two places, and both are the
+     same move: pull a single row back into the visible part of the list.
+
+     · A plant that was just added is not necessarily at the bottom — rows
+       already ticked off on the server sink below it and the special plants
+       come after those — so "scroll to the end" lands past it.
+     · The row being typed into goes under the keyboard: the activity is
+       adjustResize, so the keyboard opening shrinks this scroll around
+       whatever was already on screen rather than moving it.
+
+     Rows register themselves here as they mount, and are measured against
+     `scrollContentRef` — the one wrapper holding everything the body
+     scrolls — so the offset that comes back is already in scroll
+     coordinates. */
+  const rowRefs = useRef(new Map());
+  const scrollContentRef = useRef(null);
+  const viewportRef = useRef(0);
+  const scrollYRef = useRef(0);
+  /* The row whose field currently holds the caret, so the keyboard opening
+     knows which one it has to keep clear of. */
+  const focusedRowKeyRef = useRef(null);
+
+  const registerRow = useCallback((key, node) => {
+    if (node) rowRefs.current.set(key, node);
+    else rowRefs.current.delete(key);
+  }, []);
+
+  const scrollRowIntoView = useCallback((key, { padding = 14 } = {}) => {
+    const row = key == null ? null : rowRefs.current.get(key);
+    const content = scrollContentRef.current;
+    const scroll = bodyScrollRef.current;
+    if (!row?.measureLayout || !content || !scroll) return;
+
+    row.measureLayout(
+      content,
+      (_x, y, _width, height) => {
+        const viewport = viewportRef.current;
+        if (!viewport) return;
+        const top = scrollYRef.current;
+        const bottom = top + viewport;
+
+        /* Below the fold: bring its bottom edge up. Above it: bring its top
+           edge down. Already fully on screen: leave the scroll alone. */
+        let next = null;
+        if (y + height + padding > bottom)
+          next = y + height + padding - viewport;
+        else if (y - padding < top) next = y - padding;
+        if (next == null) return;
+
+        scroll.scrollTo({ y: Math.max(0, next), animated: true });
+      },
+      () => {},
+    );
+  }, []);
+
+  /* Every editable field on a row reports its focus here, so the keyboard
+     handlers below know what to keep visible. */
+  const onRowFieldFocus = useCallback(
+    (key) => {
+      focusedRowKeyRef.current = key;
+      scrollRowIntoView(key);
+    },
+    [scrollRowIntoView],
+  );
+
+  const onRowFieldBlur = useCallback((key) => {
+    if (focusedRowKeyRef.current === key) focusedRowKeyRef.current = null;
+  }, []);
+
+  const onBodyScroll = useCallback((event) => {
+    scrollYRef.current = event.nativeEvent.contentOffset.y;
+  }, []);
+
+  /* The scroll shrinking is the keyboard arriving — the moment the row being
+     edited can end up underneath it. */
+  const onBodyLayout = useCallback(
+    (event) => {
+      const height = Math.round(event.nativeEvent.layout.height);
+      const previous = viewportRef.current;
+      viewportRef.current = height;
+      if (height < previous && focusedRowKeyRef.current != null) {
+        const key = focusedRowKeyRef.current;
+        requestAnimationFrame(() => scrollRowIntoView(key));
+      }
+    },
+    [scrollRowIntoView],
+  );
+
   /* ── access check ─────────────────────────────────────────────────
      Runs once on open. Any non-EDIT answer (including an error or a missing
      payload) leaves access at READ, so the safe default is read-only — the
@@ -1860,36 +1960,41 @@ function EditInner({ quotation, onClose, onSaved }) {
   useEffect(() => {
     let alive = true;
     (async () => {
-      const id = quotation?.quotationId;
-      /* The role is needed before the level list can be asked for, so it is
-         resolved first; the two server calls then run together. */
-      const currentRole = await getCurrentRole();
-      if (!alive) return;
-      setRole(currentRole || null);
+      try {
+        const id = quotation?.quotationId;
+        /* The role is needed before the level list can be asked for, so it is
+           resolved first; the two server calls then run together. */
+        const currentRole = await getCurrentRole();
+        if (!alive) return;
+        setRole(currentRole || null);
 
-      const [response, levelResponse] = await Promise.all([
-        id == null ? Promise.resolve(null) : getQuotationAccess(id),
-        currentRole
-          ? getQuotationEditLevels(currentRole)
-          : Promise.resolve(null),
-      ]);
-      if (!alive) return;
+        const [response, levelResponse] = await Promise.all([
+          id == null ? Promise.resolve(null) : getQuotationAccess(id),
+          currentRole
+            ? getQuotationEditLevels(currentRole)
+            : Promise.resolve(null),
+        ]);
+        if (!alive) return;
 
-      const granted =
-        response?.status === "SUCCESS" ? response.payload?.accessLevel : null;
-      setAccess(granted === "EDIT" ? "EDIT" : "READ");
+        const granted =
+          response?.status === "SUCCESS" ? response.payload?.accessLevel : null;
+        setAccess(granted === "EDIT" ? "EDIT" : "READ");
 
-      /* An empty list is a real answer — this role edits nothing — but a
-         failed call is not, and falls back to the app's own rule so a backend
-         outage doesn't lock the floor out of every quotation. */
-      const levels =
-        levelResponse?.status === "SUCCESS" &&
-        Array.isArray(levelResponse.payload)
-          ? levelResponse.payload.map((name) => String(name).toUpperCase())
-          : fallbackEditLevels(currentRole);
-      setEditLevels(levels);
-
-      setAccessResolved(true);
+        /* An empty list is a real answer — this role edits nothing — but a
+           failed call is not, and falls back to the app's own rule so a
+           backend outage doesn't lock the floor out of every quotation. */
+        const levels =
+          levelResponse?.status === "SUCCESS" &&
+          Array.isArray(levelResponse.payload)
+            ? levelResponse.payload.map((name) => String(name).toUpperCase())
+            : fallbackEditLevels(currentRole);
+        setEditLevels(levels);
+      } finally {
+        /* The screen is held on a spinner until this flips, so it has to flip
+           even when the lookup threw — a stored user that won't parse leaves
+           the operator on read-only, never on a spinner that never ends. */
+        if (alive) setAccessResolved(true);
+      }
     })();
     return () => {
       alive = false;
@@ -2085,6 +2190,17 @@ function EditInner({ quotation, onClose, onSaved }) {
     const sub = Keyboard.addListener("keyboardDidHide", () => syncOffers());
     return () => sub.remove();
   }, [syncOffers]);
+
+  /* Belt and braces next to the body scroll's own onLayout: a keyboard that
+     reports itself without the scroll relaying out — a height change while it
+     is already up, chiefly — still has to leave the edited row on screen. */
+  useEffect(() => {
+    const sub = Keyboard.addListener("keyboardDidShow", () => {
+      if (focusedRowKeyRef.current != null)
+        scrollRowIntoView(focusedRowKeyRef.current);
+    });
+    return () => sub.remove();
+  }, [scrollRowIntoView]);
 
   /** Header refresh: drop the keyboard, then re-ask for every group. */
   const refreshCalculations = useCallback(() => {
@@ -2390,27 +2506,31 @@ function EditInner({ quotation, onClose, onSaved }) {
       setTerm("");
       setResults([]);
 
-      /* A brand-new row lands at the bottom of the list — on the mobile card
-         layout, scroll it into view so the operator sees what they just
-         added instead of having to hunt for it, then put the caret straight
-         into its quantity box: adding a plant is always followed by typing
-         how many, so there is no reason to make the operator tap for it.
-         The delay gives the new row a chance to actually lay out and
-         register its input ref before either happens. */
-      if (!existing) {
-        setTimeout(() => {
-          if (isCardMode)
-            bodyScrollRef.current?.scrollToEnd({ animated: true });
-          qtyInputRefs.current.get(newKey)?.focus();
-        }, 50);
-      }
+      /* A brand-new row lands at the end of the lines — which is *not* the
+         end of the list: the rows already ticked off on the server sink
+         below it and the special plants come after those, so scrolling to
+         the bottom used to land past the new row and leave the operator
+         hunting for it. Scroll to the row itself instead, then put the caret
+         straight into its quantity box: adding a plant is always followed by
+         typing how many, so there is no reason to make the operator tap for
+         it. The delay gives the new row a chance to lay out and register
+         both its refs first. */
+      setTimeout(() => {
+        /* A tap that only bumped an existing row is scrolled to as well —
+           otherwise nothing visibly happens — but its box is left alone:
+           the quantity was just incremented, and focusing selects the lot
+           ready to be typed over. */
+        const key = existing ? existing.key : newKey;
+        scrollRowIntoView(key, { padding: 16 });
+        if (!existing) qtyInputRefs.current.get(newKey)?.focus();
+      }, 60);
     },
     [
       quotation?.unitId,
       lines,
-      isCardMode,
       takePlantFromAvailableUnit,
       allUnits,
+      scrollRowIntoView,
     ],
   );
 
@@ -3319,15 +3439,7 @@ function EditInner({ quotation, onClose, onSaved }) {
     setNotice("Invoice generated.");
     setPdf({ kind: "invoice", title: "Invoice", file: response.payload });
     setBusy(null);
-  }, [
-    working,
-    canInvoice,
-    allChecked,
-    dirty,
-    handleSave,
-    quotation,
-    onSaved,
-  ]);
+  }, [working, canInvoice, allChecked, dirty, handleSave, quotation, onSaved]);
 
   const saveHint = blockingReason
     ? blockingReason
@@ -3498,7 +3610,9 @@ function EditInner({ quotation, onClose, onSaved }) {
               onChangeText={(value) =>
                 updateLine(line.key, { quantity: value.replace(/[^0-9]/g, "") })
               }
+              onFocus={() => onRowFieldFocus(line.key)}
               onBlur={() => {
+                onRowFieldBlur(line.key);
                 commitFieldEdit(line.key, "quantity");
                 syncOffers(); // quantity drives the offer — don't wait it out
               }}
@@ -3530,7 +3644,17 @@ function EditInner({ quotation, onClose, onSaved }) {
         </View>
       );
     },
-    [styles, C, isDraft, lineEditable, updateLine, commitFieldEdit, syncOffers],
+    [
+      styles,
+      C,
+      isDraft,
+      lineEditable,
+      updateLine,
+      commitFieldEdit,
+      syncOffers,
+      onRowFieldFocus,
+      onRowFieldBlur,
+    ],
   );
 
   const packingField = useCallback(
@@ -3639,7 +3763,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                     packingCharge: value.replace(/[^0-9.]/g, ""),
                   })
                 }
-                onBlur={() => commitFieldEdit(line.key, "packing")}
+                onFocus={() => onRowFieldFocus(line.key)}
+                onBlur={() => {
+                  onRowFieldBlur(line.key);
+                  commitFieldEdit(line.key, "packing");
+                }}
                 keyboardType="decimal-pad"
                 selectTextOnFocus
                 placeholder="0"
@@ -3672,6 +3800,8 @@ function EditInner({ quotation, onClose, onSaved }) {
       updateLine,
       packings,
       commitFieldEdit,
+      onRowFieldFocus,
+      onRowFieldBlur,
     ],
   );
 
@@ -4034,9 +4164,10 @@ function EditInner({ quotation, onClose, onSaved }) {
         index={index}
         columns={columns}
         styles={styles}
+        registerRow={registerRow}
       />
     ),
-    [columns, styles],
+    [columns, styles, registerRow],
   );
 
   const tableRows = useMemo(
@@ -4052,6 +4183,8 @@ function EditInner({ quotation, onClose, onSaved }) {
     (item, index) => (
       <View
         key={item.key}
+        ref={(node) => registerRow(item.key, node)}
+        collapsable={false}
         style={[
           styles.lineCard,
           item.isSpecial && styles.lineCardSpecial,
@@ -4176,6 +4309,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       packingField,
       choiceField,
       actionField,
+      registerRow,
     ],
   );
 
@@ -4373,6 +4507,78 @@ function EditInner({ quotation, onClose, onSaved }) {
     ? `QTN-${quotation?.quotationId} · ${modeLabel}`
     : `QTN-${quotation?.quotationId}`;
 
+  /* Both halves of the edit gate — the access grant and the levels this role
+     may edit at — come off the network, and until they land the screen cannot
+     know which surface it is. Rendering anyway meant opening on the read-only
+     one and then swapping the whole screen (search bar, dropdowns, delete
+     buttons, action row) under the operator a second later, so the body waits
+     for the answer instead. The header stays put so what is being opened, and
+     the way back out of it, are on screen the whole time. */
+  if (!accessResolved) {
+    return (
+      <View style={styles.screen}>
+        <View style={styles.card}>
+          <View style={styles.header}>
+            <View style={styles.headerTopRow}>
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.iconBtn,
+                  hovered && styles.iconBtnHover,
+                  pressed && styles.iconBtnPressed,
+                ]}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Go back"
+                onPress={onClose}
+              >
+                <Ionicons name="arrow-back" size={19} color={C.NAVY} />
+              </Pressable>
+
+              <Text style={styles.title}>
+                {quotation?.customerName || `QTN-${quotation?.quotationId}`}
+              </Text>
+            </View>
+
+            <View style={styles.headerMetaRow}>
+              <Text style={styles.subtitle} numberOfLines={1}>
+                {`QTN-${quotation?.quotationId}`}
+              </Text>
+
+              <View style={styles.headerMeta}>
+                <View
+                  style={[
+                    styles.levelPill,
+                    {
+                      backgroundColor: `${levelMeta.tint}14`,
+                      borderColor: `${levelMeta.tint}33`,
+                    },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.levelDot,
+                      { backgroundColor: levelMeta.tint },
+                    ]}
+                  />
+                  <Text
+                    style={[styles.levelPillText, { color: levelMeta.tint }]}
+                  >
+                    {levelMeta.label}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.loadingBody}>
+            <ActivityIndicator size="large" color={C.NAVY} />
+            <Text style={styles.loadingText}>Opening quotation…</Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
   const tableHead = (
     <View style={styles.tableHead}>
       {columns.map((col) => (
@@ -4486,10 +4692,10 @@ function EditInner({ quotation, onClose, onSaved }) {
             </Text>
 
             <View style={styles.headerMeta}>
-              {/* Read-only badge whenever access is not EDIT (and the check
-                  has resolved), so the operator knows why the grid is
-                  locked. */}
-              {accessResolved && !canEdit ? (
+              {/* Read-only badge whenever access is not EDIT, so the operator
+                  knows why the grid is locked. Nothing reaches this render
+                  until the check has resolved — see the gate above. */}
+              {!canEdit ? (
                 <View
                   style={[
                     styles.levelPill,
@@ -4588,78 +4794,93 @@ function EditInner({ quotation, onClose, onSaved }) {
             contentContainerStyle={styles.bodyContent}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
+            scrollEventThrottle={16}
+            onScroll={onBodyScroll}
+            onLayout={onBodyLayout}
           >
-            {/* Picking progress is worth seeing for anyone working a shade
+            {/* Everything the body scrolls sits under this one wrapper so a
+                row can be measured against it — see `scrollRowIntoView`. */}
+            <View
+              ref={scrollContentRef}
+              collapsable={false}
+              style={styles.bodyContentInner}
+            >
+              {/* Picking progress is worth seeing for anyone working a shade
                 quotation, even the roles that cannot tick a box themselves. */}
-            {showInvoiceAction && checkableRows.length > 0 ? (
-              <View style={styles.checkStrip}>
-                <Ionicons
-                  name={allChecked ? "checkmark-circle" : "ellipse-outline"}
-                  size={18}
-                  color={allChecked ? C.GREEN : C.MUTED}
-                />
-                <Text style={styles.checkStripText}>
-                  {allChecked
-                    ? canInvoice
-                      ? "Every row checked. The invoice is ready."
-                      : "Every row checked. The delivery team can invoice it."
-                    : `${checkedCount} of ${checkableRows.length} rows checked`}
-                </Text>
-              </View>
-            ) : null}
+              {showInvoiceAction && checkableRows.length > 0 ? (
+                <View style={styles.checkStrip}>
+                  <Ionicons
+                    name={allChecked ? "checkmark-circle" : "ellipse-outline"}
+                    size={18}
+                    color={allChecked ? C.GREEN : C.MUTED}
+                  />
+                  <Text style={styles.checkStripText}>
+                    {allChecked
+                      ? canInvoice
+                        ? "Every row checked. The invoice is ready."
+                        : "Every row checked. The delivery team can invoice it."
+                      : `${checkedCount} of ${checkableRows.length} rows checked`}
+                  </Text>
+                </View>
+              ) : null}
 
-            <View style={styles.tableWrap} onLayout={onTableLayout}>
-              {tableRows.length === 0 ? (
-                <View style={styles.tableShell}>
-                  <View style={styles.emptyWrap}>
-                    <View style={styles.emptyIcon}>
-                      <Ionicons name="leaf-outline" size={28} color={C.NAVY} />
+              <View style={styles.tableWrap} onLayout={onTableLayout}>
+                {tableRows.length === 0 ? (
+                  <View style={styles.tableShell}>
+                    <View style={styles.emptyWrap}>
+                      <View style={styles.emptyIcon}>
+                        <Ionicons
+                          name="leaf-outline"
+                          size={28}
+                          color={C.NAVY}
+                        />
+                      </View>
+                      <Text style={styles.emptyTitle}>
+                        No plants on this quotation
+                      </Text>
+                      <Text style={styles.emptyText}>
+                        {canEditTotals
+                          ? "Search above to add the first one."
+                          : "Nothing was reserved against this quotation."}
+                      </Text>
                     </View>
-                    <Text style={styles.emptyTitle}>
-                      No plants on this quotation
-                    </Text>
-                    <Text style={styles.emptyText}>
-                      {canEditTotals
-                        ? "Search above to add the first one."
-                        : "Nothing was reserved against this quotation."}
-                    </Text>
                   </View>
-                </View>
-              ) : isCardMode ? (
-                <View style={styles.cardList}>
-                  {tableRows.map((item, index) => renderCard(item, index))}
-                </View>
-              ) : (
-                <View style={styles.tableShell}>
-                  {tableHead}
-                  <View style={styles.tableBody}>
-                    {tableRows.map((item, index) => renderRow(item, index))}
+                ) : isCardMode ? (
+                  <View style={styles.cardList}>
+                    {tableRows.map((item, index) => renderCard(item, index))}
                   </View>
+                ) : (
+                  <View style={styles.tableShell}>
+                    {tableHead}
+                    <View style={styles.tableBody}>
+                      {tableRows.map((item, index) => renderRow(item, index))}
+                    </View>
+                  </View>
+                )}
+              </View>
+
+              {renderAudit()}
+
+              {error ? (
+                <View style={styles.banner}>
+                  <Ionicons
+                    name="alert-circle-outline"
+                    size={17}
+                    color={C.ALERT}
+                  />
+                  <Text style={styles.bannerText}>{error}</Text>
                 </View>
-              )}
+              ) : notice ? (
+                <View style={[styles.banner, styles.bannerOk]}>
+                  <Ionicons
+                    name="checkmark-circle"
+                    size={17}
+                    color={C.GREEN_DEEP}
+                  />
+                  <Text style={styles.bannerOkText}>{notice}</Text>
+                </View>
+              ) : null}
             </View>
-
-            {renderAudit()}
-
-            {error ? (
-              <View style={styles.banner}>
-                <Ionicons
-                  name="alert-circle-outline"
-                  size={17}
-                  color={C.ALERT}
-                />
-                <Text style={styles.bannerText}>{error}</Text>
-              </View>
-            ) : notice ? (
-              <View style={[styles.banner, styles.bannerOk]}>
-                <Ionicons
-                  name="checkmark-circle"
-                  size={17}
-                  color={C.GREEN_DEEP}
-                />
-                <Text style={styles.bannerOkText}>{notice}</Text>
-              </View>
-            ) : null}
           </ScrollView>
         </View>
 
