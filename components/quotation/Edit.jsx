@@ -5588,9 +5588,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                     </View>
 
                     <View style={styles.fill}>
-                      <Text style={styles.resultName} numberOfLines={1}>
-                        {plant.plantName}
-                      </Text>
+                      {/* Wraps rather than ellipsizing: two plants in the
+                          same series differ only in the last word or two,
+                          so a clipped name is the one thing that can't be
+                          picked from. */}
+                      <Text style={styles.resultName}>{plant.plantName}</Text>
 
                       <View style={styles.chipRow}>
                         <View style={styles.chip}>

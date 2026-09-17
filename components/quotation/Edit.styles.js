@@ -313,7 +313,13 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       justifyContent: "center",
       backgroundColor: NAVY_TINT,
     },
-    resultName: { fontSize: 14.5, fontWeight: "700", color: TEXT },
+    /* Left to wrap onto as many lines as the name needs — see the row. */
+    resultName: {
+      fontSize: 14.5,
+      fontWeight: "700",
+      color: TEXT,
+      lineHeight: 19,
+    },
     chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 5 },
     chip: {
       paddingHorizontal: 8,
