@@ -13,6 +13,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { logout } from "../../utility/secureStorage";
 import makeStyles, { COLORS } from "./SalesLayout.styles.js";
 import SalesSidebar from "./SalesSidebar.jsx";
 import makeSidebarStyles from "./SalesSidebar.styles.js";
@@ -124,8 +125,11 @@ export default function SalesLayout({ title, subtitle, right, children }) {
     setOpen(false);
   }, [pathname]);
 
-  const handleLogout = useCallback(() => {
+  // Clearing the stored session first is what makes logout stick — navigating
+  // alone leaves the token in SecureStore and the next launch auto-signs in.
+  const handleLogout = useCallback(async () => {
     setOpen(false);
+    await logout();
     router.replace("/auth/Login");
   }, [router]);
 

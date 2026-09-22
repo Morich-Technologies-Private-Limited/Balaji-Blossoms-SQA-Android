@@ -10,6 +10,8 @@ export const QUOTATION_PDF_URL = `${API_BASE_URL}/quotation/pdf`;
 export const COLLECTION_SHEET_PDF_URL = `${API_BASE_URL}/quotation/download/collection-sheet`;
 export const QUOTATION_ACCESS_URL = `${API_BASE_URL}/quotation/check/access`;
 export const QUOTATION_EDIT_LEVEL_URL = `${API_BASE_URL}/quotation/editLevel`;
+export const UPDATE_LOADING_DATE_URL = `${API_BASE_URL}/quotation/update/loadingDate`;
+export const DELETE_QUOTATION_URL = `${API_BASE_URL}/quotation/delete`;
 
 export const CONVERT_TO_INVOICE_URL = `${API_BASE_URL}/quotation/convertToInvoice`;
 export const MOVE_TO_DELIVERY_SHADE_URL = `${API_BASE_URL}/quotation/update/status/moveToDeliveryShade`;
@@ -22,6 +24,7 @@ export const FIND_ALL_UNITS_URL = `${API_BASE_URL}/info/find/units`;
 export const PLANT_INVENTORY_CONFIG_URL = `${API_BASE_URL}/info/plant/inventory/config`;
 export const FIND_ALL_STATES_URL = `${API_BASE_URL}/info/findAllStates`;
 export const FIND_CITIES_BY_STATE_URL = `${API_BASE_URL}/info/findCitiesByStates`;
+export const DELIVERY_PERSONS_URL = `${API_BASE_URL}/info/deliverPerson/findAll`;
 
 export const CREATE_CUSTOMER_URL = `${API_BASE_URL}/customer/create`;
 export const CUSTOMER_SEARCH_URL = `${API_BASE_URL}/customer/search`;

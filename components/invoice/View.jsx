@@ -230,6 +230,7 @@ export default function View({ invoice, onClose, onError }) {
           label: "Sales person",
           text: invoice?.assignedUserName || "Unassigned",
         },
+        { label: "Loaded by", text: invoice?.loadedBy || "—" },
         { label: "Unit", text: invoice?.unitName || "—" },
         { label: "Company ID", text: String(invoice?.companyId ?? "—") },
         { label: "Mobile", text: invoice?.customerNumber || "—" },

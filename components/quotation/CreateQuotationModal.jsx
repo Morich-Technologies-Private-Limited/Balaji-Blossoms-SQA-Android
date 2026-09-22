@@ -17,7 +17,9 @@ import {
 import { createQuotation } from "../../api/createQuotation";
 import { getCompanies } from "../../api/getCompanies.js";
 import { searchCustomers } from "../../api/searchCustomers.js";
+import { formatDate, startOfDay } from "../../utility/dates";
 import { getCurrentUser } from "../../utility/secureStorage";
+import DatePickerSheet from "../common/DatePickerSheet";
 import makeStyles from "./CreateQuotationModal.styles.js";
 
 const SEARCH_DEBOUNCE = 350;
@@ -103,6 +105,12 @@ export default function CreateQuotationModal({
      warning is up; null when there is nothing to warn about. */
   const [billingConflict, setBillingConflict] = useState(null);
 
+  /* When the order is to be loaded. Required by /quotation/create, so it
+     defaults to today rather than opening empty — the common case is "load it
+     today", and anything else is two taps away. */
+  const [loadingDate, setLoadingDate] = useState(() => startOfDay(new Date()));
+  const [dateOpen, setDateOpen] = useState(false);
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
 
@@ -155,6 +163,8 @@ export default function CreateQuotationModal({
     setCompanyOpen(false);
     setCompaniesError(null);
     setBillingConflict(null);
+    setLoadingDate(startOfDay(new Date()));
+    setDateOpen(false);
     setSubmitting(false);
     setError(null);
     warnedForRef.current = null;
@@ -276,12 +286,14 @@ export default function CreateQuotationModal({
   const selectedCompany = findCompany(companyId);
   const conflictCompany = findCompany(billingConflict);
 
-  const canSubmit = !!selected && !!userId && companyId != null && !submitting;
+  const canSubmit =
+    !!selected && !!userId && companyId != null && !!loadingDate && !submitting;
 
   const handleSubmit = async () => {
     if (!canSubmit) {
       if (companyId == null) setError("Select a company first.");
       else if (!selected) setError("Search and select a customer first.");
+      else if (!loadingDate) setError("Pick a loading date.");
       else if (!userId) setError("No signed-in user found. Sign in again.");
       return;
     }
@@ -293,6 +305,7 @@ export default function CreateQuotationModal({
       selected.customerId,
       userId,
       companyId,
+      loadingDate,
     );
 
     setSubmitting(false);
@@ -474,6 +487,42 @@ export default function CreateQuotationModal({
                   ) : null}
                 </View>
               )}
+
+              {/* ── loading date ── */}
+              <Text style={[styles.sectionLabel, { marginTop: 20 }]}>
+                Loading date
+              </Text>
+
+              <Pressable
+                onPress={() => setDateOpen(true)}
+                style={({ hovered, pressed }) => [
+                  styles.selectTrigger,
+                  (hovered || pressed) && styles.selectTriggerHover,
+                  dateOpen && styles.selectTriggerOpen,
+                ]}
+              >
+                <Ionicons
+                  name="calendar-outline"
+                  size={styles.iconSize}
+                  color={C.PLACEHOLDER}
+                />
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.selectValue,
+                    !loadingDate && styles.selectPlaceholder,
+                  ]}
+                >
+                  {loadingDate
+                    ? formatDate(loadingDate)
+                    : "Pick a loading date"}
+                </Text>
+                <Ionicons
+                  name="chevron-down"
+                  size={styles.iconSize}
+                  color={C.PLACEHOLDER}
+                />
+              </Pressable>
 
               {/* ── search + dropdown ── */}
               {!selected ? (
@@ -784,6 +833,23 @@ export default function CreateQuotationModal({
               </View>
             </View>
           </View>
+        ) : null}
+
+        {/* Loading-date calendar. In-tree for the same reason the warning
+            above is — see its note on nested modals. */}
+        {dateOpen ? (
+          <DatePickerSheet
+            inline
+            value={loadingDate}
+            title="Loading date"
+            subtitle="When this order is to be loaded."
+            onSelect={(date) => {
+              setLoadingDate(date);
+              setDateOpen(false);
+              setError(null);
+            }}
+            onClose={() => setDateOpen(false)}
+          />
         ) : null}
       </View>
     </Modal>
