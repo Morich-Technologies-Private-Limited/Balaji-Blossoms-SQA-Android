@@ -134,6 +134,8 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       borderRadius: 999,
       borderWidth: 1,
     },
+    /* Press feedback for the pills that are actually buttons (loading date). */
+    pillPress: { opacity: 0.65 },
     levelDot: { height: 5, width: 5, borderRadius: 2.5 },
     levelPillText: {
       fontSize: large ? 10 : 8.5,
@@ -197,6 +199,9 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     iconBtnHover: { backgroundColor: FILL, borderColor: NAVY },
     iconBtnPressed: { backgroundColor: FILL_DEEP },
     iconBtnActive: { backgroundColor: NAVY_TINT, borderColor: NAVY },
+    /* Destructive header action (delete quotation) — red rather than navy on
+       touch, so it never reads as just another toolbar button. */
+    iconBtnDangerHover: { backgroundColor: RED_SOFT, borderColor: RED_LINE },
 
     /* ── toolbar ───────────────────────────────────────────────────── */
     toolbar: {
@@ -313,7 +318,13 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       justifyContent: "center",
       backgroundColor: NAVY_TINT,
     },
-    resultName: { fontSize: 14.5, fontWeight: "700", color: TEXT },
+    /* Left to wrap onto as many lines as the name needs — see the row. */
+    resultName: {
+      fontSize: 14.5,
+      fontWeight: "700",
+      color: TEXT,
+      lineHeight: 19,
+    },
     chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 5 },
     chip: {
       paddingHorizontal: 8,
@@ -1010,6 +1021,7 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
       borderStyle: "dashed",
     },
     adjustAddBtnHover: { borderColor: NAVY, backgroundColor: NAVY_TINT },
+    adjustAddBtnDisabled: { borderColor: BORDER, backgroundColor: FILL },
     adjustAddText: {
       flexShrink: 1,
       fontSize: 12.5,
@@ -1073,6 +1085,21 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     advanceTableCellAmount: { flex: 1 },
     advanceTableCellDate: { flex: 1 },
     advanceTableCellMode: { flex: 0.9 },
+    /* Fixed gutter for the withdraw/undo control, so the money columns keep
+       the same widths whether or not a row can be withdrawn. */
+    advanceTableCellDrop: { width: 22, alignItems: "flex-end" },
+    /* A row staged for withdrawal is struck through rather than removed, so
+       the action stays visible — and reversible — until Save. */
+    advanceRowWithdrawn: {
+      textDecorationLine: "line-through",
+      color: FAINT,
+    },
+    advanceHint: {
+      marginTop: 8,
+      fontSize: 11.5,
+      lineHeight: 16,
+      color: FAINT,
+    },
     advanceTableHeadText: {
       fontSize: 10.5,
       fontWeight: "700",

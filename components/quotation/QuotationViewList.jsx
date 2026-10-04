@@ -48,6 +48,9 @@ const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
   DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Invoiced", tint: "#5B8E2E" },
+  /* Set when a deletion request is approved. The server filters these out of
+     every list, so it is here only so a stale row never reads as "—". */
+  DELETED: { label: "Deleted", tint: "#DC2626" },
 };
 
 /* Breakpoints are measured on the table container, not the window, so the
@@ -772,6 +775,12 @@ function QuotationViewList(
     const shownKeys = columns.map((c) => c.key);
 
     const stats = [
+      { label: "Loading date", text: formatDate(item.loadingDate) },
+      /* Stamped by the system when the invoice is generated, so it is simply
+         absent until there is something to say. */
+      ...(item.loadedBy
+        ? [{ label: "Loaded by", text: item.loadedBy, wide: true }]
+        : []),
       { label: "Plant count", value: String(plants) },
       { label: "Special plants", value: String(special) },
       { label: "Total items", value: String(plants + special), accent: true },
@@ -874,6 +883,16 @@ function QuotationViewList(
               {formatAmount(item.totalAmount)}
             </Text>
           </View>
+          <View style={styles.cardMeta}>
+            <Text style={styles.statLabel}>Loading date</Text>
+            <Text style={styles.statText}>{formatDate(item.loadingDate)}</Text>
+          </View>
+          {item.loadedBy ? (
+            <View style={styles.cardMeta}>
+              <Text style={styles.statLabel}>Loaded by</Text>
+              <Text style={styles.statText}>{item.loadedBy}</Text>
+            </View>
+          ) : null}
           <View style={styles.cardMeta}>
             <Text style={styles.statLabel}>Mobile no</Text>
             <Text style={styles.statText}>{item.mobileNo || "—"}</Text>

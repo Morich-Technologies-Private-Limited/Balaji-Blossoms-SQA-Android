@@ -14,6 +14,7 @@ import {
   View,
 } from "react-native";
 
+import { findAllDeliveryPersons } from "../../api/deliveryPersons";
 import { downloadQuotationPdf } from "../../api/downloadPdfApis.js";
 import { fetchPackingList } from "../../api/fetchPacking";
 import { getQuotation } from "../../api/fetchQuotation";
@@ -25,22 +26,37 @@ import { searchPlants } from "../../api/plantApi";
 import {
   convertToInvoice,
   moveToLoadingShade,
+  requestQuotationDeletion,
 } from "../../api/quotationActions.js";
 import {
   fetchAllUnits,
   fetchPlantInventoryConfig,
   INVENTORY_MODES,
 } from "../../api/unitApi";
-import { updateQuotationPlants } from "../../api/updateQuotation";
+import {
+  updateLoadingDate,
+  updateQuotationPlants,
+} from "../../api/updateQuotation";
 
+/* Aliased: this file already has its own formatDate (dd-MMM-yyyy), which falls
+   back to today for a missing value. A loading date that isn't set must read as
+   "—", so the shared helper is used for it. */
+import {
+  formatDate as formatLoadingDate,
+  toApiDate,
+} from "../../utility/dates";
 import PdfShareSheet from "../../utility/PdfShareSheet";
 import { getCurrentRole, getCurrentUser } from "../../utility/secureStorage";
+import DatePickerSheet from "../common/DatePickerSheet";
 import makeStyles from "./Edit.styles";
 
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
   DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Invoiced", tint: "#16A34A" },
+  /* Set when a deletion request is approved. Deleted quotations are filtered
+     out of the lists, so this is only ever seen on one opened by direct link. */
+  DELETED: { label: "Deleted", tint: "#DC2626" },
 };
 
 /** Which levels a role may edit when /quotation/editLevel can't be reached —
@@ -434,23 +450,31 @@ const signatureOf = (lines) =>
     transport edit, an advance payment, or a scanned special plant alone still
     counts as dirty.
 
-    `advance` / `advanceMode` describe only the acting user's own row in the
-    advance ledger — every collector's row is tracked and saved separately,
-    so nobody's edit can be a no-op that silently drops someone else's row. */
+    The advance is described by what this session has *staged* — collections
+    added but not yet saved, and saved collections marked for removal. Rows
+    already on the server are not part of it: they are unchanged by definition,
+    and folding them in would make the screen read as dirty the moment a
+    colleague's collection landed. */
+const advanceSignatureOf = (drafts, removals) =>
+  `${(drafts || [])
+    .map((row) => `${toMoney(row.amount)}:${row.transactionMode || ""}`)
+    .join(",")}#${[...(removals || [])].sort().join(",")}`;
+
 const stateSignatureOf = (
   lines,
   discount,
   remark,
   transport,
-  advance,
-  advanceMode,
+  advanceDrafts,
+  advanceRemovals,
   specials,
 ) =>
   `${signatureOf(lines)}|${toMoney(discount)}|${String(
     remark ?? "",
-  ).trim()}|${toMoney(transport)}|${toMoney(advance)}|${advanceMode || ""}|${(
-    specials || []
-  )
+  ).trim()}|${toMoney(transport)}|${advanceSignatureOf(
+    advanceDrafts,
+    advanceRemovals,
+  )}|${(specials || [])
     .map((special) => `${special.barcodeId}:${special.checked ? 1 : 0}`)
     .sort()
     .join(",")}`;
@@ -670,204 +694,353 @@ function TransportModal({ styles, initialTransport, onApply, onClose }) {
 }
 
 /* ── advance payment modal ───────────────────────────────────────────
-   The advance is a ledger, one row per collector, and this modal only ever
-   edits the row belonging to the person currently signed in — nobody can
-   touch a colleague's collection. `otherTotal` is what everyone else has
-   already collected, shown for context and folded into the grand-total cap. */
+   The advance is a ledger of individual collections, so a collector records a
+   payment each time they take one rather than editing a running total. Several
+   can be staged here before a single Save carries them all.
+
+   What this sheet may touch is deliberately narrow: it adds the signed-in
+   user's own collections, and withdraws only rows that are both theirs and
+   taken today — the same rule the backend enforces. A colleague's collection,
+   and anyone's collection from an earlier day, are read-only history; the way
+   to correct those is another payment, not a rewrite.
+
+   Nothing here writes: APPLY hands the staged additions and withdrawals back
+   to the screen, and the Save that follows sends them. */
 function AdvanceModal({
   styles,
   grand,
-  otherTotal,
   entries,
-  initialAdvance,
-  initialMode,
+  initialDrafts,
+  initialRemovals,
   collectorName,
   onApply,
   onClose,
 }) {
   const C = styles.colors;
-  const [advance, setAdvance] = useState(initialAdvance);
-  const [mode, setMode] = useState(initialMode || "CASH");
 
-  const value = toMoney(advance);
-  const combined = otherTotal + value;
+  const [drafts, setDrafts] = useState(initialDrafts || []);
+  const [removals, setRemovals] = useState(initialRemovals || []);
+  const [amount, setAmount] = useState("");
+  const [mode, setMode] = useState("CASH");
+
+  /* Every saved row the screen handed in, minus the ones withdrawn here. */
+  const savedTotal = entries
+    .filter((row) => !row.pending && !removals.includes(row.transactionId))
+    .reduce((sum, row) => sum + row.amount, 0);
+  const draftTotal = drafts.reduce((sum, row) => sum + toMoney(row.amount), 0);
+
+  const entered = toMoney(amount);
+  const staged = savedTotal + draftTotal;
+  /* The typed amount counts towards the cap before it is added, so the warning
+     appears as it is typed rather than after the fact. */
+  const combined = staged + entered;
   const overTotal = combined > grand;
   const remaining = Math.max(0, grand - combined);
+  const canAdd = entered > 0 && !overTotal;
+
+  const addPayment = () => {
+    if (!canAdd) return;
+    setDrafts((prev) => [
+      ...prev,
+      {
+        key: `advance-draft-${nextKey()}`,
+        amount: String(entered),
+        transactionMode: mode,
+      },
+    ]);
+    setAmount("");
+  };
+
+  const dropDraft = (key) =>
+    setDrafts((prev) => prev.filter((row) => row.key !== key));
+
+  const toggleRemoval = (transactionId) =>
+    setRemovals((prev) =>
+      prev.includes(transactionId)
+        ? prev.filter((id) => id !== transactionId)
+        : [...prev, transactionId],
+    );
+
+  /* Saved rows come from the screen; pending ones are held here while the
+     sheet is open, so the list is rebuilt rather than taken as given. */
+  const rows = [
+    ...entries.filter((row) => !row.pending),
+    ...drafts.map((row) => ({
+      key: row.key,
+      transactionId: null,
+      pending: true,
+      removable: true,
+      name: "You",
+      amount: toMoney(row.amount),
+      date: null,
+      mode: transactionModeLabel(row.transactionMode),
+    })),
+  ];
 
   return (
     <Modal transparent animationType="fade" visible onRequestClose={onClose}>
       <Pressable style={styles.sheetBackdrop} onPress={onClose}>
         <Pressable style={styles.sheet} onPress={() => {}}>
           <View style={styles.sheetHeader}>
-            <Text style={styles.sheetTitle}>Advance payment</Text>
+            <Text style={styles.sheetTitle}>Advance payments</Text>
             <Text style={styles.sheetSubtitle}>
-              Your collection as {collectorName || "the signed-in user"}
+              Recording as {collectorName || "the signed-in user"} · collected{" "}
+              {formatAmount(staged)} of {formatAmount(grand)}
             </Text>
           </View>
 
-          <View style={styles.adjustBody}>
-            {entries && entries.length > 0 ? (
-              <View style={styles.adjustField}>
-                <View style={styles.moneyHead}>
-                  <Ionicons name="people-outline" size={15} color={C.MUTED} />
-                  <Text style={styles.moneyLabel}>Advance ledger</Text>
-                </View>
-                <View style={styles.advanceTable}>
-                  <View
-                    style={[styles.advanceTableRow, styles.advanceTableRowHead]}
-                  >
-                    <Text
-                      style={[
-                        styles.advanceTableHeadText,
-                        styles.advanceTableCellName,
-                      ]}
-                    >
-                      Name
-                    </Text>
-                    <Text
-                      style={[
-                        styles.advanceTableHeadText,
-                        styles.advanceTableCellAmount,
-                      ]}
-                    >
-                      Amount
-                    </Text>
-                    <Text
-                      style={[
-                        styles.advanceTableHeadText,
-                        styles.advanceTableCellDate,
-                      ]}
-                    >
-                      Collection date
-                    </Text>
-                    <Text
-                      style={[
-                        styles.advanceTableHeadText,
-                        styles.advanceTableCellMode,
-                      ]}
-                    >
-                      Mode
-                    </Text>
+          <ScrollView style={styles.sheetScroll} nestedScrollEnabled>
+            <View style={styles.adjustBody}>
+              {rows.length > 0 ? (
+                <View style={styles.adjustField}>
+                  <View style={styles.moneyHead}>
+                    <Ionicons
+                      name="receipt-outline"
+                      size={15}
+                      color={C.MUTED}
+                    />
+                    <Text style={styles.moneyLabel}>Collections</Text>
                   </View>
-                  {entries.map((row) => (
-                    <View key={row.key} style={styles.advanceTableRow}>
+
+                  <View style={styles.advanceTable}>
+                    <View
+                      style={[
+                        styles.advanceTableRow,
+                        styles.advanceTableRowHead,
+                      ]}
+                    >
                       <Text
                         style={[
-                          styles.advanceTableCellText,
+                          styles.advanceTableHeadText,
                           styles.advanceTableCellName,
                         ]}
-                        numberOfLines={1}
                       >
-                        {row.name}
+                        Name
                       </Text>
                       <Text
                         style={[
-                          styles.advanceTableCellText,
+                          styles.advanceTableHeadText,
                           styles.advanceTableCellAmount,
                         ]}
-                        numberOfLines={1}
                       >
-                        {formatAmount(row.amount)}
+                        Amount
                       </Text>
                       <Text
                         style={[
-                          styles.advanceTableCellText,
+                          styles.advanceTableHeadText,
                           styles.advanceTableCellDate,
-                          !row.date && styles.advanceTableCellMuted,
                         ]}
-                        numberOfLines={1}
                       >
-                        {row.date ? formatDate(row.date) : "—"}
+                        Collected
                       </Text>
                       <Text
                         style={[
-                          styles.advanceTableCellText,
+                          styles.advanceTableHeadText,
                           styles.advanceTableCellMode,
-                          !row.mode && styles.advanceTableCellMuted,
                         ]}
-                        numberOfLines={1}
                       >
-                        {row.mode || "—"}
+                        Mode
                       </Text>
+                      <View style={styles.advanceTableCellDrop} />
                     </View>
-                  ))}
-                </View>
-              </View>
-            ) : null}
 
-            <View style={styles.adjustField}>
-              <View style={styles.moneyHead}>
-                <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
-                <Text style={styles.moneyLabel}>Advance amount</Text>
-              </View>
-              <View
-                style={[styles.chargeBoxLg, overTotal && styles.qtyBoxWarn]}
-              >
-                <Text style={styles.chargePrefixLg}>₹</Text>
-                <TextInput
-                  style={styles.chargeInputLg}
-                  value={advance}
-                  onChangeText={(v) => setAdvance(v.replace(/[^0-9.]/g, ""))}
-                  keyboardType="decimal-pad"
-                  selectTextOnFocus
-                  autoFocus
-                  placeholder="0"
-                  placeholderTextColor={C.FAINT}
-                />
-                <Text style={styles.chargeSuffixLg}>received</Text>
-              </View>
+                    {rows.map((row) => {
+                      const withdrawn =
+                        !row.pending && removals.includes(row.transactionId);
 
-              {overTotal ? (
-                <Text style={styles.adjustError}>
-                  The combined advance is more than the grand total (
-                  {formatAmount(grand)}).
-                </Text>
-              ) : (
-                <View style={styles.moneyReadItem}>
-                  <Ionicons name="cash-outline" size={15} color={C.GREEN} />
-                  <Text style={styles.moneyReadText}>
-                    Remaining {formatAmount(remaining)}
+                      return (
+                        <View key={row.key} style={styles.advanceTableRow}>
+                          <Text
+                            style={[
+                              styles.advanceTableCellText,
+                              styles.advanceTableCellName,
+                              withdrawn && styles.advanceRowWithdrawn,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {row.name}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.advanceTableCellText,
+                              styles.advanceTableCellAmount,
+                              withdrawn && styles.advanceRowWithdrawn,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {formatAmount(row.amount)}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.advanceTableCellText,
+                              styles.advanceTableCellDate,
+                              (!row.date || withdrawn) &&
+                                styles.advanceTableCellMuted,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {row.pending
+                              ? "Not saved"
+                              : row.date
+                                ? formatDate(row.date)
+                                : "—"}
+                          </Text>
+                          <Text
+                            style={[
+                              styles.advanceTableCellText,
+                              styles.advanceTableCellMode,
+                              (!row.mode || withdrawn) &&
+                                styles.advanceTableCellMuted,
+                            ]}
+                            numberOfLines={1}
+                          >
+                            {row.mode || "—"}
+                          </Text>
+
+                          <View style={styles.advanceTableCellDrop}>
+                            {row.removable ? (
+                              <Pressable
+                                hitSlop={8}
+                                accessibilityRole="button"
+                                accessibilityLabel={
+                                  row.pending
+                                    ? "Discard this payment"
+                                    : withdrawn
+                                      ? "Keep this payment"
+                                      : "Withdraw this payment"
+                                }
+                                onPress={() =>
+                                  row.pending
+                                    ? dropDraft(row.key)
+                                    : toggleRemoval(row.transactionId)
+                                }
+                              >
+                                <Ionicons
+                                  name={
+                                    withdrawn
+                                      ? "arrow-undo-outline"
+                                      : "close-circle-outline"
+                                  }
+                                  size={17}
+                                  color={withdrawn ? C.NAVY : C.RED}
+                                />
+                              </Pressable>
+                            ) : null}
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+
+                  <Text style={styles.advanceHint}>
+                    Only your own collections, taken today, can be withdrawn.
+                    Anything older is corrected by recording another payment.
                   </Text>
                 </View>
-              )}
-            </View>
+              ) : null}
 
-            <View style={styles.adjustField}>
-              <View style={styles.moneyHead}>
-                <Ionicons name="card-outline" size={15} color={C.NAVY} />
-                <Text style={styles.moneyLabel}>Collected via</Text>
+              <View style={styles.adjustField}>
+                <View style={styles.moneyHead}>
+                  <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
+                  <Text style={styles.moneyLabel}>Record a payment</Text>
+                </View>
+                <View
+                  style={[styles.chargeBoxLg, overTotal && styles.qtyBoxWarn]}
+                >
+                  <Text style={styles.chargePrefixLg}>₹</Text>
+                  <TextInput
+                    style={styles.chargeInputLg}
+                    value={amount}
+                    onChangeText={(v) => setAmount(v.replace(/[^0-9.]/g, ""))}
+                    keyboardType="decimal-pad"
+                    selectTextOnFocus
+                    placeholder="0"
+                    placeholderTextColor={C.FAINT}
+                    returnKeyType="done"
+                    onSubmitEditing={addPayment}
+                  />
+                  <Text style={styles.chargeSuffixLg}>received</Text>
+                </View>
+
+                {overTotal ? (
+                  <Text style={styles.adjustError}>
+                    That takes the advance past the grand total (
+                    {formatAmount(grand)}).
+                  </Text>
+                ) : (
+                  <View style={styles.moneyReadItem}>
+                    <Ionicons name="cash-outline" size={15} color={C.GREEN} />
+                    <Text style={styles.moneyReadText}>
+                      Remaining {formatAmount(remaining)}
+                    </Text>
+                  </View>
+                )}
               </View>
-              <View style={styles.reasonChipRow}>
-                {TRANSACTION_MODES.map((option) => {
-                  const active = option.value === mode;
-                  return (
-                    <Pressable
-                      key={option.value}
-                      style={({ hovered, pressed }) => [
-                        styles.reasonChip,
-                        active && styles.reasonChipActive,
-                        (hovered || pressed) &&
-                          !active &&
-                          styles.reasonChipHover,
-                      ]}
-                      accessibilityRole="radio"
-                      accessibilityState={{ checked: active }}
-                      onPress={() => setMode(option.value)}
-                    >
-                      <Text
-                        style={[
-                          styles.reasonChipText,
-                          active && styles.reasonChipTextActive,
+
+              <View style={styles.adjustField}>
+                <View style={styles.moneyHead}>
+                  <Ionicons name="card-outline" size={15} color={C.NAVY} />
+                  <Text style={styles.moneyLabel}>Collected via</Text>
+                </View>
+                <View style={styles.reasonChipRow}>
+                  {TRANSACTION_MODES.map((option) => {
+                    const active = option.value === mode;
+                    return (
+                      <Pressable
+                        key={option.value}
+                        style={({ hovered, pressed }) => [
+                          styles.reasonChip,
+                          active && styles.reasonChipActive,
+                          (hovered || pressed) &&
+                            !active &&
+                            styles.reasonChipHover,
                         ]}
+                        accessibilityRole="radio"
+                        accessibilityState={{ checked: active }}
+                        onPress={() => setMode(option.value)}
                       >
-                        {option.label}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
+                        <Text
+                          style={[
+                            styles.reasonChipText,
+                            active && styles.reasonChipTextActive,
+                          ]}
+                        >
+                          {option.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
               </View>
+
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.adjustAddBtn,
+                  (hovered || pressed) && canAdd && styles.adjustAddBtnHover,
+                  !canAdd && styles.adjustAddBtnDisabled,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Add this payment to the list"
+                onPress={addPayment}
+                disabled={!canAdd}
+              >
+                <Ionicons
+                  name="add-circle-outline"
+                  size={16}
+                  color={canAdd ? C.NAVY : C.FAINT}
+                />
+                <Text
+                  style={[
+                    styles.adjustAddText,
+                    !canAdd && styles.advanceTableCellMuted,
+                  ]}
+                  numberOfLines={1}
+                >
+                  ADD PAYMENT
+                </Text>
+              </Pressable>
             </View>
-          </View>
+          </ScrollView>
 
           <View style={styles.modalActions}>
             <Pressable
@@ -883,11 +1056,25 @@ function AdvanceModal({
             <Pressable
               style={({ hovered, pressed }) => [
                 styles.modalApply,
-                (hovered || pressed) && !overTotal && styles.primaryButtonHover,
-                overTotal && styles.primaryButtonDisabled,
+                (hovered || pressed) && styles.primaryButtonHover,
               ]}
-              onPress={() => onApply(value > 0 ? String(value) : "", mode)}
-              disabled={overTotal}
+              /* A typed but unadded amount is the commonest way to lose a
+                 payment here, so APPLY takes it along instead of dropping it. */
+              onPress={() =>
+                onApply(
+                  canAdd
+                    ? [
+                        ...drafts,
+                        {
+                          key: `advance-draft-${nextKey()}`,
+                          amount: String(entered),
+                          transactionMode: mode,
+                        },
+                      ]
+                    : drafts,
+                  removals,
+                )
+              }
             >
               <Text style={styles.modalApplyText}>APPLY</Text>
             </Pressable>
@@ -1315,6 +1502,10 @@ function DeleteReasonModal({
   request,
   busy,
   error,
+  /* Defaults describe removing a line, which is what this gate was written
+     for; deleting the whole quotation passes its own wording. */
+  confirmLabel = "DELETE & SAVE",
+  busyLabel = "SAVING…",
   onSubmit,
   onClose,
 }) {
@@ -1487,7 +1678,7 @@ function DeleteReasonModal({
                   <Ionicons name="trash-outline" size={17} color="#FFFFFF" />
                 )}
                 <Text style={styles.modalApplyText}>
-                  {busy ? "SAVING…" : "DELETE & SAVE"}
+                  {busy ? busyLabel : confirmLabel}
                 </Text>
               </Pressable>
             </View>
@@ -1574,6 +1765,126 @@ function CloseConfirmModal({
               disabled={busy}
             >
               <Text style={styles.confirmGhostText}>Keep editing</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
+/* ── loaded-by picker ────────────────────────────────────────────────
+   convertToInvoice records who physically loaded the order, so the invoice
+   action goes through this list first. The names come from
+   /info/deliverPerson/findAll rather than a free-text box: `loadedBy` is
+   stored on the invoice and reported on, and typed names would not group. */
+function LoadedByModal({
+  styles,
+  persons,
+  loading,
+  error,
+  busy,
+  onSelect,
+  onRetry,
+  onClose,
+}) {
+  const C = styles.colors;
+  const dismiss = busy ? undefined : onClose;
+
+  return (
+    <Modal
+      transparent
+      animationType="fade"
+      visible
+      onRequestClose={busy ? () => {} : onClose}
+    >
+      <Pressable style={styles.sheetBackdrop} onPress={dismiss}>
+        <Pressable style={styles.sheet} onPress={() => {}}>
+          <View style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle}>Loaded by</Text>
+            <Text style={styles.sheetSubtitle}>
+              Who loaded this order? The invoice is generated once you pick.
+            </Text>
+          </View>
+
+          {error ? (
+            <View style={styles.banner}>
+              <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
+              <Text style={styles.bannerText}>{error}</Text>
+            </View>
+          ) : null}
+
+          {loading ? (
+            <View style={styles.loadingWrap}>
+              <ActivityIndicator color={C.NAVY} />
+              <Text style={styles.loadingText}>Loading delivery people…</Text>
+            </View>
+          ) : (
+            <ScrollView style={styles.sheetScroll} nestedScrollEnabled>
+              {persons.length === 0 ? (
+                <Text style={styles.resultEmpty}>
+                  No delivery people are set up yet.
+                </Text>
+              ) : null}
+
+              {persons.map((person) => (
+                <Pressable
+                  key={person.id ?? person.deliveryPersonName}
+                  style={({ hovered }) => [
+                    styles.optionRow,
+                    hovered && styles.optionRowHover,
+                  ]}
+                  onPress={() => onSelect(person)}
+                  disabled={busy}
+                >
+                  <View style={styles.fill}>
+                    <Text style={styles.optionText}>
+                      {person.deliveryPersonName}
+                    </Text>
+                    {person.contactNumber ? (
+                      <Text style={styles.optionMeta}>
+                        {person.contactNumber}
+                      </Text>
+                    ) : null}
+                  </View>
+                  {busy ? null : (
+                    <Ionicons
+                      name="chevron-forward"
+                      size={16}
+                      color={C.FAINT}
+                    />
+                  )}
+                </Pressable>
+              ))}
+            </ScrollView>
+          )}
+
+          <View style={styles.confirmActions}>
+            {/* Retry is for an empty or failed list. A failed conversion leaves
+                the names on screen, so picking again is the retry. */}
+            {!loading && persons.length === 0 ? (
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.confirmPrimaryBtn,
+                  (hovered || pressed) && !busy && styles.primaryButtonHover,
+                  busy && styles.primaryButtonDisabled,
+                ]}
+                onPress={onRetry}
+                disabled={busy}
+              >
+                <Ionicons name="refresh-outline" size={17} color="#FFFFFF" />
+                <Text style={styles.confirmPrimaryText}>TRY AGAIN</Text>
+              </Pressable>
+            ) : null}
+
+            <Pressable
+              style={styles.confirmGhostBtn}
+              onPress={onClose}
+              disabled={busy}
+            >
+              <Text style={styles.confirmGhostText}>
+                {busy ? "Generating…" : "Cancel"}
+              </Text>
             </Pressable>
           </View>
         </Pressable>
@@ -1691,6 +2002,16 @@ function EditInner({ quotation, onClose, onSaved }) {
      quotation, so the flow reads the same for all of them — but only the
      delivery team can ever press it. */
   const showInvoiceAction = canEdit && isDelivery;
+  /* The loading date is planning, not picking: it stays changeable for as long
+     as the quotation is editable at all, at Draft and in the shade alike. Once
+     invoiced the order has left, so it locks with everything else. */
+  const canEditLoadingDate = canEdit && !isInvoiced;
+  /* Asking for the quotation to be deleted is available right up to the
+     invoice and closes there. The endpoint itself also accepts an invoiced
+     order (by invoiceId, with a refund worked out and a Tally-sync block), but
+     this screen only ever raises one for a quotation that has not been
+     invoiced. */
+  const canDeleteQuotation = canEdit && !isInvoiced;
   /* Draft is not history. Nothing before this point is audited or reasoned. */
   const auditActive = !isDraft;
 
@@ -1731,16 +2052,20 @@ function EditInner({ quotation, onClose, onSaved }) {
     const value = toMoney(quotation?.transportationCost);
     return value > 0 ? String(value) : "";
   });
-  /* The advance is a ledger, one row per collector (emailId, collectorName,
-     amount, collectionDate, transactionMode). `advance` / `advanceMode` hold
-     only the signed-in user's own draft row — which row that is depends on
-     `userId`, resolved asynchronously in the bootstrap effect below, so both
-     start empty and are hydrated (along with the baseline) once it resolves. */
+  /* The advance is a ledger of individual collections (transactionId, emailId,
+     collectorName, amount, collectionDate, transactionMode). One collector may
+     hold as many rows as they have taken payments, right up until the invoice
+     is generated.
+
+     `advanceLedger` is what the server holds. `advanceDrafts` are collections
+     entered here and not yet saved; `advanceRemovals` are transactionIds of
+     saved rows marked for deletion. Both are staged until Save and only then
+     sent — so nothing in the ledger is rewritten behind a colleague's back. */
   const [advanceLedger, setAdvanceLedger] = useState(
     () => quotation?.advancePaymentList || [],
   );
-  const [advance, setAdvance] = useState("");
-  const [advanceMode, setAdvanceMode] = useState("CASH");
+  const [advanceDrafts, setAdvanceDrafts] = useState([]);
+  const [advanceRemovals, setAdvanceRemovals] = useState([]);
   const [transportOpen, setTransportOpen] = useState(false);
   const [discountOpen, setDiscountOpen] = useState(false);
   const [advanceOpen, setAdvanceOpen] = useState(false);
@@ -1765,8 +2090,8 @@ function EditInner({ quotation, onClose, onSaved }) {
       quotation?.additionalDiscount,
       quotation?.additionalDiscountRemark,
       quotation?.transportationCost,
-      "",
-      "CASH",
+      [],
+      [],
       initialSpecials,
     ),
   );
@@ -1795,46 +2120,114 @@ function EditInner({ quotation, onClose, onSaved }) {
   const [userName, setUserName] = useState(null);
   const [pdf, setPdf] = useState(null);
 
+  /* When the order is to be loaded. Its own endpoint, so it is held apart from
+     the plant edits and written the moment a day is picked — it is never part
+     of a Save. */
+  const [loadingDate, setLoadingDate] = useState(quotation?.loadingDate);
+  const [loadingDateOpen, setLoadingDateOpen] = useState(false);
+
+  /* Who physically loaded the order. The system stamps it when the invoice is
+     generated, so it is read-only here and shown only once it exists. */
+  const loadedBy = String(quotation?.loadedBy ?? "").trim();
+
+  /* Loaded by: the delivery person the invoice is stamped with. The list is
+     pulled when the picker opens, so it is never fetched for the roles and
+     levels that can't invoice at all. */
+  const [loadedByOpen, setLoadedByOpen] = useState(false);
+  const [deliveryPersons, setDeliveryPersons] = useState([]);
+  const [loadingPersons, setLoadingPersons] = useState(false);
+  const [personsError, setPersonsError] = useState(null);
+
   /* My own row in the advance ledger, and what everyone else has collected.
      A row is only editable by the collector it belongs to, and only while
      it's still same-day editable — never collected yet, or collected earlier
      today. A row collected on an earlier day is locked, mirroring the
      backend's rule. */
-  const myAdvanceEntry = useMemo(
-    () =>
-      advanceLedger.find((row) => norm(row?.emailId) === norm(userId)) || null,
-    [advanceLedger, userId],
+  /* Collections still on the server after this session's pending removals are
+     applied. Refund rows are the backend's own bookkeeping and are never part
+     of what was collected. */
+  const collectionRows = useMemo(
+    () => advanceLedger.filter((row) => row?.transactionType !== "REFUND"),
+    [advanceLedger],
   );
-  const otherAdvanceTotal = useMemo(
+  const savedAdvanceTotal = useMemo(
     () =>
-      advanceLedger
-        .filter((row) => norm(row?.emailId) !== norm(userId))
+      collectionRows
+        .filter((row) => !advanceRemovals.includes(row?.transactionId))
         .reduce((sum, row) => sum + toMoney(row?.amount), 0),
-    [advanceLedger, userId],
+    [collectionRows, advanceRemovals],
   );
-  const advanceUnlocked =
-    !myAdvanceEntry || isSameDay(myAdvanceEntry.collectionDate, new Date());
-  const canEditAdvance = canEditTotals && isDraft && advanceUnlocked;
+  const draftAdvanceTotal = useMemo(
+    () => advanceDrafts.reduce((sum, row) => sum + toMoney(row.amount), 0),
+    [advanceDrafts],
+  );
+  const advanceTotal = savedAdvanceTotal + draftAdvanceTotal;
 
-  /* One line per collector, for "who collected what" display. */
-  const advanceBreakdown = useMemo(
-    () =>
-      advanceLedger
-        .filter((row) => toMoney(row?.amount) > 0)
-        .map((row, index) => {
-          const mine = norm(row?.emailId) === norm(userId);
-          return {
-            key: row?.emailId || `advance-row-${index}`,
-            mine,
-            name: mine
-              ? "You"
-              : row?.collectorName || row?.emailId || "Unknown",
-            amount: toMoney(row?.amount),
-            date: row?.collectionDate || null,
-            mode: transactionModeLabel(row?.transactionMode),
-          };
-        }),
-    [advanceLedger, userId],
+  /* Collecting money is not the same permission as editing the order, so the
+     advance has its own gate rather than riding on canEditTotals.
+
+     Money gets taken at both ends — sales take it against a Draft, the
+     delivery team take the balance in the loading shade — so both can record a
+     payment at either level. It closes only when the invoice is generated,
+     which is where the backend closes the ledger too. A READ-only onlooker
+     still cannot collect. A saved row can only be withdrawn on the day it was
+     collected; after that the correction is a new row, not a rewrite. */
+  const canEditAdvance =
+    accessResolved &&
+    !isInvoiced &&
+    (access === "EDIT" || role === "SALES" || isDeliveryTeam);
+
+  /* One line per collection — not per collector — so several payments from the
+     same person each show with their own date, amount and mode.
+
+     Every collection is listed, including ones staged for withdrawal: the
+     sheet strikes those through so the action stays visible and reversible
+     until Save. Consumers that show a live figure filter `withdrawn` out. */
+  const advanceBreakdown = useMemo(() => {
+    const saved = collectionRows.map((row, index) => {
+      const mine = norm(row?.emailId) === norm(userId);
+      return {
+        key: row?.transactionId || `advance-row-${index}`,
+        transactionId: row?.transactionId || null,
+        mine,
+        pending: false,
+        withdrawn: advanceRemovals.includes(row?.transactionId),
+        /* Only the collector may withdraw their own row, and only on the day
+           they took it — the same rule the backend enforces. A row with no
+           transactionId predates the ledger's ids and cannot be addressed
+           until the next save stamps it. */
+        removable:
+          mine &&
+          !!row?.transactionId &&
+          isSameDay(row?.collectionDate, new Date()),
+        name: mine ? "You" : row?.collectorName || row?.emailId || "Unknown",
+        amount: toMoney(row?.amount),
+        date: row?.collectionDate || null,
+        mode: transactionModeLabel(row?.transactionMode),
+      };
+    });
+
+    const pending = advanceDrafts.map((row) => ({
+      key: row.key,
+      transactionId: null,
+      mine: true,
+      pending: true,
+      withdrawn: false,
+      removable: true,
+      name: "You",
+      amount: toMoney(row.amount),
+      date: null,
+      mode: transactionModeLabel(row.transactionMode),
+    }));
+
+    return [...saved, ...pending].filter((row) => row.amount > 0);
+  }, [collectionRows, advanceDrafts, advanceRemovals, userId]);
+
+  /* What is actually collected right now — the strip and the chip show this,
+     the sheet shows the full list. */
+  const advanceVisibleRows = useMemo(
+    () => advanceBreakdown.filter((row) => !row.withdrawn),
+    [advanceBreakdown],
   );
 
   /* The delete reason modal is a gate in front of a pending delete. */
@@ -2017,24 +2410,17 @@ function EditInner({ quotation, onClose, onSaved }) {
         setPackings(packingResponse.payload || []);
       }
 
-      /* Now that the signed-in user is known, pull their own row (if any)
-         out of the advance ledger and correct the baseline to match, so the
-         screen doesn't read as dirty before anything has actually changed. */
-      const mine = (quotation?.advancePaymentList || []).find(
-        (row) => norm(row?.emailId) === norm(email),
-      );
-      const mineAmount = toMoney(mine?.amount);
-      const mineText = mineAmount > 0 ? String(mineAmount) : "";
-      const mineMode = mine?.transactionMode || "CASH";
-      setAdvance(mineText);
-      setAdvanceMode(mineMode);
+      /* The advance no longer needs the signed-in user to be resolved before
+         the baseline is right: nothing is staged yet, so the advance part of
+         the signature is empty either way. The baseline is still restated here
+         so it is built from one place. */
       baselineRef.current = stateSignatureOf(
         initialLines,
         quotation?.additionalDiscount,
         quotation?.additionalDiscountRemark,
         quotation?.transportationCost,
-        mineText,
-        mineMode,
+        [],
+        [],
         initialSpecials,
       );
     })();
@@ -2606,7 +2992,10 @@ function EditInner({ quotation, onClose, onSaved }) {
   /* ── pickers ─────────────────────────────────────────────────────── */
   const openUnitPicker = useCallback(
     async (line) => {
-      const needsUnits = !takePlantFromAvailableUnit && allUnits === null;
+      /* Both modes need the full unit list now: ANY_UNIT lists every unit, and
+         AVAILABLE_UNIT falls back to the same list for a plant that nothing
+         stocks, which would otherwise open an empty, unusable picker. */
+      const needsUnits = allUnits === null;
       setPicker({
         type: "unit",
         key: line.key,
@@ -2636,7 +3025,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         prev && prev.key === line.key ? { ...prev, loading: false } : prev,
       );
     },
-    [updateLine, takePlantFromAvailableUnit, allUnits, loadAllUnits],
+    [updateLine, allUnits, loadAllUnits],
   );
 
   const openPackingPicker = useCallback((key) => {
@@ -2739,7 +3128,12 @@ function EditInner({ quotation, onClose, onSaved }) {
       (allUnits || []).map((unit) => [unit.unitId, unit]),
     );
 
-    if (takePlantFromAvailableUnit) {
+    /* AVAILABLE_UNIT normally limits the picker to the units that stock the
+       plant. A plant nothing stocks — a new variety, or one whose inventory
+       hasn't been entered yet — would leave the picker empty and the row
+       impossible to complete, so it falls back to the full list below with the
+       stock figures merged in, exactly as ANY_UNIT shows it. */
+    if (takePlantFromAvailableUnit && inventory.length > 0) {
       return inventory
         .map((row) => {
           const unit = unitById.get(row.unitId);
@@ -2790,7 +3184,7 @@ function EditInner({ quotation, onClose, onSaved }) {
     const beforeDiscount = subtotal + transportValue;
     const discountValue = Math.min(toMoney(discount), beforeDiscount);
     const grand = beforeDiscount - discountValue;
-    const advanceValue = Math.min(otherAdvanceTotal + toMoney(advance), grand);
+    const advanceValue = Math.min(advanceTotal, grand);
 
     return {
       rows: lines.length,
@@ -2807,7 +3201,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       advance: advanceValue,
       remaining: Math.max(0, grand - advanceValue),
     };
-  }, [lines, specials, discount, transport, advance, otherAdvanceTotal]);
+  }, [lines, specials, discount, transport, advanceTotal]);
 
   /* ── change tracking ─────────────────────────────────────────────── */
   const dirty = useMemo(
@@ -2817,8 +3211,8 @@ function EditInner({ quotation, onClose, onSaved }) {
         discount,
         discountRemark,
         transport,
-        advance,
-        advanceMode,
+        advanceDrafts,
+        advanceRemovals,
         specials,
       ) !== baselineRef.current,
     [
@@ -2826,8 +3220,8 @@ function EditInner({ quotation, onClose, onSaved }) {
       discount,
       discountRemark,
       transport,
-      advance,
-      advanceMode,
+      advanceDrafts,
+      advanceRemovals,
       specials,
     ],
   );
@@ -2918,9 +3312,11 @@ function EditInner({ quotation, onClose, onSaved }) {
     setDiscountOpen(false);
   }, []);
 
-  const applyAdvance = useCallback((value, mode) => {
-    setAdvance(value);
-    setAdvanceMode(mode);
+  /* The advance sheet hands back the whole staging area — the collections it
+     added and the saved rows it withdrew — rather than a single amount. */
+  const applyAdvance = useCallback((drafts, removals) => {
+    setAdvanceDrafts(drafts);
+    setAdvanceRemovals(removals);
     setAdvanceOpen(false);
   }, []);
 
@@ -2929,10 +3325,23 @@ function EditInner({ quotation, onClose, onSaved }) {
     (payload) => {
       if (!payload) return;
 
-      const nextLevel = payload.level ?? level;
+      /* A save is never a move. Only Process and Generate invoice advance the
+         level, so the echo's level is read for the rebuild but never promoted
+         onto the screen — a backend that hands back a moved level would
+         otherwise flip a sales person's Draft into the loading shade mid-edit,
+         swapping the actions under them and firing the list's
+         share-on-level-change popup. A level that really did move is picked up
+         on the next open, which refetches. */
+      const nextLevel = level;
       const nextIsDraft = nextLevel === "DRAFT";
 
-      setLevel(nextLevel);
+      if (payload.level && payload.level !== level) {
+        console.warn(
+          `Save echoed level ${payload.level} for quotation ${
+            payload.quotationId ?? quotation?.quotationId
+          }, which was open at ${level}. Ignoring — /updatePlants must not change the level.`,
+        );
+      }
 
       /* Rows are rebuilt from the echo, but two things only this screen knows
          are carried across: the offer figures (display-only, never saved) and
@@ -2981,20 +3390,14 @@ function EditInner({ quotation, onClose, onSaved }) {
       const nextTransport = toMoney(payload.transportationCost);
       const nextTransportText = nextTransport > 0 ? String(nextTransport) : "";
 
-      const nextLedger = payload.advancePaymentList || [];
-      const mine = nextLedger.find(
-        (row) => norm(row?.emailId) === norm(userId),
-      );
-      const nextAdvance = toMoney(mine?.amount);
-      const nextAdvanceText = nextAdvance > 0 ? String(nextAdvance) : "";
-      const nextAdvanceMode = mine?.transactionMode || "CASH";
-
+      /* Everything staged has now been applied by the server, so the echo is
+         the whole truth about the ledger and the staging area empties. */
       setDiscount(nextDiscountText);
       setDiscountRemark(nextRemark);
       setTransport(nextTransportText);
-      setAdvanceLedger(nextLedger);
-      setAdvance(nextAdvanceText);
-      setAdvanceMode(nextAdvanceMode);
+      setAdvanceLedger(payload.advancePaymentList || []);
+      setAdvanceDrafts([]);
+      setAdvanceRemovals([]);
 
       setAuditTrail(
         (payload.invoiceUpdateDetailList || []).map(auditFromRecord),
@@ -3009,12 +3412,12 @@ function EditInner({ quotation, onClose, onSaved }) {
         nextDiscountText,
         nextRemark,
         nextTransportText,
-        nextAdvanceText,
-        nextAdvanceMode,
+        [],
+        [],
         nextSpecials,
       );
     },
-    [level, userId, lines, specials],
+    [level, lines, specials, quotation?.quotationId],
   );
 
   /* ── save ────────────────────────────────────────────────────────────
@@ -3035,7 +3438,6 @@ function EditInner({ quotation, onClose, onSaved }) {
 
     const discountAmount = toMoney(discount);
     const transportAmount = toMoney(transport);
-    const advanceAmount = toMoney(advance);
 
     const reasonForLine = (line) => {
       if (!auditActive || line.isNew) return null;
@@ -3056,6 +3458,13 @@ function EditInner({ quotation, onClose, onSaved }) {
       return parts.length > 0 ? parts.join(" · ") : null;
     };
 
+    /* The delivery tick is loading-shade data: the boxes only exist at
+       DELIVERY_SHADE, and only for the delivery team. A Draft save has no
+       ticks to report, so the tick fields are left out of it entirely —
+       sending picking data from a sales save is what reads, server-side, as
+       "delivery has started on this order". */
+    const sendTicks = isDelivery;
+
     const body = {
       plantList: lines.map((line) => ({
         plantId: line.plantId,
@@ -3071,14 +3480,19 @@ function EditInner({ quotation, onClose, onSaved }) {
              `specialPlant`/`isSpecialPlant` do below: which one Jackson binds
              depends on the ObjectMapper's handling of Lombok's
              isPlantChecked(). Drop whichever one the backend does not read. */
-        plantChecked: !!line.checked,
-        isPlantChecked: !!line.checked,
+        ...(sendTicks
+          ? { plantChecked: !!line.checked, isPlantChecked: !!line.checked }
+          : null),
         reason: lineChanged(line) ? reasonForLine(line) : null,
       })),
       specialPlantList: specials.map((special) => ({
         barcodeId: special.barcodeId,
-        plantChecked: !!special.checked,
-        isPlantChecked: !!special.checked,
+        ...(sendTicks
+          ? {
+              plantChecked: !!special.checked,
+              isPlantChecked: !!special.checked,
+            }
+          : null),
       })),
       /* The delivery tick of every surviving row in one flat list — regular
          lines first, then specials — so the backend can settle the ticks in a
@@ -3087,41 +3501,55 @@ function EditInner({ quotation, onClose, onSaved }) {
          entry means the row is gone, never that its tick was left alone.
          Rows are identified the same way removals are (plantId for a regular
          line, barcode for a special), and both Jackson spellings of each
-         boolean go out for the same reason they do everywhere else here. */
-      plantCheckedList: [
-        ...lines.map((line) => ({
-          plantId: line.plantId,
-          barcodeId: null,
-          specialPlant: false,
-          isSpecialPlant: false,
-          plantChecked: !!line.checked,
-          isPlantChecked: !!line.checked,
-        })),
-        ...specials.map((special) => ({
-          plantId: null,
-          barcodeId: special.barcodeId ?? null,
-          specialPlant: true,
-          isSpecialPlant: true,
-          plantChecked: !!special.checked,
-          isPlantChecked: !!special.checked,
-        })),
-      ],
+         boolean go out for the same reason they do everywhere else here.
+
+         Omitted entirely from a Draft save — see `sendTicks` above. */
+      ...(sendTicks
+        ? {
+            plantCheckedList: [
+              ...lines.map((line) => ({
+                plantId: line.plantId,
+                barcodeId: null,
+                specialPlant: false,
+                isSpecialPlant: false,
+                plantChecked: !!line.checked,
+                isPlantChecked: !!line.checked,
+              })),
+              ...specials.map((special) => ({
+                plantId: null,
+                barcodeId: special.barcodeId ?? null,
+                specialPlant: true,
+                isSpecialPlant: true,
+                plantChecked: !!special.checked,
+                isPlantChecked: !!special.checked,
+              })),
+            ],
+          }
+        : null),
       additionalDiscount: discountAmount,
       additionalDiscountRemark:
         discountAmount > 0 ? discountRemark.trim() : null,
       transportationCost: transportAmount,
-      /* The flat advanceAmount field is gone — the backend only reads the
-           ledger now. Only the signed-in user's own row is ever sent, so a
-           save can never touch a colleague's collected advance; resending an
-           unchanged amount is a no-op on the server. */
+      /* Only what this session staged goes out: new collections carry no
+           transactionId and are appended by the server, withdrawals name the
+           transaction and send 0. Rows nobody touched are left out entirely,
+           so a save can never disturb a colleague's collection — or re-send
+           one of ours as if it were new. */
       advanceTransactionList: userId
         ? [
-            {
+            ...advanceDrafts
+              .filter((row) => toMoney(row.amount) > 0)
+              .map((row) => ({
+                emailId: userId,
+                collectorName: userName || userId,
+                amount: toMoney(row.amount),
+                transactionMode: row.transactionMode,
+              })),
+            ...advanceRemovals.map((transactionId) => ({
+              transactionId,
               emailId: userId,
-              collectorName: userName || userId,
-              amount: advanceAmount,
-              transactionMode: advanceMode,
-            },
+              amount: 0,
+            })),
           ]
         : [],
       /* Every row that left the quotation since the last save, each with the
@@ -3171,29 +3599,35 @@ function EditInner({ quotation, onClose, onSaved }) {
             isNew: false,
           })),
         );
-        setAdvanceLedger((prev) => {
-          const others = prev.filter(
-            (row) => norm(row?.emailId) !== norm(userId),
-          );
-          if (advanceAmount <= 0) return others;
-          return [
-            ...others,
-            {
+        /* No echo, so the staged ledger changes are replayed locally: drop the
+           withdrawn rows, append the new collections. The server owns the
+           transaction ids, so the local ones are provisional and are replaced
+           wholesale by the next echo. */
+        const collectedAt = new Date().toISOString();
+        setAdvanceLedger((prev) => [
+          ...prev.filter(
+            (row) => !advanceRemovals.includes(row?.transactionId),
+          ),
+          ...advanceDrafts
+            .filter((row) => toMoney(row.amount) > 0)
+            .map((row) => ({
+              transactionId: null,
               emailId: userId,
               collectorName: userName || userId,
-              amount: advanceAmount,
-              collectionDate: new Date().toISOString(),
-              transactionMode: advanceMode,
-            },
-          ];
-        });
+              amount: toMoney(row.amount),
+              collectionDate: collectedAt,
+              transactionMode: row.transactionMode,
+            })),
+        ]);
+        setAdvanceDrafts([]);
+        setAdvanceRemovals([]);
         baselineRef.current = stateSignatureOf(
           lines.map(settleLine),
           discount,
           discountRemark,
           transport,
-          advance,
-          advanceMode,
+          [],
+          [],
           specials,
         );
       }
@@ -3217,9 +3651,10 @@ function EditInner({ quotation, onClose, onSaved }) {
     discount,
     discountRemark,
     transport,
-    advance,
-    advanceMode,
+    advanceDrafts,
+    advanceRemovals,
     auditActive,
+    isDelivery,
     rehydrate,
   ]);
 
@@ -3376,6 +3811,83 @@ function EditInner({ quotation, onClose, onSaved }) {
     setBusy(null);
   }, [working, isDelivery, openPdf]);
 
+  /* ── loading date ──────────────────────────────────────────────────
+     Written on its own through /quotation/update/loadindDate the moment a day
+     is picked. It is not part of the plants payload, so it neither needs nor
+     waits for a Save, and it cannot make the screen dirty. */
+  const saveLoadingDate = useCallback(
+    async (date) => {
+      if (busy === "loadingDate") return;
+
+      setError(null);
+      setNotice(null);
+      setBusy("loadingDate");
+
+      const response = await updateLoadingDate(quotation?.quotationId, date);
+
+      if (response?.status !== "SUCCESS") {
+        setBusy(null);
+        setError(response?.message || "Could not update the loading date.");
+        return;
+      }
+
+      setLoadingDate(date);
+      setLoadingDateOpen(false);
+      setNotice(`Loading date set to ${formatLoadingDate(date)}.`);
+      /* The row in the list carries loadingDate too, so hand the change up
+         rather than leaving the list showing the old day. */
+      onSaved?.(
+        { ...quotation, loadingDate: toApiDate(date) },
+        { source: "loadingDate", keepOpen: true },
+      );
+      setBusy(null);
+    },
+    [busy, quotation, onSaved],
+  );
+
+  /* ── request deletion ──────────────────────────────────────────────
+     Deleting is not something this screen can do: it raises a request that an
+     admin approves or rejects, and the quotation carries on unchanged until
+     then. The reason gate is the same one a line removal uses, because it is
+     the same kind of act on a larger scale — and here the reason is what the
+     approver reads.
+
+     Because nothing has actually been deleted, the editor stays open and the
+     list keeps its row. */
+  const [confirmDeleteQuotation, setConfirmDeleteQuotation] = useState(false);
+
+  const submitQuotationDelete = useCallback(
+    async (reason) => {
+      if (busy === "delete") return;
+
+      setError(null);
+      setNotice(null);
+      setBusy("delete");
+
+      const response = await requestQuotationDeletion(
+        quotation?.quotationId,
+        reason,
+      );
+
+      if (response?.status !== "SUCCESS") {
+        setBusy(null);
+        setError(response?.message || "Could not raise the deletion request.");
+        return;
+      }
+
+      const refund = toMoney(response.payload?.totalAmountToRefund);
+
+      setBusy(null);
+      setConfirmDeleteQuotation(false);
+      setNotice(
+        refund > 0
+          ? `Deletion request sent for approval. ${formatAmount(refund)} would be refunded.`
+          : "Deletion request sent for approval.",
+      );
+    },
+    [busy, quotation],
+  );
+
   /* ── move / invoice ────────────────────────────────────────────────── */
   const runMove = useCallback(async () => {
     if (working) return;
@@ -3411,7 +3923,31 @@ function EditInner({ quotation, onClose, onSaved }) {
     setBusy(null);
   }, [working, dirty, handleSave, quotation, userId, onSaved]);
 
-  const runInvoice = useCallback(async () => {
+  /* Who loaded the order. Fetched when the picker opens rather than on mount —
+     only the delivery team ever invoices, and only from a shade quotation. */
+  const loadDeliveryPersons = useCallback(async () => {
+    setPersonsError(null);
+    setLoadingPersons(true);
+
+    const response = await findAllDeliveryPersons();
+
+    if (response?.status === "SUCCESS") {
+      setDeliveryPersons(
+        (response.payload || []).filter((row) => row?.deliveryPersonName),
+      );
+    } else {
+      setDeliveryPersons([]);
+      setPersonsError(
+        response?.message || "Could not load the delivery people.",
+      );
+    }
+
+    setLoadingPersons(false);
+  }, []);
+
+  /* GENERATE INVOICE opens the Loaded by picker; the conversion itself runs
+     from the picked name, because convertToInvoice requires loadedBy. */
+  const runInvoice = useCallback(() => {
     if (working) return;
     /* Belt and braces behind the disabled button — sales never invoices, and
        an invoice is never generated over a part-picked order. */
@@ -3424,22 +3960,36 @@ function EditInner({ quotation, onClose, onSaved }) {
 
     setError(null);
     setNotice(null);
-    setBusy("invoice");
+    setLoadedByOpen(true);
+    loadDeliveryPersons();
+  }, [working, canInvoice, allChecked, dirty, handleSave, loadDeliveryPersons]);
 
-    const response = await convertToInvoice(quotation.quotationId);
+  const generateInvoice = useCallback(
+    async (person) => {
+      const loadedBy = person?.deliveryPersonName;
+      if (!loadedBy || busy === "invoice") return;
 
-    if (response?.status !== "SUCCESS") {
+      setError(null);
+      setNotice(null);
+      setBusy("invoice");
+
+      const response = await convertToInvoice(quotation.quotationId, loadedBy);
+
+      if (response?.status !== "SUCCESS") {
+        setBusy(null);
+        setError(response?.message || "Could not generate the invoice.");
+        return;
+      }
+
+      setLoadedByOpen(false);
+      setLevel("INVOICE_GENERATED");
+      onSaved?.({}, { source: "invoice", keepOpen: true });
+      setNotice(`Invoice generated. Loaded by ${loadedBy}.`);
+      setPdf({ kind: "invoice", title: "Invoice", file: response.payload });
       setBusy(null);
-      setError(response?.message || "Could not generate the invoice.");
-      return;
-    }
-
-    setLevel("INVOICE_GENERATED");
-    onSaved?.({}, { source: "invoice", keepOpen: true });
-    setNotice("Invoice generated.");
-    setPdf({ kind: "invoice", title: "Invoice", file: response.payload });
-    setBusy(null);
-  }, [working, canInvoice, allChecked, dirty, handleSave, quotation, onSaved]);
+    },
+    [busy, quotation, onSaved],
+  );
 
   const saveHint = blockingReason
     ? blockingReason
@@ -4368,12 +4918,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                 nestedScrollEnabled
               >
                 {options.length === 0 ? (
+                  /* In unit mode this now only happens when there are no units
+                     at all — a plant nothing stocks falls back to the full
+                     list rather than showing nothing. */
                   <Text style={styles.resultEmpty}>
-                    {unitMode
-                      ? takePlantFromAvailableUnit
-                        ? "This plant is not stocked in any unit."
-                        : "No units found."
-                      : "No packing options yet."}
+                    {unitMode ? "No units found." : "No packing options yet."}
                   </Text>
                 ) : null}
 
@@ -4684,6 +5233,29 @@ function EditInner({ quotation, onClose, onSaved }) {
                 />
               )}
             </Pressable>
+
+            {/* Ask an admin to delete this quotation. Sits last, apart from
+                the rest, and disappears once the order has been invoiced. */}
+            {canDeleteQuotation ? (
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.iconBtn,
+                  hovered && styles.iconBtnDangerHover,
+                  pressed && styles.iconBtnDangerHover,
+                ]}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Request deletion of this quotation"
+                disabled={working}
+                onPress={() => setConfirmDeleteQuotation(true)}
+              >
+                {busy === "delete" ? (
+                  <ActivityIndicator color={C.RED} />
+                ) : (
+                  <Ionicons name="trash-outline" size={19} color={C.RED} />
+                )}
+              </Pressable>
+            ) : null}
           </View>
 
           <View style={styles.headerMetaRow}>
@@ -4735,6 +5307,59 @@ function EditInner({ quotation, onClose, onSaved }) {
                   {levelMeta.label}
                 </Text>
               </View>
+
+              {/* Loading date. Tappable while the quotation is still editable —
+                  it writes straight through on pick, so it is never caught up
+                  in a Save. Locked once invoiced. */}
+              <Pressable
+                style={({ hovered, pressed }) => [
+                  styles.levelPill,
+                  {
+                    backgroundColor: `${C.ORANGE}14`,
+                    borderColor: `${C.ORANGE}33`,
+                  },
+                  (hovered || pressed) &&
+                    canEditLoadingDate &&
+                    styles.pillPress,
+                ]}
+                disabled={!canEditLoadingDate}
+                onPress={() => setLoadingDateOpen(true)}
+                accessibilityRole="button"
+                accessibilityLabel={`Loading date ${formatLoadingDate(loadingDate)}`}
+              >
+                {busy === "loadingDate" ? (
+                  <ActivityIndicator size="small" color={C.ORANGE} />
+                ) : (
+                  <Ionicons
+                    name="calendar-outline"
+                    size={12}
+                    color={C.ORANGE}
+                  />
+                )}
+                <Text style={[styles.levelPillText, { color: C.ORANGE }]}>
+                  {`LOAD ${formatLoadingDate(loadingDate)}`}
+                </Text>
+              </Pressable>
+
+              {/* Who loaded the order. Stamped by the system when the invoice
+                  is generated, so it is read-only and simply absent until
+                  there is something to say. */}
+              {loadedBy ? (
+                <View
+                  style={[
+                    styles.levelPill,
+                    {
+                      backgroundColor: `${C.GREEN}14`,
+                      borderColor: `${C.GREEN}33`,
+                    },
+                  ]}
+                >
+                  <Ionicons name="cube-outline" size={12} color={C.GREEN} />
+                  <Text style={[styles.levelPillText, { color: C.GREEN }]}>
+                    {`LOADED BY ${loadedBy}`}
+                  </Text>
+                </View>
+              ) : null}
 
               {large ? (
                 <>
@@ -4991,17 +5616,12 @@ function EditInner({ quotation, onClose, onSaved }) {
               )}
 
               {advanceEntered > 0 && !canEditAdvance ? (
-                /* Either the quotation has left Draft, or the signed-in
-                   user's own row was collected on an earlier day. Show the
-                   total, with the date only when it's actually theirs to
-                   show, but don't allow an edit. */
+                /* Invoiced: the ledger is closed on both sides. Show what was
+                   collected, but offer no way in. */
                 <View style={[styles.adjustChip, styles.adjustChipLocked]}>
                   <Ionicons name="lock-closed" size={13} color={C.MUTED} />
                   <Text style={styles.adjustChipText} numberOfLines={1}>
                     Advance {formatAmount(advanceEntered)}
-                    {myAdvanceEntry?.collectionDate
-                      ? ` · ${formatDate(myAdvanceEntry.collectionDate)}`
-                      : ""}
                   </Text>
                 </View>
               ) : advanceEntered > 0 ? (
@@ -5011,14 +5631,17 @@ function EditInner({ quotation, onClose, onSaved }) {
                     (hovered || pressed) && styles.adjustChipHover,
                   ]}
                   accessibilityRole="button"
-                  accessibilityLabel="Edit advance payment"
+                  accessibilityLabel="Add or review advance payments"
                   onPress={() => setAdvanceOpen(true)}
                 >
                   <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
                   <Text style={styles.adjustChipText} numberOfLines={1}>
                     Advance {formatAmount(advanceEntered)}
+                    {advanceVisibleRows.length > 1
+                      ? ` · ${advanceVisibleRows.length} payments`
+                      : ""}
                   </Text>
-                  <Ionicons name="create-outline" size={14} color={C.MUTED} />
+                  <Ionicons name="add" size={16} color={C.NAVY} />
                 </Pressable>
               ) : canEditAdvance ? (
                 <Pressable
@@ -5040,7 +5663,11 @@ function EditInner({ quotation, onClose, onSaved }) {
             </View>
           ) : transportEntered > 0 ||
             discountEntered > 0 ||
-            advanceEntered > 0 ? (
+            advanceEntered > 0 ||
+            canEditAdvance ? (
+            /* Read-only money, except the advance: collecting is its own
+               permission, so the delivery team can still record a payment on a
+               quotation whose lines they may not touch. */
             <View style={styles.moneyReadBar}>
               {transportEntered > 0 ? (
                 <View style={styles.moneyReadItem}>
@@ -5059,7 +5686,29 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </Text>
                 </View>
               ) : null}
-              {advanceEntered > 0 ? (
+              {canEditAdvance ? (
+                <Pressable
+                  style={({ hovered, pressed }) => [
+                    styles.adjustChip,
+                    (hovered || pressed) && styles.adjustChipHover,
+                  ]}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    advanceEntered > 0
+                      ? "Add or review advance payments"
+                      : "Add advance payment"
+                  }
+                  onPress={() => setAdvanceOpen(true)}
+                >
+                  <Ionicons name="wallet-outline" size={15} color={C.NAVY} />
+                  <Text style={styles.adjustChipText} numberOfLines={1}>
+                    {advanceEntered > 0
+                      ? `Advance ${formatAmount(advanceEntered)}`
+                      : "Advance payment"}
+                  </Text>
+                  <Ionicons name="add" size={16} color={C.NAVY} />
+                </Pressable>
+              ) : advanceEntered > 0 ? (
                 <View style={styles.moneyReadItem}>
                   <Ionicons name="wallet-outline" size={14} color={C.NAVY} />
                   <Text style={styles.moneyReadText}>
@@ -5070,20 +5719,24 @@ function EditInner({ quotation, onClose, onSaved }) {
             </View>
           ) : null}
 
-          {/* Who collected the advance — every ledger row, however many
-              collectors, so it's always clear whose money is whose. */}
-          {advanceBreakdown.length > 0 ? (
+          {/* Who collected what — one entry per collection, so several
+              payments from the same person each show on their own, and a
+              staged one is marked until it is saved. */}
+          {advanceVisibleRows.length > 0 ? (
             <View style={styles.moneyReadBar}>
-              {advanceBreakdown.map((row) => (
+              {advanceVisibleRows.map((row) => (
                 <View key={row.key} style={styles.moneyReadItem}>
                   <Ionicons
-                    name="person-circle-outline"
+                    name={
+                      row.pending ? "ellipse-outline" : "person-circle-outline"
+                    }
                     size={14}
-                    color={C.NAVY}
+                    color={row.pending ? C.ALERT : C.NAVY}
                   />
                   <Text style={styles.moneyReadText}>
                     {row.name} · {formatAmount(row.amount)}
                     {row.mode ? ` · ${row.mode}` : ""}
+                    {row.pending ? " · unsaved" : ""}
                   </Text>
                 </View>
               ))}
@@ -5588,9 +6241,11 @@ function EditInner({ quotation, onClose, onSaved }) {
                     </View>
 
                     <View style={styles.fill}>
-                      <Text style={styles.resultName} numberOfLines={1}>
-                        {plant.plantName}
-                      </Text>
+                      {/* Wraps rather than ellipsizing: two plants in the
+                          same series differ only in the last word or two,
+                          so a clipped name is the one thing that can't be
+                          picked from. */}
+                      <Text style={styles.resultName}>{plant.plantName}</Text>
 
                       <View style={styles.chipRow}>
                         <View style={styles.chip}>
@@ -5663,10 +6318,9 @@ function EditInner({ quotation, onClose, onSaved }) {
         <AdvanceModal
           styles={styles}
           grand={totals.grand}
-          otherTotal={otherAdvanceTotal}
           entries={advanceBreakdown}
-          initialAdvance={advance}
-          initialMode={advanceMode}
+          initialDrafts={advanceDrafts}
+          initialRemovals={advanceRemovals}
           collectorName={userName || userId}
           onApply={applyAdvance}
           onClose={() => setAdvanceOpen(false)}
@@ -5692,6 +6346,60 @@ function EditInner({ quotation, onClose, onSaved }) {
           error={error}
           onSubmit={submitDelete}
           onClose={() => setPendingDelete(null)}
+        />
+      ) : null}
+
+      {/* Request deletion of the whole quotation: same reason gate as a line
+          removal, and the reason is what the approver reads. */}
+      {confirmDeleteQuotation ? (
+        <DeleteReasonModal
+          styles={styles}
+          request={{
+            title: quotation?.customerName || `QTN-${quotation?.quotationId}`,
+            summary:
+              "This asks an admin to delete the quotation. Nothing changes until they approve it, and your reason is what they will see.",
+            detail: `QTN-${quotation?.quotationId} · ${formatNumber(
+              totals.quantity,
+            )} plants · ${formatAmount(totals.grand)}${
+              totals.advance > 0
+                ? ` · ${formatAmount(totals.advance)} collected`
+                : ""
+            }`,
+          }}
+          busy={busy === "delete"}
+          error={error}
+          confirmLabel="SEND REQUEST"
+          busyLabel="SENDING…"
+          onSubmit={submitQuotationDelete}
+          onClose={() => setConfirmDeleteQuotation(false)}
+        />
+      ) : null}
+
+      {/* Loading date: writes through on pick, no Save involved. */}
+      {loadingDateOpen ? (
+        <DatePickerSheet
+          value={loadingDate}
+          title="Loading date"
+          subtitle={`When ${quotation?.customerName || "this order"} is to be loaded.`}
+          busy={busy === "loadingDate"}
+          onSelect={saveLoadingDate}
+          onClose={() => setLoadingDateOpen(false)}
+        />
+      ) : null}
+
+      {/* Loaded by: picked before the invoice is generated. */}
+      {loadedByOpen ? (
+        <LoadedByModal
+          styles={styles}
+          persons={deliveryPersons}
+          loading={loadingPersons}
+          /* Both the list lookup and a failed conversion report in the sheet —
+             the screen banner behind it is covered while this is open. */
+          error={personsError || error}
+          busy={busy === "invoice"}
+          onSelect={generateInvoice}
+          onRetry={loadDeliveryPersons}
+          onClose={() => setLoadedByOpen(false)}
         />
       ) : null}
 

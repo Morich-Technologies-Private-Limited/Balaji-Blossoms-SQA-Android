@@ -1,4 +1,8 @@
-import { UPDATE_QUOTATION_PLANTS_URL } from "../constants/apiConstants";
+import {
+  UPDATE_LOADING_DATE_URL,
+  UPDATE_QUOTATION_PLANTS_URL,
+} from "../constants/apiConstants";
+import { toApiDate } from "../utility/dates";
 import axiosClient from "./axiosClient";
 import { handleApiError } from "./errorHandler";
 
@@ -24,6 +28,30 @@ export const updateQuotationPlants = async (quotationId, userId, body) => {
   try {
     const response = await axiosClient.put(UPDATE_QUOTATION_PLANTS_URL, body, {
       params: { quotationId, userId },
+    });
+    return response.data;
+  } catch (error) {
+    return handleApiError(error);
+  }
+};
+
+/**
+ * POST /quotation/update/loadindDate?quotationId=45&loadingDate=2026-09-30
+ *
+ * The loading date is its own endpoint, not part of the plants payload, so
+ * changing it is a standalone write that carries nothing else with it.
+ */
+export const updateLoadingDate = async (quotationId, loadingDate) => {
+  if (!quotationId) {
+    return { status: "FAILURE", message: "Quotation id is missing." };
+  }
+  const loading = toApiDate(loadingDate);
+  if (!loading) {
+    return { status: "FAILURE", message: "Pick a loading date." };
+  }
+  try {
+    const response = await axiosClient.post(UPDATE_LOADING_DATE_URL, null, {
+      params: { quotationId, loadingDate: loading },
     });
     return response.data;
   } catch (error) {
