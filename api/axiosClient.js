@@ -1,5 +1,5 @@
 import axios from "axios";
-import { getAccessToken } from "../utility/secureStorage";
+import { getAccessToken, logout } from "../utility/secureStorage";
 
 const axiosClient = axios.create({
   timeout: 30000,
@@ -24,6 +24,22 @@ axiosClient.interceptors.request.use(
     return config;
   },
   (error) => Promise.reject(error),
+);
+
+// A token the server has already rejected is worthless — drop it so the next
+// auth check routes back to login instead of retrying with a dead session.
+axiosClient.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const rejectedAuth =
+      error.response?.status === 401 && error.config?.requiresAuth !== false;
+
+    if (rejectedAuth) {
+      await logout();
+    }
+
+    return Promise.reject(error);
+  },
 );
 
 export default axiosClient;
