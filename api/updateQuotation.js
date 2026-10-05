@@ -7,7 +7,7 @@ import axiosClient from "./axiosClient";
 import { handleApiError } from "./errorHandler";
 
 /**
- * PUT /quotation/updatePlants?quotationId=45&userId=john@balajiblossoms.com
+ * PUT /quotation/updatePlants?quotationId=45&userId=john@example.com
  *
  * Sends the complete final state of the quotation. Rows left out are deleted by
  * the backend, so the payload must always contain everything that should survive

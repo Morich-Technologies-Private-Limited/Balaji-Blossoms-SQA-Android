@@ -4666,7 +4666,12 @@ function EditInner({ quotation, onClose, onSaved }) {
         size: w.amount,
         align: "right",
         render: (line) => (
-          <Text style={styles.amountText} numberOfLines={1}>
+          <Text
+            style={styles.amountText}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.75}
+          >
             {formatAmount(
               line.isSpecial ? specialPriceOf(line) : lineAmount(line),
             )}
@@ -4683,10 +4688,30 @@ function EditInner({ quotation, onClose, onSaved }) {
       },
     ].filter(Boolean);
 
+    /* The grid never scrolls sideways, so the columns must always fit. When
+       they don't (e.g. a ~800dp tablet in portrait), shrink the input columns
+       proportionally. Amount and the action column keep their width so the
+       total and the check/delete buttons are never pushed off-screen. */
+    const MIN_PLANT = 140;
+    const RIGID = ["sno", "choice", "amount", "action"];
     const fixed = defs.reduce((sum, col) => sum + (col.size || 0), 0);
-    const plantWidth = Math.max(160, inner - fixed);
+    const rigid = defs
+      .filter((col) => RIGID.includes(col.key))
+      .reduce((sum, col) => sum + col.size, 0);
+    const shrink =
+      fixed + MIN_PLANT > inner
+        ? Math.max(0.7, (inner - MIN_PLANT - rigid) / (fixed - rigid))
+        : 1;
 
-    return defs.map((col) => ({
+    const sized = defs.map((col) =>
+      col.flex || RIGID.includes(col.key) || shrink === 1
+        ? col
+        : { ...col, size: Math.floor(col.size * shrink) },
+    );
+    const used = sized.reduce((sum, col) => sum + (col.size || 0), 0);
+    const plantWidth = Math.max(MIN_PLANT, inner - used);
+
+    return sized.map((col) => ({
       ...col,
       size: col.flex ? plantWidth : col.size,
     }));

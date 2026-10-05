@@ -9,12 +9,14 @@ import {
   type LayoutChangeEvent,
 } from "react-native";
 
-const LOGO = require("@/assets/images/logo.png");
+import { TENANT } from "@/constants/tenant";
 
-/** Intrinsic size of logo.png (1040x413) — keeps the box exactly on the artwork. */
-const LOGO_ASPECT = 1040 / 413;
+const LOGO = TENANT.images.logo;
 
-const BACKGROUND_COLOR = "#ffffff";
+/** Intrinsic aspect of the tenant logo — keeps the box exactly on the artwork. */
+const LOGO_ASPECT = TENANT.logoAspect;
+
+const BACKGROUND_COLOR = TENANT.splashBackgroundColor;
 /** Fraction of the screen's shorter edge the logo should span. */
 const LOGO_SCREEN_RATIO = 0.62;
 const LOGO_MIN_WIDTH = 150;

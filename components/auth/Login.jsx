@@ -15,7 +15,7 @@ import {
 } from "react-native";
 
 import { login } from "../../api/authApi";
-import logo from "../../assets/images/logo.png";
+import { TENANT } from "../../constants/tenant";
 import { saveLoginData } from "../../utility/secureStorage";
 import { makeStyles } from "./Login.styles";
 
@@ -92,7 +92,12 @@ export default function Login() {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       <View style={styles.card}>
-        <Image source={logo} style={styles.logo} resizeMode="contain" />
+        <Image
+          source={TENANT.images.logo}
+          style={styles.logo}
+          resizeMode="contain"
+          accessibilityLabel={TENANT.name}
+        />
 
         <Text style={styles.title}>Billing & Quotation</Text>
         <Text style={styles.subtitle}>Sign in to continue</Text>
@@ -151,7 +156,9 @@ export default function Login() {
           )}
         </TouchableOpacity>
 
-        <Text style={styles.footer}>© 2026 Balaji Blossoms</Text>
+        <Text style={styles.footer}>
+          © {new Date().getFullYear()} {TENANT.name}
+        </Text>
       </View>
     </KeyboardAvoidingView>
   );

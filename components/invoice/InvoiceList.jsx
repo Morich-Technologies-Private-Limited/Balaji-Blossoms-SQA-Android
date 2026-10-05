@@ -3,7 +3,6 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
-  Modal,
   Pressable,
   RefreshControl,
   Text,
@@ -15,6 +14,7 @@ import {
 import { downloadInvoicePdf } from "../../api/downloadPdfApis.js";
 import { fetchInvoicesByUnit } from "../../api/fetchInvoice.js";
 import PdfShareSheet from "../../utility/PdfShareSheet.js";
+import FullScreenModal from "../common/FullScreenModal.jsx";
 import { getCurrentUser } from "../../utility/secureStorage.js";
 import makeStyles from "./InvoiceList.styles.js";
 import InvoiceView from "./View.jsx";
@@ -324,7 +324,7 @@ export default function InvoiceList({
             numberOfLines={1}
             style={[styles.levelPillText, { color: meta.tint }]}
           >
-            {meta.label}
+            {String(meta.label).toUpperCase()}
           </Text>
         </View>
       );
@@ -846,9 +846,8 @@ export default function InvoiceList({
         </View>
       </View>
 
-      <Modal
+      <FullScreenModal
         visible={!!viewing}
-        animationType="slide"
         onRequestClose={() => setViewing(null)}
       >
         {viewing ? (
@@ -859,7 +858,7 @@ export default function InvoiceList({
             onError={setError}
           />
         ) : null}
-      </Modal>
+      </FullScreenModal>
 
       <PdfShareSheet
         file={pdf?.file}

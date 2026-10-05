@@ -10,7 +10,6 @@ import {
 import {
   ActivityIndicator,
   FlatList,
-  Modal,
   Pressable,
   Text,
   TextInput,
@@ -21,6 +20,7 @@ import {
 import { downloadInvoicePdf } from "../../api/downloadPdfApis.js";
 import { searchInvoice } from "../../api/fetchInvoice.js";
 import PdfShareSheet from "../../utility/PdfShareSheet.js";
+import FullScreenModal from "../common/FullScreenModal.jsx";
 import { getCurrentUser } from "../../utility/secureStorage.js";
 import makeStyles from "./InvoiceList.styles.js";
 import InvoiceView from "./View.jsx";
@@ -320,7 +320,7 @@ export default function SearchInvoiceList({ onUpdate, onSend }) {
             numberOfLines={1}
             style={[styles.levelPillText, { color: meta.tint }]}
           >
-            {meta.label}
+            {String(meta.label).toUpperCase()}
           </Text>
         </View>
       );
@@ -842,9 +842,8 @@ export default function SearchInvoiceList({ onUpdate, onSend }) {
         </View>
       </View>
 
-      <Modal
+      <FullScreenModal
         visible={!!viewing}
-        animationType="slide"
         onRequestClose={() => setViewing(null)}
       >
         {viewing ? (
@@ -855,7 +854,7 @@ export default function SearchInvoiceList({ onUpdate, onSend }) {
             onError={setError}
           />
         ) : null}
-      </Modal>
+      </FullScreenModal>
 
       <PdfShareSheet
         file={pdf?.file}

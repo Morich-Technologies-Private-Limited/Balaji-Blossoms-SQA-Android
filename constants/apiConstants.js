@@ -1,4 +1,6 @@
-const API_BASE_URL = process.env.EXPO_PUBLIC_BASE_URL;
+import { TENANT } from "./tenant";
+
+const API_BASE_URL = TENANT.apiBaseUrl;
 
 export const LOGIN_URL = `${API_BASE_URL}/auth/login`;
 export const CREATE_QUOTATION_URL = `${API_BASE_URL}/quotation/create`;

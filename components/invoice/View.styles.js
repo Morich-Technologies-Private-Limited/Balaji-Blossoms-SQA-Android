@@ -285,7 +285,7 @@ const makeStyles = ({ width, isTablet, isDesktop, isCardMode }) => {
     colSno: { width: 34 },
     colName: { flex: 1, minWidth: 120, paddingRight: 8 },
     colType: { width: 84 },
-    colNum: { width: 88, textAlign: "right", paddingRight: 8 },
+    colNum: { width: width < 900 ? 76 : 88, textAlign: "right", paddingRight: 8 },
     colTotal: { width: 96, textAlign: "right" },
 
     typeTag: {

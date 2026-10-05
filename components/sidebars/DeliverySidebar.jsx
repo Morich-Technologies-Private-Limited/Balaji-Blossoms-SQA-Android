@@ -9,7 +9,7 @@ import {
     useWindowDimensions,
     View,
 } from "react-native";
-import logo from "../../assets/images/balaji_logo.png";
+import { TENANT } from "../../constants/tenant";
 import makeStyles, { COLORS } from "./SalesSidebar.styles";
 
 /* The delivery section's menu. Same shape as SALES_MENU so the layout can read
@@ -94,22 +94,22 @@ export default function DeliverySidebar({
         floating && styles.sidebarFloating,
       ]}
     >
-      {/* Brand: flower mark + wordmark (wordmark hidden when collapsed) */}
+      {/* Brand: logo mark + wordmark (wordmark hidden when collapsed) */}
       <View style={[styles.brandRow, collapsed && styles.brandRowCollapsed]}>
         <Image
-          source={logo}
+          source={TENANT.images.mark}
           resizeMode="contain"
           style={[styles.mark, collapsed && styles.markCollapsed]}
-          accessibilityLabel="Balaji Blossoms"
+          accessibilityLabel={TENANT.name}
         />
 
         {showLabels && (
           <View style={styles.brandText}>
             <Text style={styles.brandTitle} numberOfLines={1}>
-              BALAJI
+              {TENANT.wordmark.title}
             </Text>
             <Text style={styles.brandSubtitle} numberOfLines={1}>
-              BLOSSOMS
+              {TENANT.wordmark.subtitle}
             </Text>
           </View>
         )}

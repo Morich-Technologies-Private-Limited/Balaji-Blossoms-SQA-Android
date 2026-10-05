@@ -79,7 +79,9 @@ const txnOf = (txn) =>
  */
 export default function View({ invoice, onClose, onError }) {
   const { width } = useWindowDimensions();
-  const isCardMode = width < 620;
+  /* Below this the 8-column items table no longer fits (e.g. phones in
+     landscape), so each item becomes a card. Matches the Edit screen. */
+  const isCardMode = width < 760;
   const isTablet = width >= 600 && width < 1024;
   const isDesktop = width >= 1024;
 

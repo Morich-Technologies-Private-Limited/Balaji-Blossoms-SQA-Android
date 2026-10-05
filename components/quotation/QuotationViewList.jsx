@@ -32,6 +32,7 @@ import {
   getQuotation,
 } from "../../api/fetchQuotation";
 import PdfShareSheet from "../../utility/PdfShareSheet";
+import FullScreenModal from "../common/FullScreenModal";
 import { getCurrentUser } from "../../utility/secureStorage";
 import CreateQuotationModal from "./CreateQuotationModal";
 import Edit from "./Edit";
@@ -621,7 +622,9 @@ function QuotationViewList(
             numberOfLines={1}
             style={[styles.levelPillText, { color: meta.tint }]}
           >
-            {meta.label}
+            {/* Upper-cased here, not via textTransform: Android measures the
+                text before transforming it and clips the wider result. */}
+            {String(meta.label).toUpperCase()}
           </Text>
         </View>
       );
@@ -673,7 +676,7 @@ function QuotationViewList(
       { key: "customer", label: "Customer", flex: true, min: 130 },
       showMobile && { key: "mobile", label: "Mobile no", w: 120 },
       { key: "amount", label: "Total", w: dense ? 96 : 112, align: "right" },
-      { key: "level", label: "Level", w: dense ? 108 : 124 },
+      { key: "level", label: "Level", w: dense ? 128 : 140 },
       {
         key: "action",
         // Narrower now that the View button is gone (2 icons instead of 3).
@@ -1106,9 +1109,8 @@ function QuotationViewList(
         onCreated={handleCreated}
       />
 
-      <Modal
+      <FullScreenModal
         visible={!!editing}
-        animationType="slide"
         onRequestClose={() => setEditing(null)}
       >
         {editing ? (
@@ -1118,7 +1120,7 @@ function QuotationViewList(
             onSaved={handleSaved}
           />
         ) : null}
-      </Modal>
+      </FullScreenModal>
 
       {shareTarget ? (
         <ShareKindModal

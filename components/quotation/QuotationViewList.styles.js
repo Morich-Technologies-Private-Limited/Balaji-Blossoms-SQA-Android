@@ -316,11 +316,11 @@ const makeStyles = ({ width, isTablet, isDesktop, isCardMode }) => {
       borderRadius: 3,
     },
     levelPillText: {
+      flexShrink: 1,
       fontSize: 9.5,
       lineHeight: 13,
       fontWeight: "800",
       letterSpacing: 0.4,
-      textTransform: "uppercase",
     },
 
     actionCell: {

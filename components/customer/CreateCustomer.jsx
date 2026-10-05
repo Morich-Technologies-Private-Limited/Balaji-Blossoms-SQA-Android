@@ -74,7 +74,7 @@ const SECTIONS = [
       {
         name: "customerName",
         label: "Customer name",
-        placeholder: "Balaji Nursery Pvt Ltd",
+        placeholder: "Sunrise Traders Pvt Ltd",
         icon: "business-outline",
         autoCapitalize: "words",
       },

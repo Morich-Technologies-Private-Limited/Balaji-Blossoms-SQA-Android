@@ -1120,6 +1120,11 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
     footerRow: {
       flexDirection: large ? "row" : "column",
       alignItems: large ? "center" : "stretch",
+      /* Wraps so the buttons drop below the totals when both don't fit on
+         one line (e.g. three draft buttons on a portrait tablet), instead of
+         being pushed off-screen. */
+      flexWrap: large ? "wrap" : "nowrap",
+      justifyContent: "flex-end",
       gap: 12,
     },
     /* A consistent two-column grid, always — plant types / quantity / packing
@@ -1128,7 +1133,9 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
        strip reads as one aligned grid instead of a line that reflows
        differently depending on how many optional totals are present. */
     metricStrip: {
-      flex: large ? 1 : undefined,
+      flexGrow: large ? 1 : 0,
+      flexShrink: 1,
+      flexBasis: large ? 320 : "auto",
       flexDirection: "row",
       flexWrap: "wrap",
       rowGap: 12,
@@ -1199,7 +1206,10 @@ export default function makeStyles({ width, isTablet, isDesktop, isCardMode }) {
        Shorter than before so the whole footer stays compact. */
     actionRow: {
       flexDirection: isCardMode ? "column" : "row",
+      flexWrap: isCardMode ? "nowrap" : "wrap",
+      justifyContent: "flex-end",
       alignItems: "stretch",
+      maxWidth: "100%",
       gap: 10,
     },
     ghostButton: {
