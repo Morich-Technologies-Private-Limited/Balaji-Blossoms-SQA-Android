@@ -21,11 +21,14 @@ export const fetchInvoiceById = async (invoiceId) => {
   }
 };
 
-/** GET /findByUnitId?unitId= → ApiResponseModal<List<InvoiceDto>> */
+/* The app only lists recent invoices; older ones are on the web portal. */
+export const RECENT_HOURS = 48;
+
+/** GET /findByUnitId?unitId=&withinHours=48 → ApiResponseModal<List<InvoiceDto>> */
 export const fetchInvoicesByUnit = async (unitId) => {
   try {
     const response = await axiosClient.get(INVOICE_FIND_BY_UNIT_URL, {
-      params: { unitId },
+      params: { unitId, withinHours: RECENT_HOURS },
     });
     return response.data;
   } catch (error) {

@@ -1,4 +1,4 @@
-/* Tenant-specific values come from tenant.config.js — edit that, not this. */
+/* Tenant-specific values come from tenant.config.js (EXPO_PUBLIC_TENANT picks one) — edit that, not this. */
 const tenant = require("./tenant.config");
 
 module.exports = {
@@ -7,7 +7,7 @@ module.exports = {
     slug: "sqa-app",
     version: "1.0.0",
     orientation: "default",
-    icon: "./assets/tenant/icon.png",
+    icon: `./assets/brands/${tenant.id}/icon.png`,
     scheme: "sqaapp",
     userInterfaceStyle: "automatic",
     newArchEnabled: true,
@@ -16,7 +16,7 @@ module.exports = {
     },
     android: {
       adaptiveIcon: {
-        foregroundImage: "./assets/tenant/adaptive-foreground.png",
+        foregroundImage: `./assets/brands/${tenant.id}/adaptive-foreground.png`,
         backgroundColor: tenant.iconBackgroundColor,
       },
       edgeToEdgeEnabled: true,
@@ -25,19 +25,19 @@ module.exports = {
     },
     web: {
       output: "static",
-      favicon: "./assets/tenant/favicon.png",
+      favicon: `./assets/brands/${tenant.id}/favicon.png`,
     },
     plugins: [
       "expo-router",
       [
         "expo-splash-screen",
         {
-          image: "./assets/tenant/logo.png",
+          image: `./assets/brands/${tenant.id}/logo.png`,
           imageWidth: 176,
           resizeMode: "contain",
           backgroundColor: tenant.splashBackgroundColor,
           ios: {
-            image: "./assets/tenant/logo.png",
+            image: `./assets/brands/${tenant.id}/logo.png`,
             imageWidth: 220,
             resizeMode: "contain",
             backgroundColor: tenant.splashBackgroundColor,

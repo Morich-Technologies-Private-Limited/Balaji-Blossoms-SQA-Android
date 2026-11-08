@@ -39,19 +39,19 @@ import Edit from "./Edit";
 import makeStyles from "./QuotationViewList.styles";
 
 const LEVELS = [
-  { key: "ALL", label: "All" },
   { key: "DRAFT", label: "Draft" },
   { key: "DELIVERY_SHADE", label: "Loading shade" },
-  { key: "INVOICE_GENERATED", label: "Invoiced" },
+  { key: "INVOICE_GENERATED", label: "Bill Done" },
+  /* A quotation whose deletion request was approved. */
+  { key: "DELETED", label: "Cancelled" },
 ];
 
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
   DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
-  INVOICE_GENERATED: { label: "Invoiced", tint: "#5B8E2E" },
-  /* Set when a deletion request is approved. The server filters these out of
-     every list, so it is here only so a stale row never reads as "—". */
-  DELETED: { label: "Deleted", tint: "#DC2626" },
+  INVOICE_GENERATED: { label: "Bill Done", tint: "#5B8E2E" },
+  /* Set when a deletion request is approved; listed under the Cancelled tab. */
+  DELETED: { label: "Cancelled", tint: "#DC2626" },
 };
 
 /* Breakpoints are measured on the table container, not the window, so the
@@ -294,7 +294,7 @@ function QuotationViewList(
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
-  const [level, setLevel] = useState("ALL");
+  const [level, setLevel] = useState("DRAFT");
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [expanded, setExpanded] = useState({});
@@ -423,7 +423,7 @@ function QuotationViewList(
   const visible = useMemo(() => {
     const term = search.trim().toLowerCase();
     return numbered
-      .filter((q) => (level === "ALL" ? true : q.level === level))
+      .filter((q) => q.level === level)
       .filter((q) => {
         if (!term) return true;
         return (

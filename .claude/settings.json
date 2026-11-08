@@ -1,5 +1,10 @@
 {
   "enabledPlugins": {
     "expo@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/mehul/Desktop/ERP/Balaji Blossoms/Sales App/backend/src/main/java/com/balajiblossoms/sqa/serviceImpl/**)"
+    ]
   }
 }

@@ -6,13 +6,24 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": { "EXPO_PUBLIC_TENANT": "balaji" }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "env": { "EXPO_PUBLIC_TENANT": "balaji" }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": { "EXPO_PUBLIC_TENANT": "balaji" }
+    },
+    "preview-morich": {
+      "extends": "preview",
+      "env": { "EXPO_PUBLIC_TENANT": "morich" }
+    },
+    "production-morich": {
+      "extends": "production",
+      "env": { "EXPO_PUBLIC_TENANT": "morich" }
     }
   },
   "submit": {

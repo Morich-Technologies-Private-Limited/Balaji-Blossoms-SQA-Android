@@ -14,6 +14,7 @@ export const QUOTATION_ACCESS_URL = `${API_BASE_URL}/quotation/check/access`;
 export const QUOTATION_EDIT_LEVEL_URL = `${API_BASE_URL}/quotation/editLevel`;
 export const UPDATE_LOADING_DATE_URL = `${API_BASE_URL}/quotation/update/loadingDate`;
 export const DELETE_QUOTATION_URL = `${API_BASE_URL}/quotation/delete`;
+export const BILLING_FIRM_LIST_URL = `${API_BASE_URL}/quotation/firm/list`;
 
 export const CONVERT_TO_INVOICE_URL = `${API_BASE_URL}/quotation/convertToInvoice`;
 export const MOVE_TO_DELIVERY_SHADE_URL = `${API_BASE_URL}/quotation/update/status/moveToDeliveryShade`;

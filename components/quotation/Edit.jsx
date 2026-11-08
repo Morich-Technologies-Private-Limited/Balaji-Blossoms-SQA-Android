@@ -14,6 +14,7 @@ import {
   View,
 } from "react-native";
 
+import { findAllBillingFirms } from "../../api/billingFirms";
 import { findAllDeliveryPersons } from "../../api/deliveryPersons";
 import { downloadQuotationPdf } from "../../api/downloadPdfApis.js";
 import { fetchPackingList } from "../../api/fetchPacking";
@@ -53,10 +54,9 @@ import makeStyles from "./Edit.styles";
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
   DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
-  INVOICE_GENERATED: { label: "Invoiced", tint: "#16A34A" },
-  /* Set when a deletion request is approved. Deleted quotations are filtered
-     out of the lists, so this is only ever seen on one opened by direct link. */
-  DELETED: { label: "Deleted", tint: "#DC2626" },
+  INVOICE_GENERATED: { label: "Bill Done", tint: "#16A34A" },
+  /* Set when a deletion request is approved; shown as Cancelled. */
+  DELETED: { label: "Cancelled", tint: "#DC2626" },
 };
 
 /** Which levels a role may edit when /quotation/editLevel can't be reached —
@@ -97,11 +97,13 @@ const transactionModeLabel = (value) =>
   value ||
   "";
 
-/* Offered in the reason popups as one-tap fills. */
+/* Plant modification reasons (quantity change / plant removal), offered as
+   one-tap fills. The text box stays editable, so a supervisor or loading
+   manager can still type their own reason. */
 const REASON_PRESETS = [
-  "Plant variety not available",
-  "Changes made on customer request",
-  "Quantity not sufficient",
+  "Lack of Space",
+  "Plant Damage",
+  "Plant Quantity not Available",
 ];
 
 /* Breakpoints measured on the table container.
@@ -457,7 +459,10 @@ const signatureOf = (lines) =>
     colleague's collection landed. */
 const advanceSignatureOf = (drafts, removals) =>
   `${(drafts || [])
-    .map((row) => `${toMoney(row.amount)}:${row.transactionMode || ""}`)
+    .map(
+      (row) =>
+        `${toMoney(row.amount)}:${row.transactionMode || ""}:${row.firmNote || ""}`,
+    )
     .join(",")}#${[...(removals || [])].sort().join(",")}`;
 
 const stateSignatureOf = (
@@ -706,6 +711,127 @@ function TransportModal({ styles, initialTransport, onApply, onClose }) {
 
    Nothing here writes: APPLY hands the staged additions and withdrawals back
    to the screen, and the Save that follows sends them. */
+/* ── firm dropdown ───────────────────────────────────────────────────
+   A closed field showing the chosen firm; tapping it opens a searchable list
+   inline below it (not absolutely positioned, so the sheet's ScrollView never
+   clips it). "" means nothing picked yet. */
+function FirmDropdown({ styles, firms, value, onChange }) {
+  const C = styles.colors;
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const options = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return firms;
+    return firms.filter((f) =>
+      [f.firmName, f.location, f.owner].some((v) =>
+        String(v ?? "").toLowerCase().includes(q),
+      ),
+    );
+  }, [firms, query]);
+
+  const pick = (name) => {
+    onChange(name);
+    setOpen(false);
+    setQuery("");
+  };
+
+  return (
+    <View>
+      <Pressable
+        style={({ hovered }) => [
+          styles.firmSelect,
+          (open || hovered) && styles.firmSelectActive,
+        ]}
+        onPress={() => setOpen((o) => !o)}
+        accessibilityRole="button"
+        accessibilityLabel={`Firm: ${value || "not selected"}`}
+        accessibilityState={{ expanded: open }}
+      >
+        <Text
+          style={[styles.firmSelectText, !value && styles.firmSelectPlaceholder]}
+          numberOfLines={1}
+        >
+          {value || "Select firm"}
+        </Text>
+        <Ionicons
+          name={open ? "chevron-up" : "chevron-down"}
+          size={17}
+          color={C.FAINT}
+        />
+      </Pressable>
+
+      {open ? (
+        <View style={styles.firmMenu}>
+          <View style={styles.firmSearch}>
+            <Ionicons name="search" size={15} color={C.FAINT} />
+            <TextInput
+              style={styles.firmSearchInput}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search firm"
+              placeholderTextColor={C.FAINT}
+              autoCorrect={false}
+              autoFocus
+              onSubmitEditing={() => {
+                if (options.length === 1) pick(options[0].firmName);
+              }}
+            />
+            {query ? (
+              <Pressable onPress={() => setQuery("")} hitSlop={8}>
+                <Ionicons name="close-circle" size={15} color={C.FAINT} />
+              </Pressable>
+            ) : null}
+          </View>
+
+          <ScrollView
+            style={styles.firmMenuList}
+            nestedScrollEnabled
+            keyboardShouldPersistTaps="handled"
+          >
+            {options.length === 0 ? (
+              <Text style={styles.resultEmpty}>No firm matches.</Text>
+            ) : null}
+            {options.map((f) => {
+              const active = f.firmName === value;
+              return (
+                <Pressable
+                  key={f.firmName}
+                  style={({ hovered }) => [
+                    styles.firmOption,
+                    hovered && styles.optionRowHover,
+                    active && styles.firmOptionActive,
+                  ]}
+                  onPress={() => pick(f.firmName)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: active }}
+                >
+                  <View style={styles.fill}>
+                    <Text
+                      style={[
+                        styles.firmOptionText,
+                        active && styles.firmOptionTextActive,
+                      ]}
+                    >
+                      {f.firmName}
+                    </Text>
+                    {f.location ? (
+                      <Text style={styles.optionMeta}>{f.location}</Text>
+                    ) : null}
+                  </View>
+                  {active ? (
+                    <Ionicons name="checkmark" size={16} color={C.NAVY} />
+                  ) : null}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function AdvanceModal({
   styles,
   grand,
@@ -713,6 +839,9 @@ function AdvanceModal({
   initialDrafts,
   initialRemovals,
   collectorName,
+  firms = [],
+  firmsStatus = "ready",
+  firmsError = null,
   onApply,
   onClose,
 }) {
@@ -722,6 +851,9 @@ function AdvanceModal({
   const [removals, setRemovals] = useState(initialRemovals || []);
   const [amount, setAmount] = useState("");
   const [mode, setMode] = useState("CASH");
+  /* Firm the supervisor wants this billed in. Required on every payment —
+     billing is processed against it. "" means not picked yet. */
+  const [firmNote, setFirmNote] = useState("");
 
   /* Every saved row the screen handed in, minus the ones withdrawn here. */
   const savedTotal = entries
@@ -736,7 +868,11 @@ function AdvanceModal({
   const combined = staged + entered;
   const overTotal = combined > grand;
   const remaining = Math.max(0, grand - combined);
-  const canAdd = entered > 0 && !overTotal;
+  const needsFirm = entered > 0 && !firmNote;
+  const canAdd = entered > 0 && !overTotal && !needsFirm;
+  /* A typed amount is never dropped silently: APPLY waits until it can be
+     added (firm picked, within the total) or the amount is cleared. */
+  const canApply = entered === 0 || canAdd;
 
   const addPayment = () => {
     if (!canAdd) return;
@@ -746,6 +882,7 @@ function AdvanceModal({
         key: `advance-draft-${nextKey()}`,
         amount: String(entered),
         transactionMode: mode,
+        firmNote,
       },
     ]);
     setAmount("");
@@ -774,6 +911,7 @@ function AdvanceModal({
       amount: toMoney(row.amount),
       date: null,
       mode: transactionModeLabel(row.transactionMode),
+      firmNote: row.firmNote || null,
     })),
   ];
 
@@ -856,9 +994,10 @@ function AdvanceModal({
                               styles.advanceTableCellName,
                               withdrawn && styles.advanceRowWithdrawn,
                             ]}
-                            numberOfLines={1}
+                            numberOfLines={2}
                           >
                             {row.name}
+                            {row.firmNote ? `\n→ ${row.firmNote}` : ""}
                           </Text>
                           <Text
                             style={[
@@ -1013,6 +1152,43 @@ function AdvanceModal({
                 </View>
               </View>
 
+              <View style={styles.adjustField}>
+                <View style={styles.moneyHead}>
+                  <Ionicons name="business-outline" size={15} color={C.NAVY} />
+                  <Text style={styles.moneyLabel}>
+                    Firm for billing *
+                  </Text>
+                </View>
+                {/* Say why there is nothing to pick instead of hiding the field. */}
+                {firms.length === 0 ? (
+                  <Text style={styles.advanceHint}>
+                    {firmsStatus === "loading"
+                      ? "Loading firms…"
+                      : firmsStatus === "error"
+                        ? `Could not load firms${firmsError ? ` — ${firmsError}` : ""}. Close and reopen to try again.`
+                        : "No firms (companies) are set up yet. Ask an admin to add a company."}
+                  </Text>
+                ) : (
+                  <>
+                  <FirmDropdown
+                    styles={styles}
+                    firms={firms}
+                    value={firmNote}
+                    onChange={setFirmNote}
+                  />
+                  {needsFirm ? (
+                    <Text style={styles.firmRequiredText}>
+                      Select a firm to add this payment.
+                    </Text>
+                  ) : (
+                    <Text style={styles.advanceHint}>
+                      Required — billing is processed in this firm.
+                    </Text>
+                  )}
+                  </>
+                )}
+              </View>
+
               <Pressable
                 style={({ hovered, pressed }) => [
                   styles.adjustAddBtn,
@@ -1056,8 +1232,10 @@ function AdvanceModal({
             <Pressable
               style={({ hovered, pressed }) => [
                 styles.modalApply,
-                (hovered || pressed) && styles.primaryButtonHover,
+                (hovered || pressed) && canApply && styles.primaryButtonHover,
+                !canApply && styles.modalApplyDisabled,
               ]}
+              disabled={!canApply}
               /* A typed but unadded amount is the commonest way to lose a
                  payment here, so APPLY takes it along instead of dropping it. */
               onPress={() =>
@@ -1069,6 +1247,7 @@ function AdvanceModal({
                           key: `advance-draft-${nextKey()}`,
                           amount: String(entered),
                           transactionMode: mode,
+                          firmNote,
                         },
                       ]
                     : drafts,
@@ -1784,12 +1963,27 @@ function LoadedByModal({
   loading,
   error,
   busy,
+  vehicleNo,
+  onVehicleNoChange,
   onSelect,
   onRetry,
   onClose,
 }) {
   const C = styles.colors;
   const dismiss = busy ? undefined : onClose;
+  const [query, setQuery] = useState("");
+
+  /* Matches on name or contact number; case- and spacing-insensitive. */
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return persons;
+    const qDigits = q.replace(/\D/g, "");
+    return persons.filter((p) => {
+      const name = String(p.deliveryPersonName ?? "").toLowerCase();
+      const phone = String(p.contactNumber ?? "").replace(/\D/g, "");
+      return name.includes(q) || (qDigits !== "" && phone.includes(qDigits));
+    });
+  }, [persons, query]);
 
   return (
     <Modal
@@ -1807,10 +2001,53 @@ function LoadedByModal({
             </Text>
           </View>
 
+          {/* Vehicle number travels with the invoice; fill it before picking. */}
+          <View style={styles.vehicleField}>
+            <Text style={styles.fieldLabel}>Vehicle no (optional)</Text>
+            <TextInput
+              style={styles.vehicleInput}
+              value={vehicleNo}
+              onChangeText={(t) => onVehicleNoChange(t.toUpperCase())}
+              placeholder="e.g. MP09 AB 1234"
+              placeholderTextColor={C.FAINT}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              maxLength={20}
+              editable={!busy}
+            />
+          </View>
+
           {error ? (
             <View style={styles.banner}>
               <Ionicons name="alert-circle-outline" size={17} color={C.ALERT} />
               <Text style={styles.bannerText}>{error}</Text>
+            </View>
+          ) : null}
+
+          {!loading && persons.length > 0 ? (
+            <View style={styles.sheetSearch}>
+              <View style={styles.searchWrap}>
+                <Ionicons name="search" size={17} color={C.FAINT} />
+                <TextInput
+                  style={styles.searchInput}
+                  value={query}
+                  onChangeText={setQuery}
+                  placeholder="Search by name or phone"
+                  placeholderTextColor={C.FAINT}
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                  returnKeyType="search"
+                  editable={!busy}
+                  onSubmitEditing={() => {
+                    if (filtered.length === 1 && !busy) onSelect(filtered[0]);
+                  }}
+                />
+                {query ? (
+                  <Pressable onPress={() => setQuery("")} hitSlop={8}>
+                    <Ionicons name="close-circle" size={17} color={C.FAINT} />
+                  </Pressable>
+                ) : null}
+              </View>
             </View>
           ) : null}
 
@@ -1820,14 +2057,22 @@ function LoadedByModal({
               <Text style={styles.loadingText}>Loading delivery people…</Text>
             </View>
           ) : (
-            <ScrollView style={styles.sheetScroll} nestedScrollEnabled>
+            <ScrollView
+              style={styles.sheetScroll}
+              nestedScrollEnabled
+              keyboardShouldPersistTaps="handled"
+            >
               {persons.length === 0 ? (
                 <Text style={styles.resultEmpty}>
                   No delivery people are set up yet.
                 </Text>
+              ) : filtered.length === 0 ? (
+                <Text style={styles.resultEmpty}>
+                  {`No one matches "${query.trim()}".`}
+                </Text>
               ) : null}
 
-              {persons.map((person) => (
+              {filtered.map((person) => (
                 <Pressable
                   key={person.id ?? person.deliveryPersonName}
                   style={({ hovered }) => [
@@ -2070,6 +2315,35 @@ function EditInner({ quotation, onClose, onSaved }) {
   const [discountOpen, setDiscountOpen] = useState(false);
   const [advanceOpen, setAdvanceOpen] = useState(false);
 
+  /* Billing firms for the advance sheet's "note for billing" choice. Loaded
+     the first time the sheet opens; a failure just hides the choice. */
+  const [billingFirms, setBillingFirms] = useState([]);
+  const [firmsStatus, setFirmsStatus] = useState("loading");
+  const [firmsError, setFirmsError] = useState(null);
+  const firmsLoadedRef = useRef(false);
+  useEffect(() => {
+    if (!advanceOpen || firmsLoadedRef.current) return;
+    firmsLoadedRef.current = true;
+    setFirmsStatus("loading");
+    setFirmsError(null);
+    let alive = true;
+    findAllBillingFirms().then((res) => {
+      if (!alive) return;
+      if (res?.status === "SUCCESS" && Array.isArray(res.payload)) {
+        setBillingFirms(res.payload);
+        setFirmsStatus("ready");
+      } else {
+        setFirmsStatus("error");
+        setFirmsError(res?.message || null);
+        // Let the next open of the sheet try again.
+        firmsLoadedRef.current = false;
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [advanceOpen]);
+
   /* The totals (plant types / quantity / packing / grand total / …) can be
      tucked away to save space; the action buttons stay put either way since
      they're how the screen is actually operated. */
@@ -2134,6 +2408,7 @@ function EditInner({ quotation, onClose, onSaved }) {
      pulled when the picker opens, so it is never fetched for the roles and
      levels that can't invoice at all. */
   const [loadedByOpen, setLoadedByOpen] = useState(false);
+  const [vehicleNo, setVehicleNo] = useState("");
   const [deliveryPersons, setDeliveryPersons] = useState([]);
   const [loadingPersons, setLoadingPersons] = useState(false);
   const [personsError, setPersonsError] = useState(null);
@@ -2204,6 +2479,7 @@ function EditInner({ quotation, onClose, onSaved }) {
         amount: toMoney(row?.amount),
         date: row?.collectionDate || null,
         mode: transactionModeLabel(row?.transactionMode),
+        firmNote: row?.firmNote || null,
       };
     });
 
@@ -2218,6 +2494,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       amount: toMoney(row.amount),
       date: null,
       mode: transactionModeLabel(row.transactionMode),
+      firmNote: row.firmNote || null,
     }));
 
     return [...saved, ...pending].filter((row) => row.amount > 0);
@@ -3544,6 +3821,7 @@ function EditInner({ quotation, onClose, onSaved }) {
                 collectorName: userName || userId,
                 amount: toMoney(row.amount),
                 transactionMode: row.transactionMode,
+                ...(row.firmNote ? { firmNote: row.firmNote } : {}),
               })),
             ...advanceRemovals.map((transactionId) => ({
               transactionId,
@@ -3617,6 +3895,7 @@ function EditInner({ quotation, onClose, onSaved }) {
               amount: toMoney(row.amount),
               collectionDate: collectedAt,
               transactionMode: row.transactionMode,
+              firmNote: row.firmNote || null,
             })),
         ]);
         setAdvanceDrafts([]);
@@ -3973,7 +4252,11 @@ function EditInner({ quotation, onClose, onSaved }) {
       setNotice(null);
       setBusy("invoice");
 
-      const response = await convertToInvoice(quotation.quotationId, loadedBy);
+      const response = await convertToInvoice(
+        quotation.quotationId,
+        loadedBy,
+        vehicleNo,
+      );
 
       if (response?.status !== "SUCCESS") {
         setBusy(null);
@@ -3988,7 +4271,7 @@ function EditInner({ quotation, onClose, onSaved }) {
       setPdf({ kind: "invoice", title: "Invoice", file: response.payload });
       setBusy(null);
     },
-    [busy, quotation, onSaved],
+    [busy, quotation, onSaved, vehicleNo],
   );
 
   const saveHint = blockingReason
@@ -6347,6 +6630,9 @@ function EditInner({ quotation, onClose, onSaved }) {
           initialDrafts={advanceDrafts}
           initialRemovals={advanceRemovals}
           collectorName={userName || userId}
+          firms={billingFirms}
+          firmsStatus={firmsStatus}
+          firmsError={firmsError}
           onApply={applyAdvance}
           onClose={() => setAdvanceOpen(false)}
         />
@@ -6422,6 +6708,8 @@ function EditInner({ quotation, onClose, onSaved }) {
              the screen banner behind it is covered while this is open. */
           error={personsError || error}
           busy={busy === "invoice"}
+          vehicleNo={vehicleNo}
+          onVehicleNoChange={setVehicleNo}
           onSelect={generateInvoice}
           onRetry={loadDeliveryPersons}
           onClose={() => setLoadedByOpen(false)}

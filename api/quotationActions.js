@@ -59,8 +59,9 @@ export const moveToLoadingShade = async (quotationId) => {
  * `loadedBy` is the delivery person who physically loaded the order — picked
  * from /info/deliverPerson/findAll, not typed. The backend requires it, so a
  * blank selection is rejected here rather than sent as an empty param.
+ * `vehicleNo` is optional and only sent when filled in.
  */
-export const convertToInvoice = async (quotationId, loadedBy) => {
+export const convertToInvoice = async (quotationId, loadedBy, vehicleNo) => {
   if (!quotationId) {
     return { status: "FAILURE", message: "Quotation id is missing." };
   }
@@ -68,9 +69,14 @@ export const convertToInvoice = async (quotationId, loadedBy) => {
   if (!loader) {
     return { status: "FAILURE", message: "Select who loaded this order." };
   }
+  const vehicle = String(vehicleNo ?? "").trim().toUpperCase();
   try {
     const response = await axiosClient.post(CONVERT_TO_INVOICE_URL, null, {
-      params: { quotationId, loadedBy: loader },
+      params: {
+        quotationId,
+        loadedBy: loader,
+        ...(vehicle ? { vehicleNo: vehicle } : {}),
+      },
       responseType: "blob",
       headers: { Accept: `${PDF_TYPE}, application/json` },
     });

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -3 116 116" role="img" aria-label="Morich Technologies">
+  <g transform="translate(0 0)" fill="#3FC488">
+    <path d="M4 4H96V82.5L50 105.5L4 82.5Z" fill="none" stroke="#3FC488" stroke-width="8" stroke-linejoin="miter"/>
+    <rect x="19" y="17" width="62" height="9"/>
+    <rect x="46" y="26" width="8" height="67"/>
+    <rect x="19" y="36" width="8" height="45"/>
+    <rect x="73" y="36" width="8" height="45"/>
+    <path d="M27 36L50 59L73 36V47.3L50 70.3L27 47.3Z"/>
+  </g>
+</svg>

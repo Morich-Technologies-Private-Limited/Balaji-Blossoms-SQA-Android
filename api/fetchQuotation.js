@@ -6,10 +6,14 @@ import {
 import axiosClient from "./axiosClient";
 import { handleApiError } from "./errorHandler";
 
+/* Draft and loading-shade quotations always come back; invoiced ones only for
+   this many hours after the invoice. */
+const INVOICED_WITHIN_HOURS = 48;
+
 export const fetchQuotationsByUser = async (userId) => {
   try {
     const response = await axiosClient.get(QUOTATION_BY_USER_URL, {
-      params: { userId },
+      params: { userId, invoicedWithinHours: INVOICED_WITHIN_HOURS },
     });
 
     return response.data;
@@ -21,7 +25,7 @@ export const fetchQuotationsByUser = async (userId) => {
 export const fetchQuotationsByUnit = async (unitId) => {
   try {
     const response = await axiosClient.get(QUOTATION_BY_UNIT_URL, {
-      params: { unitId },
+      params: { unitId, invoicedWithinHours: INVOICED_WITHIN_HOURS },
     });
 
     return response.data;

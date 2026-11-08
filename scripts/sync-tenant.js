@@ -2,8 +2,8 @@
 /* global __dirname */
 
 /**
- * Copies the tenant logos named in tenant.config.js into assets/tenant/ and
- * renders every image the app needs from them:
+ * Renders every image a tenant needs from the logos named in tenant.config.js,
+ * into assets/brands/<tenant>/:
  *
  *   logo.png                 full logo (login page, splash)
  *   mark.png                 square mark (sidebars)
@@ -12,9 +12,10 @@
  *   favicon.png              web favicon
  *   meta.json                logo aspect ratio, used to size the splash
  *
- * The results are committed, so EAS builds don't need ../frontend.
+ * The results are committed, so builds don't need the source logos' tools.
  *
- * Usage: npm run tenant
+ * Usage: npm run tenant -- <tenant>     e.g. npm run tenant -- morich
+ *        (no argument → the EXPO_PUBLIC_TENANT tenant)
  */
 
 const fs = require("fs");
@@ -22,8 +23,15 @@ const path = require("path");
 const sharp = require("sharp");
 
 const ROOT = path.resolve(__dirname, "..");
-const OUT = path.join(ROOT, "assets", "tenant");
-const tenant = require("../tenant.config");
+const { TENANTS, id: activeId } = require("../tenant.config");
+
+const tenantId = (process.argv[2] || activeId).trim().toLowerCase();
+const tenant = TENANTS[tenantId];
+if (!tenant) {
+  console.error(`Unknown tenant "${tenantId}". Known: ${Object.keys(TENANTS).join(", ")}`);
+  process.exit(1);
+}
+const OUT = path.join(ROOT, "assets", "brands", tenantId);
 
 const TRANSPARENT = { r: 0, g: 0, b: 0, alpha: 0 };
 
@@ -80,7 +88,7 @@ async function main() {
     JSON.stringify({ logoAspect: logo.width / logo.height }, null, 2) + "\n",
   );
 
-  console.log(`Tenant "${tenant.name}" synced to assets/tenant/`);
+  console.log(`Tenant "${tenant.name}" synced to assets/brands/${tenantId}/`);
   console.log("Restart Expo with `npx expo start -c` to pick up the changes.");
 }
 
