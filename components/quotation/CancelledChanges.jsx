@@ -380,7 +380,13 @@ export default function CancelledChanges({ unitId, userId, search, onCount }) {
             )} and ${formatDate(to)}.`}
         </Text>
         {error ? (
-          <Pressable style={s.emptyAction} onPress={load}>
+          <Pressable
+            style={s.emptyAction}
+            onPress={() => {
+              setLoading(true);
+              load();
+            }}
+          >
             <Text style={s.emptyActionText}>TRY AGAIN</Text>
           </Pressable>
         ) : null}
