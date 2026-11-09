@@ -34,7 +34,7 @@ const TENANTS = {
     androidPackage: "com.balajiblossoms.sqaapp",
 
     /* Colours used for the app icon and the splash screen */
-    iconBackgroundColor: "#021F63",
+    iconBackgroundColor: "#FFFFFF", // white so the black arch in the mark stays visible
     splashBackgroundColor: "#FFFFFF",
 
     /* Logo sources, read only by `npm run tenant`. Balaji's images in
