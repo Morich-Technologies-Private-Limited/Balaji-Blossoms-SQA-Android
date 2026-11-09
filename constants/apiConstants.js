@@ -8,6 +8,7 @@ export const QUOTATION_BY_USER_URL = `${API_BASE_URL}/quotation/getByUser`;
 export const QUOTATION_BY_UNIT_URL = `${API_BASE_URL}/quotation/getByUnit`;
 export const QUOTATION_FIND_URL = `${API_BASE_URL}/quotation/find`;
 export const QUOTATION_CHANGES_URL = `${API_BASE_URL}/quotation/changes`;
+export const QUOTATION_CHANGE_DETAIL_URL = `${API_BASE_URL}/quotation/changes/detail`;
 export const UPDATE_QUOTATION_PLANTS_URL = `${API_BASE_URL}/quotation/updatePlants`;
 export const QUOTATION_PDF_URL = `${API_BASE_URL}/quotation/pdf`;
 export const COLLECTION_SHEET_PDF_URL = `${API_BASE_URL}/quotation/download/collection-sheet`;

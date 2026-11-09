@@ -362,6 +362,9 @@ function QuotationViewList(
         const user = await getCurrentUser();
         if (!alive) return;
         setCurrentUser(user);
+        /* Sales work their drafts; every other role starts at the loading
+           shade. */
+        setLevel(user?.role === "SALES" ? "DRAFT" : "DELIVERY_SHADE");
       } finally {
         if (alive) setUserReady(true);
       }

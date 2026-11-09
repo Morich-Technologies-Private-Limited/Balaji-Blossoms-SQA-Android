@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -11,7 +11,10 @@ import {
   View,
 } from "react-native";
 
-import { fetchQuotationChanges } from "../../api/fetchQuotation";
+import {
+  fetchQuotationChangeDetail,
+  fetchQuotationChanges,
+} from "../../api/fetchQuotation";
 import {
   formatDate,
   isSameDay,
@@ -89,6 +92,10 @@ const isRemoval = (row) => row?.changeType === "PLANT_REMOVED";
  * included). Unchanged plants are never listed — only the updated and
  * deleted ones, each with its reason.
  *
+ * Lazy, like the editor: the list arrives lite (counts and plant names only)
+ * and a card's plant rows are fetched from /quotation/changes/detail the first
+ * time it is opened, then kept until the range changes or the list refreshes.
+ *
  * Props
  *  - unitId / userId  scope, as in QuotationViewList's `mode`
  *  - search           the list's search box; matches customer, QTN, mobile,
@@ -108,7 +115,67 @@ export default function CancelledChanges({ unitId, userId, search, onCount }) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
 
+  /* Open cards, and the rows fetched for them:
+     details[id] = { status: "loading" | "done" | "error", rows, error } */
+  const [expanded, setExpanded] = useState({});
+  const [details, setDetails] = useState({});
+
   const ready = unitId != null || !!userId;
+
+  /* Detail responses for an older range (or before a refresh) are dropped. */
+  const rangeKey = `${toApiDate(from)}|${toApiDate(to)}|${unitId}|${userId}`;
+  const generationRef = useRef(0);
+
+  useEffect(() => {
+    generationRef.current += 1;
+    setExpanded({});
+    setDetails({});
+  }, [rangeKey]);
+
+  const loadDetail = useCallback(
+    async (quotationId) => {
+      const generation = generationRef.current;
+      setDetails((prev) => ({
+        ...prev,
+        [quotationId]: { status: "loading", rows: [] },
+      }));
+
+      const response = await fetchQuotationChangeDetail({
+        quotationId,
+        fromDate: toApiDate(from),
+        toDate: toApiDate(to),
+      });
+      if (generation !== generationRef.current) return;
+
+      const ok = response?.status === "SUCCESS" && response.payload;
+      const empty = response?.status === "NOT_FOUND";
+      setDetails((prev) => ({
+        ...prev,
+        [quotationId]: ok
+          ? { status: "done", rows: response.payload.changes || [] }
+          : empty
+            ? { status: "done", rows: [] }
+            : {
+                status: "error",
+                rows: [],
+                error: response?.message || "Could not load plants.",
+              },
+      }));
+    },
+    [from, to],
+  );
+
+  /* Fetch rows for every open card that has none yet — on first open, and
+     again for open cards after a pull-to-refresh clears the cache. */
+  useEffect(() => {
+    Object.keys(expanded).forEach((id) => {
+      if (expanded[id] && !details[id]) loadDetail(Number(id));
+    });
+  }, [expanded, details, loadDetail]);
+
+  const toggle = useCallback((quotationId) => {
+    setExpanded((prev) => ({ ...prev, [quotationId]: !prev[quotationId] }));
+  }, []);
 
   const load = useCallback(async () => {
     if (!ready) {
@@ -139,10 +206,20 @@ export default function CancelledChanges({ unitId, userId, search, onCount }) {
     load();
   }, [load]);
 
+  const term = String(search || "")
+    .trim()
+    .toLowerCase();
+
+  const rowMatches = useCallback(
+    (row) =>
+      (row.plantName || "").toLowerCase().includes(term) ||
+      (row.reason || "").toLowerCase().includes(term),
+    [term],
+  );
+
+  /* A group whose header matched shows all its rows; otherwise `rowFilter`
+     narrows its loaded rows to the plants / reasons that matched. */
   const visible = useMemo(() => {
-    const term = String(search || "")
-      .trim()
-      .toLowerCase();
     if (!term) return groups;
 
     return groups
@@ -153,15 +230,15 @@ export default function CancelledChanges({ unitId, userId, search, onCount }) {
           (group.customerName || "").toLowerCase().includes(term);
         if (headerHit) return group;
 
-        const changes = (group.changes || []).filter(
-          (row) =>
-            (row.plantName || "").toLowerCase().includes(term) ||
-            (row.reason || "").toLowerCase().includes(term),
+        const plantHit = (group.plantNames || []).some((name) =>
+          String(name).toLowerCase().includes(term),
         );
-        return changes.length ? { ...group, changes } : null;
+        const loaded = details[group.quotationId]?.rows || [];
+        const reasonHit = loaded.some(rowMatches);
+        return plantHit || reasonHit ? { ...group, rowFilter: true } : null;
       })
       .filter(Boolean);
-  }, [groups, search]);
+  }, [groups, term, details, rowMatches]);
 
   useEffect(() => {
     onCount?.(visible.length);
@@ -307,54 +384,114 @@ export default function CancelledChanges({ unitId, userId, search, onCount }) {
     </View>
   );
 
+  const groupBody = (item) => {
+    const detail = details[item.quotationId];
+
+    if (!detail || detail.status === "loading") {
+      return (
+        <View style={[s.table, s.bodyState]}>
+          <ActivityIndicator size="small" color={NAVY} />
+          <Text style={s.bodyStateText}>Loading plants…</Text>
+        </View>
+      );
+    }
+
+    if (detail.status === "error") {
+      return (
+        <View style={[s.table, s.bodyState]}>
+          <Ionicons name="cloud-offline-outline" size={16} color={RED} />
+          <Text style={[s.bodyStateText, { flex: 1 }]}>{detail.error}</Text>
+          <Pressable
+            hitSlop={8}
+            onPress={() => loadDetail(item.quotationId)}
+            style={s.retryBtn}
+          >
+            <Text style={s.retryText}>RETRY</Text>
+          </Pressable>
+        </View>
+      );
+    }
+
+    const rows = item.rowFilter
+      ? detail.rows.filter(rowMatches)
+      : detail.rows;
+
+    if (!rows.length) {
+      return (
+        <View style={[s.table, s.bodyState]}>
+          <Text style={s.bodyStateText}>No plant changes in this range.</Text>
+        </View>
+      );
+    }
+
+    return (
+      <View style={s.table}>
+        {tableMode ? tableHead : null}
+        {rows.map((row, i) =>
+          tableMode
+            ? tableRow(row, i, i === rows.length - 1)
+            : stackedRow(row, i, i === rows.length - 1),
+        )}
+      </View>
+    );
+  };
+
   const renderGroup = ({ item }) => {
-    const rows = item.changes || [];
-    const updated = rows.filter((r) => !isRemoval(r)).length;
-    const removed = rows.length - updated;
+    const updated = item.updatedCount ?? 0;
+    const removed = item.removedCount ?? 0;
+    const open = !!expanded[item.quotationId];
 
     return (
       <View style={s.group}>
-        <View style={s.groupHead}>
-          <View style={{ flex: 1, gap: 2, minWidth: 0 }}>
-            <Text numberOfLines={1} style={s.customer}>
-              {item.customerName || "Unnamed customer"}
-            </Text>
-            <Text numberOfLines={1} style={s.meta}>
-              QTN-{item.quotationId}
-              {item.mobileNo ? ` · ${item.mobileNo}` : ""}
-              {item.assignedUserName ? ` · ${item.assignedUserName}` : ""}
+        <Pressable
+          onPress={() => toggle(item.quotationId)}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: open }}
+          android_ripple={{ color: NAVY_TINT }}
+        >
+          <View style={s.groupHead}>
+            <View style={{ flex: 1, gap: 2, minWidth: 0 }}>
+              <Text numberOfLines={1} style={s.customer}>
+                {item.customerName || "Unnamed customer"}
+              </Text>
+              <Text numberOfLines={1} style={s.meta}>
+                QTN-{item.quotationId}
+                {item.mobileNo ? ` · ${item.mobileNo}` : ""}
+                {item.assignedUserName ? ` · ${item.assignedUserName}` : ""}
+              </Text>
+            </View>
+            {levelPill(item.level)}
+            <Ionicons
+              name={open ? "chevron-up" : "chevron-down"}
+              size={18}
+              color={MUTED}
+            />
+          </View>
+
+          <View style={s.countRow}>
+            {updated > 0 ? (
+              <View style={[s.badge, s.badgeUpdated]}>
+                <Ionicons name="swap-vertical" size={11} color={AMBER} />
+                <Text style={[s.badgeText, { color: AMBER }]}>
+                  {updated} QTY UPDATED
+                </Text>
+              </View>
+            ) : null}
+            {removed > 0 ? (
+              <View style={[s.badge, s.badgeRemoved]}>
+                <Ionicons name="trash-outline" size={11} color={RED} />
+                <Text style={[s.badgeText, { color: RED }]}>
+                  {removed} DELETED
+                </Text>
+              </View>
+            ) : null}
+            <Text style={s.tapHint}>
+              {open ? "Hide plants" : "Tap to view plants"}
             </Text>
           </View>
-          {levelPill(item.level)}
-        </View>
+        </Pressable>
 
-        <View style={s.countRow}>
-          {updated > 0 ? (
-            <View style={[s.badge, s.badgeUpdated]}>
-              <Ionicons name="swap-vertical" size={11} color={AMBER} />
-              <Text style={[s.badgeText, { color: AMBER }]}>
-                {updated} QTY UPDATED
-              </Text>
-            </View>
-          ) : null}
-          {removed > 0 ? (
-            <View style={[s.badge, s.badgeRemoved]}>
-              <Ionicons name="trash-outline" size={11} color={RED} />
-              <Text style={[s.badgeText, { color: RED }]}>
-                {removed} DELETED
-              </Text>
-            </View>
-          ) : null}
-        </View>
-
-        <View style={s.table}>
-          {tableMode ? tableHead : null}
-          {rows.map((row, i) =>
-            tableMode
-              ? tableRow(row, i, i === rows.length - 1)
-              : stackedRow(row, i, i === rows.length - 1),
-          )}
-        </View>
+        {open ? groupBody(item) : null}
       </View>
     );
   };
@@ -450,7 +587,7 @@ export default function CancelledChanges({ unitId, userId, search, onCount }) {
           data={visible}
           keyExtractor={(item) => String(item.quotationId)}
           renderItem={renderGroup}
-          extraData={tableMode}
+          extraData={{ tableMode, expanded, details }}
           ListEmptyComponent={empty}
           contentContainerStyle={s.list}
           showsVerticalScrollIndicator={false}
@@ -459,6 +596,9 @@ export default function CancelledChanges({ unitId, userId, search, onCount }) {
               refreshing={refreshing}
               onRefresh={() => {
                 setRefreshing(true);
+                /* Drop cached rows; open cards refetch theirs. */
+                generationRef.current += 1;
+                setDetails({});
                 load();
               }}
               tintColor={NAVY}
@@ -585,6 +725,35 @@ const s = StyleSheet.create({
   badgeRemoved: { backgroundColor: RED_TINT },
   badgeUpdated: { backgroundColor: AMBER_TINT },
   badgeText: { fontSize: 9.5, fontWeight: "800", letterSpacing: 0.4 },
+  tapHint: {
+    marginLeft: "auto",
+    alignSelf: "center",
+    fontSize: 11,
+    fontWeight: "700",
+    color: NAVY,
+  },
+
+  /* lazy body states */
+  bodyState: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  bodyStateText: { fontSize: 12.5, color: MUTED },
+  retryBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: NAVY,
+  },
+  retryText: {
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+    color: "#FFFFFF",
+  },
 
   /* table */
   table: { borderTopWidth: 1, borderTopColor: BORDER },
