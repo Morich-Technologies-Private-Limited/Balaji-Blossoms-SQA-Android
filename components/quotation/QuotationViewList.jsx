@@ -782,8 +782,9 @@ function QuotationViewList(
 
   /* ── expand panel ────────────────────────────────────────────────────── */
   const renderPanel = (item) => {
-    const plants = item.plantList?.length || 0;
-    const special = item.specialPlantList?.length || 0;
+    /* Lite list rows carry counts instead of the plant lines. */
+    const plants = item.plantCount ?? item.plantList?.length ?? 0;
+    const special = item.specialPlantCount ?? item.specialPlantList?.length ?? 0;
     const shownKeys = columns.map((c) => c.key);
 
     const stats = [
@@ -869,7 +870,8 @@ function QuotationViewList(
   const renderCard = ({ item }) => {
     const open = !!expanded[item.quotationId];
     const plants =
-      (item.plantList?.length || 0) + (item.specialPlantList?.length || 0);
+      (item.plantCount ?? item.plantList?.length ?? 0) +
+      (item.specialPlantCount ?? item.specialPlantList?.length ?? 0);
 
     return (
       <Pressable

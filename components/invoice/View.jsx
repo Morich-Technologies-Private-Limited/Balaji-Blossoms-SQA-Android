@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -10,6 +10,7 @@ import {
 } from "react-native";
 
 import { downloadInvoicePdf } from "../../api/downloadPdfApis";
+import { fetchInvoiceById } from "../../api/fetchInvoice.js";
 import PdfShareSheet from "../../utility/PdfShareSheet";
 import { printPdf } from "../../utility/printPdf.js";
 import makeStyles from "./View.styles.js";
@@ -77,8 +78,28 @@ const txnOf = (txn) =>
  * and Share (hands the same PDF bytes to the shared PdfShareSheet). Both pull
  * from GET /pdf?invoiceId=.
  */
-export default function View({ invoice, onClose, onError }) {
+export default function View({ invoice: invoiceProp, onClose, onError }) {
   const { width } = useWindowDimensions();
+
+  /* Lists send invoices without their item lines (itemList is null) to stay
+     fast; the full invoice is fetched here, once, when it is opened. */
+  const [loaded, setLoaded] = useState(null);
+  const [loadingFull, setLoadingFull] = useState(false);
+  useEffect(() => {
+    const invoiceId = invoiceProp?.invoiceId;
+    if (invoiceId == null || Array.isArray(invoiceProp?.itemList)) return;
+    let alive = true;
+    setLoadingFull(true);
+    fetchInvoiceById(invoiceId).then((res) => {
+      if (!alive) return;
+      if (res?.status === "SUCCESS" && res.payload) setLoaded(res.payload);
+      setLoadingFull(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [invoiceProp?.invoiceId, invoiceProp?.itemList]);
+  const invoice = loaded ?? invoiceProp;
   /* Below this the 8-column items table no longer fits (e.g. phones in
      landscape), so each item becomes a card. Matches the Edit screen. */
   const isCardMode = width < 760;
@@ -424,7 +445,11 @@ export default function View({ invoice, onClose, onError }) {
           </RNView>
           <RNView style={styles.sectionBody}>
             {itemsHead}
-            {items.length > 0 ? (
+            {loadingFull && items.length === 0 ? (
+              <RNView style={{ paddingVertical: 16, alignItems: "center" }}>
+                <ActivityIndicator color={C.NAVY} />
+              </RNView>
+            ) : items.length > 0 ? (
               items.map(renderItemRow)
             ) : (
               <Text style={styles.emptyLine}>No items on this invoice.</Text>

@@ -14,7 +14,9 @@ const INVOICED_WITHIN_HOURS = 48;
 export const fetchQuotationsByUser = async (userId) => {
   try {
     const response = await axiosClient.get(QUOTATION_BY_USER_URL, {
-      params: { userId, invoicedWithinHours: INVOICED_WITHIN_HOURS },
+      /* lite: list rows without plant lines / history (counts only). The
+         editor fetches the full quotation by id when one is opened. */
+      params: { userId, invoicedWithinHours: INVOICED_WITHIN_HOURS, lite: true },
     });
 
     return response.data;
@@ -26,7 +28,7 @@ export const fetchQuotationsByUser = async (userId) => {
 export const fetchQuotationsByUnit = async (unitId) => {
   try {
     const response = await axiosClient.get(QUOTATION_BY_UNIT_URL, {
-      params: { unitId, invoicedWithinHours: INVOICED_WITHIN_HOURS },
+      params: { unitId, invoicedWithinHours: INVOICED_WITHIN_HOURS, lite: true },
     });
 
     return response.data;

@@ -579,6 +579,13 @@ const auditFromRecord = (record, index) => ({
 
 /* ── row ───────────────────────────────────────────────────────────── */
 
+/* Card layout (narrow screens): memoized like TableRow, so adding or editing
+   one plant re-renders only that card instead of all 50-60 of them. `render`
+   is EditInner's stable renderCard callback. */
+const CardRow = memo(function CardRow({ item, index, render }) {
+  return render(item, index);
+});
+
 const TableRow = memo(function TableRow({
   item,
   index,
@@ -2707,6 +2714,7 @@ function EditInner({ quotation, onClose, onSaved }) {
   }, []);
 
   /* ── plant search ────────────────────────────────────────────────── */
+  const searchSeqRef = useRef(0);
   useEffect(() => {
     if (searchTimer.current) clearTimeout(searchTimer.current);
 
@@ -2719,7 +2727,11 @@ function EditInner({ quotation, onClose, onSaved }) {
 
     setSearching(true);
     searchTimer.current = setTimeout(async () => {
+      /* Only the newest search may write its results: a slower, older
+         response must not overwrite what the user is now typing. */
+      const seq = ++searchSeqRef.current;
       const response = await searchPlants(key, 20);
+      if (seq !== searchSeqRef.current) return;
       setResults(response?.status === "SUCCESS" ? response.payload || [] : []);
       setSearching(false);
     }, SEARCH_DEBOUNCE);
@@ -3175,17 +3187,29 @@ function EditInner({ quotation, onClose, onSaved }) {
          hunting for it. Scroll to the row itself instead, then put the caret
          straight into its quantity box: adding a plant is always followed by
          typing how many, so there is no reason to make the operator tap for
-         it. The delay gives the new row a chance to lay out and register
-         both its refs first. */
-      setTimeout(() => {
+         it.
+
+         A fixed delay is not enough on a long quotation: with 50-60 rows the
+         new row can take longer than that to mount, and the scroll then
+         misses it. So wait, frame by frame, until the row (and for a new row
+         its quantity box) has actually registered — then scroll at once. */
+      const key = existing ? existing.key : newKey;
+      let frames = 0;
+      const whenReady = () => {
+        const rowReady = rowRefs.current.has(key);
+        const qtyReady = existing || qtyInputRefs.current.has(newKey);
+        if ((!rowReady || !qtyReady) && frames++ < 60) {
+          requestAnimationFrame(whenReady);
+          return;
+        }
         /* A tap that only bumped an existing row is scrolled to as well —
            otherwise nothing visibly happens — but its box is left alone:
            the quantity was just incremented, and focusing selects the lot
            ready to be typed over. */
-        const key = existing ? existing.key : newKey;
         scrollRowIntoView(key, { padding: 16 });
         if (!existing) qtyInputRefs.current.get(newKey)?.focus();
-      }, 60);
+      };
+      requestAnimationFrame(whenReady);
     },
     [
       quotation?.unitId,
@@ -5027,12 +5051,17 @@ function EditInner({ quotation, onClose, onSaved }) {
     [columns, styles, registerRow],
   );
 
+  /* Built only when the specials change, so editing a normal line does not
+     hand every special row a brand-new object (which would defeat the row
+     memo and re-render them all). */
+  const specialRows = useMemo(
+    () => sinkChecked(specials).map((sp) => ({ ...sp, isSpecial: true })),
+    [specials],
+  );
+
   const tableRows = useMemo(
-    () => [
-      ...sinkChecked(lines),
-      ...sinkChecked(specials).map((sp) => ({ ...sp, isSpecial: true })),
-    ],
-    [lines, specials],
+    () => [...sinkChecked(lines), ...specialRows],
+    [lines, specialRows],
   );
 
   /* ── card row (narrow screens) ───────────────────────────────────── */
@@ -5779,7 +5808,14 @@ function EditInner({ quotation, onClose, onSaved }) {
                   </View>
                 ) : isCardMode ? (
                   <View style={styles.cardList}>
-                    {tableRows.map((item, index) => renderCard(item, index))}
+                    {tableRows.map((item, index) => (
+                      <CardRow
+                        key={item.key}
+                        item={item}
+                        index={index}
+                        render={renderCard}
+                      />
+                    ))}
                   </View>
                 ) : (
                   <View style={styles.tableShell}>
@@ -6758,7 +6794,11 @@ function EditInner({ quotation, onClose, onSaved }) {
  * in with.
  */
 export default function Edit({ quotation, onClose, onSaved }) {
-  const isStale = quotation?.fetchDate != null && !isToday(quotation.fetchDate);
+  /* A lite list row has no plant lines, so it always needs the full copy. */
+  const isStale =
+    quotation?.lite === true ||
+    quotation?.plantList == null ||
+    (quotation?.fetchDate != null && !isToday(quotation.fetchDate));
 
   /* `data` is the quotation EditInner actually renders. It starts as the prop,
      and is replaced by the fresh copy once a stale refetch resolves. */
