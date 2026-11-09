@@ -22,6 +22,7 @@ import { getQuotation } from "../../api/fetchQuotation";
 import { getApplicableOffer } from "../../api/getOffer";
 import { getQuotationAccess } from "../../api/getQuotationAccess";
 import { getQuotationEditLevels } from "../../api/getQuotationEditLevels";
+import { getReasonPresets, REASON_TYPES } from "../../api/reasonApi";
 import { getSpecialPlantByBarcodeId } from "../../api/getSpecialPlant";
 import { searchPlants } from "../../api/plantApi";
 import {
@@ -46,6 +47,7 @@ import {
   formatDate as formatLoadingDate,
   toApiDate,
 } from "../../utility/dates";
+import useReasonPresets from "../../hooks/useReasonPresets";
 import PdfShareSheet from "../../utility/PdfShareSheet";
 import { getCurrentRole, getCurrentUser } from "../../utility/secureStorage";
 import DatePickerSheet from "../common/DatePickerSheet";
@@ -55,8 +57,8 @@ const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
   DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Bill Done", tint: "#16A34A" },
-  /* Set when a deletion request is approved; shown as Cancelled. */
-  DELETED: { label: "Cancelled", tint: "#DC2626" },
+  /* Set when a deletion request is approved; shown as Deleted. */
+  DELETED: { label: "Deleted", tint: "#DC2626" },
 };
 
 /** Which levels a role may edit when /quotation/editLevel can't be reached —
@@ -96,15 +98,6 @@ const transactionModeLabel = (value) =>
   TRANSACTION_MODES.find((option) => option.value === value)?.label ||
   value ||
   "";
-
-/* Plant modification reasons (quantity change / plant removal), offered as
-   one-tap fills. The text box stays editable, so a supervisor or loading
-   manager can still type their own reason. */
-const REASON_PRESETS = [
-  "Lack of Space",
-  "Plant Damage",
-  "Plant Quantity not Available",
-];
 
 /* Breakpoints measured on the table container.
    Columns are dropped in reverse order of importance as space runs out, and
@@ -1506,9 +1499,11 @@ function SpecialPlantModal({ styles, onAdd, onClose }) {
    shows exactly one change (the field that just moved), takes one reason, and
    hands it back so it can be stored on the line. Cancel reverts the field.
 
-   `request` is { plantName, field, from, to, existing }. */
+   `request` is { plantName, field, from, to, existing }.
+   Presets come from the backend (/info/reasons), cached for the day. */
 function FieldReasonModal({ styles, request, onSubmit, onCancel }) {
   const C = styles.colors;
+  const presets = useReasonPresets(REASON_TYPES.QUANTITY_UPDATE);
   const meta = FIELD_META[request?.field] || {
     label: "Field",
     icon: "create-outline",
@@ -1624,7 +1619,7 @@ function FieldReasonModal({ styles, request, onSubmit, onCancel }) {
                 </View>
 
                 <View style={styles.reasonChipRow}>
-                  {REASON_PRESETS.map((preset) => (
+                  {presets.map((preset) => (
                     <Pressable
                       key={preset}
                       style={({ hovered, pressed }) => [
@@ -1685,10 +1680,14 @@ function DeleteReasonModal({
      for; deleting the whole quotation passes its own wording. */
   confirmLabel = "DELETE & SAVE",
   busyLabel = "SAVING…",
+  /* Which backend preset list to offer: a line removal by default, the
+     whole-quotation delete request passes CANCELLATION. */
+  reasonType = REASON_TYPES.ITEM_DELETE,
   onSubmit,
   onClose,
 }) {
   const C = styles.colors;
+  const presets = useReasonPresets(reasonType);
   const [reason, setReason] = useState("");
   const [touched, setTouched] = useState(false);
 
@@ -1802,7 +1801,7 @@ function DeleteReasonModal({
                 </View>
 
                 <View style={styles.reasonChipRow}>
-                  {REASON_PRESETS.map((preset) => (
+                  {presets.map((preset) => (
                     <Pressable
                       key={preset}
                       style={({ hovered, pressed }) => [
@@ -6681,6 +6680,7 @@ function EditInner({ quotation, onClose, onSaved }) {
           error={error}
           confirmLabel="SEND REQUEST"
           busyLabel="SENDING…"
+          reasonType={REASON_TYPES.CANCELLATION}
           onSubmit={submitQuotationDelete}
           onClose={() => setConfirmDeleteQuotation(false)}
         />
@@ -6764,6 +6764,12 @@ export default function Edit({ quotation, onClose, onSaved }) {
      and is replaced by the fresh copy once a stale refetch resolves. */
   const [data, setData] = useState(quotation);
   const [refreshing, setRefreshing] = useState(isStale);
+
+  /* Warm the day's reason presets so the reason modals open with their chips
+     already filled. A no-op once today's cache exists. */
+  useEffect(() => {
+    getReasonPresets();
+  }, []);
 
   useEffect(() => {
     let alive = true;

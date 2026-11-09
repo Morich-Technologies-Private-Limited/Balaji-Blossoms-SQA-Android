@@ -7,6 +7,7 @@ export const CREATE_QUOTATION_URL = `${API_BASE_URL}/quotation/create`;
 export const QUOTATION_BY_USER_URL = `${API_BASE_URL}/quotation/getByUser`;
 export const QUOTATION_BY_UNIT_URL = `${API_BASE_URL}/quotation/getByUnit`;
 export const QUOTATION_FIND_URL = `${API_BASE_URL}/quotation/find`;
+export const QUOTATION_CHANGES_URL = `${API_BASE_URL}/quotation/changes`;
 export const UPDATE_QUOTATION_PLANTS_URL = `${API_BASE_URL}/quotation/updatePlants`;
 export const QUOTATION_PDF_URL = `${API_BASE_URL}/quotation/pdf`;
 export const COLLECTION_SHEET_PDF_URL = `${API_BASE_URL}/quotation/download/collection-sheet`;
@@ -28,6 +29,7 @@ export const PLANT_INVENTORY_CONFIG_URL = `${API_BASE_URL}/info/plant/inventory/
 export const FIND_ALL_STATES_URL = `${API_BASE_URL}/info/findAllStates`;
 export const FIND_CITIES_BY_STATE_URL = `${API_BASE_URL}/info/findCitiesByStates`;
 export const DELIVERY_PERSONS_URL = `${API_BASE_URL}/info/deliverPerson/findAll`;
+export const REASON_LIST_URL = `${API_BASE_URL}/info/reasons`;
 
 export const CREATE_CUSTOMER_URL = `${API_BASE_URL}/customer/create`;
 export const CUSTOMER_SEARCH_URL = `${API_BASE_URL}/customer/search`;

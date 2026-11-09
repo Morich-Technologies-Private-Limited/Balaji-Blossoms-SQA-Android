@@ -67,7 +67,9 @@ const TENANTS = {
 };
 
 /* Written exactly as process.env.EXPO_PUBLIC_TENANT so Expo inlines it into the bundle. */
-const requested = String(process.env.EXPO_PUBLIC_TENANT || "balaji").trim().toLowerCase();
+const requested = String(process.env.EXPO_PUBLIC_TENANT || "balaji")
+  .trim()
+  .toLowerCase();
 const id = TENANTS[requested] ? requested : "balaji";
 
 if (!TENANTS[requested]) {

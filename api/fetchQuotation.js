@@ -1,6 +1,7 @@
 import {
   QUOTATION_BY_UNIT_URL,
   QUOTATION_BY_USER_URL,
+  QUOTATION_CHANGES_URL,
   QUOTATION_FIND_URL,
 } from "../constants/apiConstants";
 import axiosClient from "./axiosClient";
@@ -28,6 +29,33 @@ export const fetchQuotationsByUnit = async (unitId) => {
       params: { unitId, invoicedWithinHours: INVOICED_WITHIN_HOURS },
     });
 
+    return response.data;
+  } catch (error) {
+    return handleApiError(error);
+  }
+};
+
+/**
+ * GET /quotation/changes — quotations whose plant quantities were updated or
+ * plants deleted between fromDate and toDate (yyyy-MM-dd, both inclusive),
+ * with only those plant rows. Pass unitId for the unit view, else userId.
+ *
+ * payload: [{ quotationId, customerName, mobileNo, level, assignedUserName,
+ *   lastChangeDate, changes: [{ date, updatedBy, changeType, plantName, price,
+ *   packingName, previousQuantity, updatedQuantity, reason }] }]
+ */
+export const fetchQuotationChanges = async ({
+  unitId,
+  userId,
+  fromDate,
+  toDate,
+}) => {
+  try {
+    const params = { fromDate, toDate };
+    if (unitId != null) params.unitId = unitId;
+    else params.userId = userId;
+
+    const response = await axiosClient.get(QUOTATION_CHANGES_URL, { params });
     return response.data;
   } catch (error) {
     return handleApiError(error);

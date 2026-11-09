@@ -34,24 +34,30 @@ import {
 import PdfShareSheet from "../../utility/PdfShareSheet";
 import FullScreenModal from "../common/FullScreenModal";
 import { getCurrentUser } from "../../utility/secureStorage";
+import CancelledChanges from "./CancelledChanges";
 import CreateQuotationModal from "./CreateQuotationModal";
 import Edit from "./Edit";
 import makeStyles from "./QuotationViewList.styles";
 
+/* Not a quotation level: the "Cancelled" tab lists plant quantity updates and
+   plant deletions (see CancelledChanges), not quotations filtered by level. */
+const CANCELLED_TAB = "CANCELLED";
+
 const LEVELS = [
-  { key: "DRAFT", label: "Draft" },
   { key: "DELIVERY_SHADE", label: "Loading shade" },
+  { key: "DRAFT", label: "Draft" },
   { key: "INVOICE_GENERATED", label: "Bill Done" },
   /* A quotation whose deletion request was approved. */
-  { key: "DELETED", label: "Cancelled" },
+  { key: "DELETED", label: "Deleted" },
+  { key: CANCELLED_TAB, label: "Cancelled" },
 ];
 
 const LEVEL_META = {
   DRAFT: { label: "Draft", tint: "#E8622C" },
   DELIVERY_SHADE: { label: "Loading shade", tint: "#0F4776" },
   INVOICE_GENERATED: { label: "Bill Done", tint: "#5B8E2E" },
-  /* Set when a deletion request is approved; listed under the Cancelled tab. */
-  DELETED: { label: "Cancelled", tint: "#DC2626" },
+  /* Set when a deletion request is approved; listed under the Deleted tab. */
+  DELETED: { label: "Deleted", tint: "#DC2626" },
 };
 
 /* Breakpoints are measured on the table container, not the window, so the
@@ -295,6 +301,9 @@ function QuotationViewList(
   const [error, setError] = useState(null);
   const [search, setSearch] = useState("");
   const [level, setLevel] = useState("DRAFT");
+  /* Quotations on screen in the Cancelled tab, reported by CancelledChanges. */
+  const [cancelledCount, setCancelledCount] = useState(0);
+  const isCancelledTab = level === CANCELLED_TAB;
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [expanded, setExpanded] = useState({});
@@ -1055,7 +1064,9 @@ function QuotationViewList(
               );
             })}
             <Text style={styles.resultCount}>
-              {visible.length} of {quotations.length} shown
+              {isCancelledTab
+                ? `${cancelledCount} with changes`
+                : `${visible.length} of ${quotations.length} shown`}
             </Text>
           </View>
         </View>
@@ -1068,7 +1079,14 @@ function QuotationViewList(
             setAvail((prev) => (Math.abs(prev - w) > 2 ? w : prev));
           }}
         >
-          {loading ? (
+          {isCancelledTab ? (
+            <CancelledChanges
+              unitId={mode === "unit" ? resolvedUnitId : null}
+              userId={mode === "unit" ? null : resolvedUserId}
+              search={search}
+              onCount={setCancelledCount}
+            />
+          ) : loading ? (
             <View style={styles.loadingWrap}>
               <ActivityIndicator size="large" color={C.NAVY} />
               <Text style={styles.loadingText}>Loading quotations…</Text>

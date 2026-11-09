@@ -68,6 +68,23 @@ const removeItem = async (key) => {
   }
 };
 
+/* ---------------- app cache ---------------- */
+
+/**
+ * Small non-session values the app caches between launches (e.g. the reason
+ * presets). Kept separate from SESSION_KEYS so a logout does not wipe them,
+ * and every failure reads as a cache miss rather than throwing.
+ */
+export const getCacheItem = async (key) => getItem(key);
+
+export const setCacheItem = async (key, value) => {
+  try {
+    await setItem(key, value);
+  } catch {
+    // A cache that cannot be written just means the next launch refetches.
+  }
+};
+
 /* ---------------- expiry ---------------- */
 
 /**
